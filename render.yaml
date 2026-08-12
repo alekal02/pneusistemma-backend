@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: pneusistemma-backend
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: "0.0.0.0"
+      # Persistência: monte um disco em /var/data no painel do Render
+      # e use DB_PATH=/var/data/pneus.db
+      - key: DB_PATH
+        value: /var/data/pneus.db
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: WUZAPI_BASE_URL
+        sync: false
+      - key: WUZAPI_TOKEN
+        sync: false
+      - key: WUZAPI_ADMIN_TOKEN
+        sync: false
+      - key: WUZAPI_WEBHOOK_PUBLIC_URL
+        sync: false
+      - key: WUZAPI_WEBHOOK_SECRET
+        sync: false
+      - key: GERENTE_COMPRAS_WHATSAPP
+        sync: false
+      - key: ALLOW_VERCEL_PREVIEWS
+        value: "true"
+      - key: SULCO_MINIMO_MM
+        value: "3.0"
+      - key: SULCO_ALERTA_MM
+        value: "8.0"
