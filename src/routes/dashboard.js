@@ -58,6 +58,7 @@ router.get('/resumo', async (req, res, next) => {
 
       const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm, {
         papel: p.posicao ? papelPosicao(p.posicao) : null,
+        posicao: p.posicao || null,
       });
       if (diag.codigo !== 'sem_dado' && diag.codigo !== 'ok') {
         diagnosticos[diag.codigo] = (diagnosticos[diag.codigo] || 0) + 1;

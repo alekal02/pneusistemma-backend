@@ -3,7 +3,7 @@
  * e sugestão de ação (OK / RODÍZIO / RECAP / TROCA).
  */
 
-import { labelPosicao, posicaoEspelhada } from './pneus-layouts.js';
+import { labelPosicao, posicaoEspelhada, ladoPosicao } from './pneus-layouts.js';
 
 export const DIAGNOSTICOS = {
   ok: {
@@ -93,21 +93,35 @@ export function mediaSulco(row) {
 }
 
 /**
- * Interno mais gasto que o externo (sulco interno menor), com margem.
- * Regra das fotos: parte interna sofre mais desgaste → preferir rodízio lado oposto.
+ * Consumo progressivo esperado: ombro externo mais gasto que o interno
+ * (sulco_externo < sulco_interno).
+ * - Lado esquerdo: desgaste da esquerda → direita
+ * - Lado direito: desgaste da direita → esquerda
+ * Em ambos, o ombro externo (fora do veículo) gasta primeiro.
  */
-export function internoMaisGastoQueExterno(row, toleranciaMm = 1.0) {
+export function desgasteProgressivoEsperado(row, toleranciaMm = 1.0) {
   const ext = row?.sulco_externo;
   const int = row?.sulco_interno;
   if (ext == null || int == null || !Number.isFinite(ext) || !Number.isFinite(int)) return false;
-  return (ext - int) >= toleranciaMm;
+  return (int - ext) >= toleranciaMm;
+}
+
+/** @deprecated use desgasteProgressivoEsperado — mantido por compatibilidade */
+export function internoMaisGastoQueExterno(row, toleranciaMm = 1.0) {
+  return desgasteProgressivoEsperado(row, toleranciaMm);
+}
+
+function textoDirecaoConsumo(posicao) {
+  const lado = ladoPosicao(posicao);
+  if (lado === 'direito') return 'lado direito: da direita para a esquerda (externo → interno)';
+  if (lado === 'esquerdo') return 'lado esquerdo: da esquerda para a direita (externo → interno)';
+  return 'ombro externo → interno';
 }
 
 function montarSugestaoEspelho({ posicaoAtual, espelho, ocupante, pontosAtual }) {
   const origemLabel = labelPosicao(posicaoAtual) || posicaoAtual;
   const destLabel = labelPosicao(espelho) || espelho;
   const desvio = desvioEntrePontos(pontosAtual);
-  const internoGasto = internoMaisGastoQueExterno(pontosAtual);
 
   if (ocupante) {
     const fogo = ocupante.numero_fogo ? `Fogo ${ocupante.numero_fogo}` : `Pneu #${ocupante.id}`;
@@ -133,9 +147,7 @@ function montarSugestaoEspelho({ posicaoAtual, espelho, ocupante, pontosAtual })
       }),
       desvio_mm: desvio,
       label: `${fogo} (${destLabel})`,
-      motivo: internoGasto
-        ? `Troque de lado no eixo: ${origemLabel} → ${destLabel} com ${fogo} (interno mais gasto que o externo; desvio ${desvio} mm).`
-        : `Troque de posição com ${fogo} em ${destLabel} (lado oposto do eixo).`,
+      motivo: `Troque de posição com ${fogo} em ${destLabel} (lado oposto do eixo).`,
     };
   }
 
@@ -151,9 +163,7 @@ function montarSugestaoEspelho({ posicaoAtual, espelho, ocupante, pontosAtual })
     menor_sulco: null,
     desvio_mm: desvio,
     label: `${destLabel} (vazio)`,
-    motivo: internoGasto
-      ? `Mova este pneu de ${origemLabel} para ${destLabel} (vazio) — interno mais gasto que o externo; desvio ${desvio} mm.`
-      : `Mova este pneu de ${origemLabel} para ${destLabel} (posição vazia no lado oposto).`,
+    motivo: `Mova este pneu de ${origemLabel} para ${destLabel} (posição vazia no lado oposto).`,
   };
 }
 
@@ -258,10 +268,10 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, 
 
 /**
  * Classifica o padrão de desgaste com base nos pontos disponíveis.
- * Prioriza Ext ↔ Int (cunha) e depois centro vs bordas (calibragem).
+ * Consumo esperado: externo mais gasto que interno (conforme o lado do caminhão).
  * @param {object} row
  * @param {number} toleranciaMm
- * @param {{ papel?: string|null }} [opcoes] papel da posição: direcional | tracao | estepe
+ * @param {{ papel?: string|null, posicao?: string|null }} [opcoes]
  */
 export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
   const pontos = valoresValidos(row);
@@ -276,21 +286,24 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
   const ext = row.sulco_externo;
   const int = row.sulco_interno;
   const cent = row.sulco_central;
+  const posicao = opcoes.posicao || null;
+  const direcao = textoDirecaoConsumo(posicao);
 
-  // Cunha Ext ↔ Int
+  // Ombros Ext ↔ Int
   if (ext != null && int != null && Number.isFinite(ext) && Number.isFinite(int)
     && Math.abs(ext - int) >= toleranciaMm) {
-    // Interno mais gasto = desgaste progressivo Ext→Int (consumo esperado, sem rodízio)
-    if (int < ext) {
+    // Externo mais gasto = consumo progressivo esperado (esq→dir ou dir→esq conforme o lado)
+    if (desgasteProgressivoEsperado(row, toleranciaMm)) {
+      const dif = Math.round((int - ext) * 10) / 10;
       return {
         ...DIAGNOSTICOS.desgaste_progressivo,
-        descricao: `Interno mais gasto que o externo (diferença ${Math.round((ext - int) * 10) / 10} mm). Parte interna sofre mais desgaste — consumo esperado enquanto sulco ≥ crítico. Acompanhar; não indica rodízio.`,
+        descricao: `Externo mais gasto que o interno (diferença ${dif} mm). Consumo esperado — ${direcao}. Acompanhar enquanto sulco ≥ crítico; não indica rodízio.`,
       };
     }
-    // Externo mais gasto — alinhamento/balanceamento fica para o futuro
+    // Interno mais gasto que o externo — fora do padrão de consumo do lado
     return {
       ...DIAGNOSTICOS.irregular,
-      descricao: 'Externo mais gasto que o interno — perfil irregular. Acompanhar nas próximas medições.',
+      descricao: `Interno mais gasto que o externo — fora do padrão esperado (${direcao}). Acompanhar nas próximas medições.`,
     };
   }
 
@@ -305,7 +318,6 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
     }
   }
 
-  // Fallback com sequência filtrada (3+ pontos sem Ext/Int claros)
   const seq = pontosSulco(row).filter((v) => v != null && Number.isFinite(v));
   const primeiro = seq[0];
   const ultimo = seq[seq.length - 1];
@@ -376,14 +388,15 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
   }
 
   const desvio = pontos ? desvioEntrePontos(pontos) : null;
-  const cunhaExtParaInt = pontos
-    ? internoMaisGastoQueExterno(pontos, tolerancia)
+  const consumoEsperado = pontos
+    ? desgasteProgressivoEsperado(pontos, tolerancia)
     : false;
   const desvioAlto = desvio != null && desvio > rodizioDesvio;
 
-  // Foto: desgaste Ext→Int com desvio alto, mas sulco ≥ crítico → consumo esperado (sem rodízio)
-  if (desvioAlto && cunhaExtParaInt) {
+  // Consumo Ext→Int esperado (conforme lado) + sulco ≥ crítico → sem rodízio
+  if (desvioAlto && consumoEsperado) {
     const pts = valoresValidos(pontos).join(' · ');
+    const direcao = textoDirecaoConsumo(posicaoAtual);
     if (menorMm <= monitorarAte) {
       if (vidaRecap >= maxRecap) {
         const acao = comCustom(ACOES.troca, 'troca');
@@ -397,7 +410,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
       const acao = comCustom(ACOES.monitorar, 'monitorar');
       return {
         ...acao,
-        motivo: `Desgaste progressivo Ext→Int (desvio ${desvio} mm) — consumo esperado enquanto ≥ ${critico} mm. Acompanhar. Medições: ${pts} mm.`,
+        motivo: `Desgaste progressivo Ext→Int (${direcao}; desvio ${desvio} mm) — consumo esperado enquanto ≥ ${critico} mm. Acompanhar. Medições: ${pts} mm.`,
         prazo_recap_dias: prazoRecap,
         rodizio_sugestao: null,
         desvio_mm: desvio,
@@ -406,7 +419,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
     const acao = comCustom(ACOES.ok, 'ok');
     return {
       ...acao,
-      motivo: `Desgaste progressivo Ext→Int (desvio ${desvio} mm) — parte interna sofre mais; consumo esperado. Sem rodízio. Medições: ${pts} mm.`,
+      motivo: `Desgaste progressivo Ext→Int (${direcao}; desvio ${desvio} mm) — consumo esperado. Sem rodízio. Medições: ${pts} mm.`,
       rodizio_sugestao: null,
       desvio_mm: desvio,
     };

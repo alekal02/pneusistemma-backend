@@ -208,6 +208,45 @@ export function posicaoEspelhada(codigo) {
   return POSICAO_ESPELHADA[codigo] || null;
 }
 
+/** Lado do veículo: esquerdo | direito (null = indefinido / estepe / moto) */
+const LADO_POSICAO = {
+  '1E': 'esquerdo',
+  '1D': 'direito',
+  '2E': 'esquerdo',
+  '2D': 'direito',
+  '2EE': 'esquerdo',
+  '2EI': 'esquerdo',
+  '2DI': 'direito',
+  '2DE': 'direito',
+  '3E': 'esquerdo',
+  '3D': 'direito',
+  '3EE': 'esquerdo',
+  '3EI': 'esquerdo',
+  '3DI': 'direito',
+  '3DE': 'direito',
+  DE: 'esquerdo',
+  DD: 'direito',
+  TE: 'esquerdo',
+  TD: 'direito',
+  TEE: 'esquerdo',
+  TEI: 'esquerdo',
+  TDI: 'direito',
+  TDE: 'direito',
+  E2EE: 'esquerdo',
+  E2EI: 'esquerdo',
+  E2DI: 'direito',
+  E2DE: 'direito',
+  E3EE: 'esquerdo',
+  E3EI: 'esquerdo',
+  E3DI: 'direito',
+  E3DE: 'direito',
+};
+
+export function ladoPosicao(codigo) {
+  if (!codigo) return null;
+  return LADO_POSICAO[codigo] || null;
+}
+
 export function ordenarPosicoes(posicoes) {
   const ordem = ORDEM_POSICAO;
   return [...posicoes].sort((a, b) => {

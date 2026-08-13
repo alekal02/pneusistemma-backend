@@ -220,6 +220,7 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
 
   const diag = diagnosticarPerfil(medicaoRow, limites.diagnostico_tolerancia_mm, {
     papel: pneu.posicao ? papelPosicao(pneu.posicao) : null,
+    posicao: pneu.posicao || null,
   });
 
   let acao;

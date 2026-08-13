@@ -166,7 +166,10 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
   const row = ultimaMedicao || {};
   const menor = menorSulco(row);
   const papel = pneu.posicao ? papelPosicao(pneu.posicao) : null;
-  const diagnostico = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, { papel });
+  const diagnostico = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
+    papel,
+    posicao: pneu.posicao || null,
+  });
   const acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
     pontos: ultimaMedicao ? row : null,
     candidatos: candidatos.filter((c) => Number(c.id) !== Number(pneu.id)),

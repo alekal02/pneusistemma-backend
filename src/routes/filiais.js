@@ -382,7 +382,10 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
         sulco_auxiliar: p.ult_sulco_aux,
       };
       const menor = menorSulco(row);
-      const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm);
+      const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
+        papel: papelPosicao(p.posicao),
+        posicao: p.posicao,
+      });
       const sulcoRef = p.sulco_inicial_mm ?? limites.sulco_novo_mm;
 
       return {
@@ -394,7 +397,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
         padrao_label: labelTipoPneu(p.tipo_pneu),
         menor_sulco: menor,
         status_sulco: classificarSulco(menor),
-        diagnostico: p.ult_diagnostico || diag.codigo,
+        diagnostico: diag.codigo,
         diagnostico_label: diag.label,
         diagnostico_desc: diag.descricao || '',
         vida_util_pct: percentualVida(menor, sulcoRef, limites.sulco_critico_mm),
@@ -586,6 +589,7 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
 
     const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
       papel: med.posicao ? papelPosicao(med.posicao) : null,
+      posicao: med.posicao || null,
     });
     const acao = sugerirAcao(menor, limites, med.vida_recap || 0, {
       pontos: row,
