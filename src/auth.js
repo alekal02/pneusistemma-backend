@@ -49,9 +49,9 @@ export function usuarioPublico(row, filial = null) {
   };
 }
 
-export function carregarUsuario(id) {
+export async function carregarUsuario(id) {
   const db = getDb();
-  const row = db.prepare(`
+  const row = await db.prepare(`
     SELECT u.*, f.nome as filial_nome, f.codigo as filial_codigo
     FROM usuarios u
     LEFT JOIN filiais f ON f.id = u.filial_id
@@ -66,20 +66,27 @@ export function carregarUsuario(id) {
   };
 }
 
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) {
     return res.status(401).json({ erro: 'Não autenticado' });
   }
+
+  let payload;
   try {
-    const payload = jwt.verify(token, config.jwtSecret);
-    const user = carregarUsuario(payload.sub);
+    payload = jwt.verify(token, config.jwtSecret);
+  } catch {
+    return res.status(401).json({ erro: 'Sessão expirada ou inválida' });
+  }
+
+  try {
+    const user = await carregarUsuario(payload.sub);
     if (!user) return res.status(401).json({ erro: 'Usuário inválido ou inativo' });
     req.user = user;
     next();
-  } catch {
-    return res.status(401).json({ erro: 'Sessão expirada ou inválida' });
+  } catch (err) {
+    next(err);
   }
 }
 
@@ -148,17 +155,17 @@ export function filialScopeId(req) {
   return null;
 }
 
-export function assertVeiculoDaFilial(veiculoId, filialId) {
+export async function assertVeiculoDaFilial(veiculoId, filialId) {
   const db = getDb();
-  const v = db.prepare(`
+  const v = await db.prepare(`
     SELECT * FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
   `).get(veiculoId, filialId);
   return v || null;
 }
 
-export function assertPneuDaFilial(pneuId, filialId) {
+export async function assertPneuDaFilial(pneuId, filialId) {
   const db = getDb();
-  return db.prepare(`
+  const row = await db.prepare(`
     SELECT p.*,
       COALESCE(p.filial_id, v.filial_id) as filial_id,
       v.placa, v.apelido, v.km_atual, v.hr_atual
@@ -166,5 +173,6 @@ export function assertPneuDaFilial(pneuId, filialId) {
     LEFT JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1
     WHERE p.id = ? AND p.ativo = 1
       AND COALESCE(p.filial_id, v.filial_id) = ?
-  `).get(pneuId, filialId) || null;
+  `).get(pneuId, filialId);
+  return row || null;
 }

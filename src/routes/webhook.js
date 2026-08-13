@@ -38,7 +38,7 @@ function normalizarPlacaTexto(texto) {
     .replace(/[^A-Z0-9]/g, '');
 }
 
-function listarFrotaMensagem(db, filialId = null) {
+async function listarFrotaMensagem(db, filialId = null) {
   let sql = `
     SELECT v.placa, v.apelido, v.tipo, f.nome AS filial_nome
     FROM veiculos v
@@ -51,7 +51,7 @@ function listarFrotaMensagem(db, filialId = null) {
     params.push(filialId);
   }
   sql += ` ORDER BY f.nome, v.placa`;
-  const rows = db.prepare(sql).all(...params);
+  const rows = await db.prepare(sql).all(...params);
   if (!rows.length) {
     return '📋 Nenhum veículo ativo cadastrado na frota.';
   }
@@ -65,7 +65,7 @@ function listarFrotaMensagem(db, filialId = null) {
   return `${titulo}\n${linhas.join('\n')}\n\nEnvie a *placa* para abrir a medição.`;
 }
 
-function buscarVeiculosPorPlaca(db, placaLimpa, filialPreferida = null) {
+async function buscarVeiculosPorPlaca(db, placaLimpa, filialPreferida = null) {
   const baseSql = `
     SELECT v.*, f.nome as filial_nome,
       REPLACE(REPLACE(UPPER(v.placa), '-', ''), ' ', '') AS placa_norm
@@ -82,13 +82,13 @@ function buscarVeiculosPorPlaca(db, placaLimpa, filialPreferida = null) {
 
   // 1) Prioriza frota da unidade do grupo
   if (filialPreferida) {
-    const locais = db.prepare(`${baseSql} AND v.filial_id = ? ORDER BY v.placa LIMIT 20`)
+    const locais = await db.prepare(`${baseSql} AND v.filial_id = ? ORDER BY v.placa LIMIT 20`)
       .all(like, like, filialPreferida);
     if (locais.length) return { veiculos: locais, escopo: 'filial' };
   }
 
   // 2) Fallback: frota inteira (todas as filiais)
-  const todos = db.prepare(`${baseSql} ORDER BY v.placa LIMIT 20`).all(like, like);
+  const todos = await db.prepare(`${baseSql} ORDER BY v.placa LIMIT 20`).all(like, like);
   return { veiculos: todos, escopo: filialPreferida ? 'todas' : 'todas' };
 }
 
@@ -203,7 +203,7 @@ function ehMensagemDeGrupo(event) {
 }
 
 /** Resolve canal da unidade a partir do chat (grupo ou número do chatbot) */
-function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
+async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
   let sql = `
     SELECT id, nome, codigo, whatsapp, whatsapp_grupo, wuzapi_token
     FROM filiais
@@ -219,7 +219,7 @@ function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
       OR (whatsapp_grupo IS NOT NULL AND TRIM(whatsapp_grupo) != '')
     )`;
   }
-  const filiais = db.prepare(sql).all(...params);
+  const filiais = await db.prepare(sql).all(...params);
 
   const chatNorm = normalizarDestino(chatJid);
   const phoneNorm = phone ? limparTelefone(phone) : '';
@@ -287,7 +287,7 @@ router.post('/whatsapp', async (req, res) => {
 
     const db = getDb();
     const filialIdHint = Number(req.query.filial_id) || null;
-    const canal = resolverCanalFilial(db, chatJid, phone, filialIdHint);
+    const canal = await resolverCanalFilial(db, chatJid, phone, filialIdHint);
 
     // Grupo não cadastrado em nenhuma filial → ignora
     if (isGroup && !canal) {
@@ -318,7 +318,7 @@ router.post('/whatsapp', async (req, res) => {
 
     // Comandos de frota / ajuda
     if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd) || /^(frota|placas)\b/i.test(cmd)) {
-      const mensagem = `${listarFrotaMensagem(db, null)}\n\n_Comandos: frota | placa do caminhão_`;
+      const mensagem = `${await listarFrotaMensagem(db, null)}\n\n_Comandos: frota | placa do caminhão_`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
         destinatario: replyTo,
@@ -333,7 +333,7 @@ router.post('/whatsapp', async (req, res) => {
       return res.status(200).json({ ok: true, ignored: 'texto_curto' });
     }
 
-    const { veiculos: encontrados } = buscarVeiculosPorPlaca(
+    const { veiculos: encontrados } = await buscarVeiculosPorPlaca(
       db,
       placaLimpa,
       canal?.escopoFilialId || null
@@ -341,7 +341,7 @@ router.post('/whatsapp', async (req, res) => {
     const veiculos = escolherVeiculoExato(encontrados, placaLimpa);
 
     if (veiculos.length === 0) {
-      const lista = listarFrotaMensagem(db, null);
+      const lista = await listarFrotaMensagem(db, null);
       const mensagem = `❌ Placa *${texto}* não encontrada.\n\n${lista}`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
@@ -368,14 +368,14 @@ router.post('/whatsapp', async (req, res) => {
     const t0 = performance.now();
     console.log('[webhook] veiculo encontrado', { id: veiculo.id, placa: veiculo.placa, filial_id: veiculo.filial_id });
 
-    const { link } = gerarTokenAcessoRapido({
+    const { link } = await gerarTokenAcessoRapido({
       veiculoId: veiculo.id,
       filialId: veiculo.filial_id,
       whatsappOrigem: phone || replyTo,
     });
     const tToken = performance.now();
 
-    const { criticos, alertas, ultimaMedicao } = resumoStatusPneusVeiculoRapido(veiculo.id);
+    const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
     const tResumo = performance.now();
 
     let mensagem = `🚛 *${veiculo.placa}* — ${veiculo.tipo}\n`;

@@ -8,10 +8,12 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "init-db": "node src/database.js",
-    "fix-encoding": "node src/fix-encoding.js"
+    "fix-encoding": "node src/fix-encoding.js",
+    "smoke": "node scripts/smoke-api.mjs",
+    "smoke:filial": "node scripts/smoke-filial-login.mjs"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=18.0.0"
   },
   "license": "MIT",
   "dependencies": {
@@ -19,6 +21,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.0"
   }
 }

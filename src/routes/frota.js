@@ -4,6 +4,7 @@
  */
 import { Router } from 'express';
 import { getDb } from '../database.js';
+import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import {
@@ -35,7 +36,7 @@ router.get('/import/modelo', (_req, res) => {
   res.send(csv);
 });
 
-router.post('/import', (req, res) => {
+router.post('/import', async (req, res, next) => {
   const filialId = filialScopeId(req);
   const db = getDb();
 
@@ -82,12 +83,12 @@ router.post('/import', (req, res) => {
     WHERE veiculo_id = ? AND posicao = ? AND ativo = 1 AND status_pneu = 'montado'
   `);
 
-  function garantirVeiculo(raw, linha) {
+  async function garantirVeiculo(raw, linha) {
     const placa = String(raw.placa || '').trim().toUpperCase();
     if (!placa) return null;
     if (cacheVeiculo.has(placa)) return cacheVeiculo.get(placa);
 
-    const existente = findVeiculo.get(placa, filialId);
+    const existente = await findVeiculo.get(placa, filialId);
     if (existente) {
       const info = { id: existente.id, placa, layout: existente.layout_pneus || LAYOUT_PADRAO, novo: false };
       cacheVeiculo.set(placa, info);
@@ -106,27 +107,29 @@ router.post('/import', (req, res) => {
     const hr = raw.hr_atual !== '' && raw.hr_atual != null ? parseFloat(raw.hr_atual) : 0;
 
     try {
-      const result = insertVeiculo.run(
-        placa,
-        String(raw.apelido || '').trim() || null,
-        tipo,
-        null,
-        null,
-        null,
-        Number.isFinite(km) ? km : 0,
-        Number.isFinite(hr) ? hr : 0,
-        String(raw.observacoes_veiculo || '').trim() || null,
-        layoutId,
-        filialId
-      );
-      aplicarLayoutPneus(db, result.lastInsertRowid, layoutId, null);
-      const info = { id: result.lastInsertRowid, placa, layout: layoutId, novo: true };
+      const info = await comSavepoint(db, async () => {
+        const result = await insertVeiculo.run(
+          placa,
+          String(raw.apelido || '').trim() || null,
+          tipo,
+          null,
+          null,
+          null,
+          Number.isFinite(km) ? km : 0,
+          Number.isFinite(hr) ? hr : 0,
+          String(raw.observacoes_veiculo || '').trim() || null,
+          layoutId,
+          filialId
+        );
+        await aplicarLayoutPneus(db, result.lastInsertRowid, layoutId, null);
+        return { id: result.lastInsertRowid, placa, layout: layoutId, novo: true };
+      });
       cacheVeiculo.set(placa, info);
       veiculosCriados.push({ id: info.id, placa, layout: layoutId });
       return info;
     } catch (err) {
-      if (String(err.message).includes('UNIQUE')) {
-        const again = findVeiculo.get(placa, filialId);
+      if (ehViolacaoUnique(err)) {
+        const again = await findVeiculo.get(placa, filialId);
         if (again) {
           const info = { id: again.id, placa, layout: again.layout_pneus || LAYOUT_PADRAO, novo: false };
           cacheVeiculo.set(placa, info);
@@ -138,92 +141,129 @@ router.post('/import', (req, res) => {
     }
   }
 
-  db.exec('BEGIN');
   try {
-    for (const raw of rows) {
-      const linha = raw.__linha || '?';
-      const fogo = String(raw.numero_fogo || raw.fogo || '').trim();
-      const placa = String(raw.placa || '').trim().toUpperCase();
-      const posicao = String(raw.posicao || '').trim().toUpperCase();
-      const status = mapStatusPneu(raw.status, { placa, posicao });
+    await db.transaction(async () => {
+      for (const raw of rows) {
+        const linha = raw.__linha || '?';
+        const fogo = String(raw.numero_fogo || raw.fogo || '').trim();
+        const placa = String(raw.placa || '').trim().toUpperCase();
+        const posicao = String(raw.posicao || '').trim().toUpperCase();
+        const status = mapStatusPneu(raw.status, { placa, posicao });
 
-      // Linha só de veículo (sem pneu): cadastra o caminhão
-      if (!fogo) {
-        if (!placa) {
-          erros.push({ linha, erro: 'Informe placa (veículo) ou numero_fogo (pneu)' });
-          continue;
-        }
-        garantirVeiculo(raw, linha);
-        continue;
-      }
-
-      const tipoPneu = mapTipoPneu(raw.tipo_pneu || raw.tipo);
-      const condicao = mapCondicao(raw.condicao);
-      let vida = raw.vida_recap !== '' && raw.vida_recap != null
-        ? parseInt(raw.vida_recap, 10)
-        : (condicao === 'recapado' ? 1 : 0);
-      if (!Number.isFinite(vida) || vida < 0) vida = 0;
-      if (condicao === 'novo') vida = 0;
-      const sulco = raw.sulco_inicial_mm !== '' && raw.sulco_inicial_mm != null
-        ? parseFloat(String(raw.sulco_inicial_mm).replace(',', '.'))
-        : null;
-      const marca = String(raw.marca || '').trim() || null;
-      const medida = String(raw.medida || '').trim() || null;
-      const dot = String(raw.dot || '').trim() || null;
-      const obs = String(raw.observacoes || '').trim() || null;
-
-      if (status === 'montado') {
-        if (!placa || !posicao) {
-          erros.push({
-            linha,
-            numero_fogo: fogo,
-            erro: 'Pneu montado exige placa e posicao (ex.: 1E, 2EE)',
-          });
+        // Linha só de veículo (sem pneu): cadastra o caminhão
+        if (!fogo) {
+          if (!placa) {
+            erros.push({ linha, erro: 'Informe placa (veículo) ou numero_fogo (pneu)' });
+            continue;
+          }
+          await garantirVeiculo(raw, linha);
           continue;
         }
 
-        const veiculo = garantirVeiculo(raw, linha);
-        if (!veiculo) continue;
+        const tipoPneu = mapTipoPneu(raw.tipo_pneu || raw.tipo);
+        const condicao = mapCondicao(raw.condicao);
+        let vida = raw.vida_recap !== '' && raw.vida_recap != null
+          ? parseInt(raw.vida_recap, 10)
+          : (condicao === 'recapado' ? 1 : 0);
+        if (!Number.isFinite(vida) || vida < 0) vida = 0;
+        if (condicao === 'novo') vida = 0;
+        const sulco = raw.sulco_inicial_mm !== '' && raw.sulco_inicial_mm != null
+          ? parseFloat(String(raw.sulco_inicial_mm).replace(',', '.'))
+          : null;
+        const marca = String(raw.marca || '').trim() || null;
+        const medida = String(raw.medida || '').trim() || null;
+        const dot = String(raw.dot || '').trim() || null;
+        const obs = String(raw.observacoes || '').trim() || null;
 
-        const layout = getLayout(veiculo.layout);
-        if (!layout.posicoes.includes(posicao)) {
-          erros.push({
-            linha,
-            numero_fogo: fogo,
-            placa,
-            erro: `Posição ${posicao} não existe no layout ${veiculo.layout}`,
-          });
+        if (status === 'montado') {
+          if (!placa || !posicao) {
+            erros.push({
+              linha,
+              numero_fogo: fogo,
+              erro: 'Pneu montado exige placa e posicao (ex.: 1E, 2EE)',
+            });
+            continue;
+          }
+
+          const veiculo = await garantirVeiculo(raw, linha);
+          if (!veiculo) continue;
+
+          const layout = getLayout(veiculo.layout);
+          if (!layout.posicoes.includes(posicao)) {
+            erros.push({
+              linha,
+              numero_fogo: fogo,
+              placa,
+              erro: `Posição ${posicao} não existe no layout ${veiculo.layout}`,
+            });
+            continue;
+          }
+
+          const ja = await ocupado.get(veiculo.id, posicao);
+          if (ja) {
+            erros.push({
+              linha,
+              numero_fogo: fogo,
+              placa,
+              erro: `Posição ${posicao} já ocupada pelo fogo ${ja.numero_fogo || ja.id}`,
+            });
+            continue;
+          }
+
+          const validacao = validarMontagem({ condicao, tipo_pneu: tipoPneu, posicao });
+          if (validacao.avisos?.length) {
+            avisos.push({ linha, numero_fogo: fogo, aviso: validacao.avisos.join(' ') });
+          }
+          // Na carga inicial, avisos não bloqueiam; erros graves de regra (ex. recap na dianteira) viram aviso
+          if (!validacao.ok) {
+            avisos.push({ linha, numero_fogo: fogo, aviso: validacao.erros.join(' ') });
+          }
+
+          const kmInst = raw.km_atual !== '' && raw.km_atual != null
+            ? parseInt(raw.km_atual, 10)
+            : 0;
+
+          try {
+            const criado = await comSavepoint(db, async () => {
+              const result = await insertPneuMontado.run(
+                veiculo.id,
+                posicao,
+                filialId,
+                marca,
+                null,
+                medida,
+                dot,
+                fogo,
+                tipoPneu,
+                condicao,
+                vida,
+                Number.isFinite(sulco) ? sulco : null,
+                Number.isFinite(kmInst) ? kmInst : 0,
+                obs
+              );
+              await insertMov.run(
+                result.lastInsertRowid,
+                veiculo.id,
+                Number.isFinite(kmInst) ? kmInst : 0,
+                posicao,
+                'Carga inicial da frota — pneu já em uso'
+              );
+              return result;
+            });
+            pneusMontados.push({ id: criado.lastInsertRowid, numero_fogo: fogo, placa, posicao });
+          } catch (err) {
+            if (ehViolacaoUnique(err)) {
+              erros.push({ linha, numero_fogo: fogo, erro: 'Nº de fogo já existe nesta filial' });
+            } else {
+              erros.push({ linha, numero_fogo: fogo, erro: err.message });
+            }
+          }
           continue;
         }
 
-        const ja = ocupado.get(veiculo.id, posicao);
-        if (ja) {
-          erros.push({
-            linha,
-            numero_fogo: fogo,
-            placa,
-            erro: `Posição ${posicao} já ocupada pelo fogo ${ja.numero_fogo || ja.id}`,
-          });
-          continue;
-        }
-
-        const validacao = validarMontagem({ condicao, tipo_pneu: tipoPneu, posicao });
-        if (validacao.avisos?.length) {
-          avisos.push({ linha, numero_fogo: fogo, aviso: validacao.avisos.join(' ') });
-        }
-        // Na carga inicial, avisos não bloqueiam; erros graves de regra (ex. recap na dianteira) viram aviso
-        if (!validacao.ok) {
-          avisos.push({ linha, numero_fogo: fogo, aviso: validacao.erros.join(' ') });
-        }
-
-        const kmInst = raw.km_atual !== '' && raw.km_atual != null
-          ? parseInt(raw.km_atual, 10)
-          : 0;
-
+        // Estoque
         try {
-          const result = insertPneuMontado.run(
-            veiculo.id,
-            posicao,
+          const result = await comSavepoint(db, () => insertPneuEstoque.run(
             filialId,
             marca,
             null,
@@ -234,56 +274,20 @@ router.post('/import', (req, res) => {
             condicao,
             vida,
             Number.isFinite(sulco) ? sulco : null,
-            Number.isFinite(kmInst) ? kmInst : 0,
             obs
-          );
-          insertMov.run(
-            result.lastInsertRowid,
-            veiculo.id,
-            Number.isFinite(kmInst) ? kmInst : 0,
-            posicao,
-            'Carga inicial da frota — pneu já em uso'
-          );
-          pneusMontados.push({ id: result.lastInsertRowid, numero_fogo: fogo, placa, posicao });
+          ));
+          pneusEstoque.push({ id: result.lastInsertRowid, numero_fogo: fogo });
         } catch (err) {
-          if (String(err.message).includes('UNIQUE')) {
+          if (ehViolacaoUnique(err)) {
             erros.push({ linha, numero_fogo: fogo, erro: 'Nº de fogo já existe nesta filial' });
           } else {
             erros.push({ linha, numero_fogo: fogo, erro: err.message });
           }
         }
-        continue;
       }
-
-      // Estoque
-      try {
-        const result = insertPneuEstoque.run(
-          filialId,
-          marca,
-          null,
-          medida,
-          dot,
-          fogo,
-          tipoPneu,
-          condicao,
-          vida,
-          Number.isFinite(sulco) ? sulco : null,
-          obs
-        );
-        pneusEstoque.push({ id: result.lastInsertRowid, numero_fogo: fogo });
-      } catch (err) {
-        if (String(err.message).includes('UNIQUE')) {
-          erros.push({ linha, numero_fogo: fogo, erro: 'Nº de fogo já existe nesta filial' });
-        } else {
-          erros.push({ linha, numero_fogo: fogo, erro: err.message });
-        }
-      }
-    }
-
-    db.exec('COMMIT');
+    });
   } catch (err) {
-    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
-    return res.status(500).json({ erro: err.message });
+    return next(err);
   }
 
   const total =

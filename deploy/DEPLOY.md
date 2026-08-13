@@ -4,9 +4,8 @@
 
 ```
 /var/www/pneu-controle/
-├── backend/          # API Node.js (PM2, porta 3000)
+├── backend/          # API Node.js (PM2, porta 3000) → PostgreSQL (Neon/local)
 │   ├── server.js
-│   ├── data/pneus.db
 │   └── deploy/
 └── frontend/
     └── dist/         # Build estático (nginx)
@@ -45,14 +44,16 @@ nano .env
 PORT=3000
 NODE_ENV=production
 HOST=0.0.0.0
-DB_PATH=/var/www/pneu-controle/backend/data/pneus.db
+DATABASE_URL=postgresql://pneu:SENHA@localhost:5432/pneusistemma
+DATABASE_SSL=false
 CORS_ORIGIN=https://pneus.suaempresa.com.br
 SULCO_MINIMO_MM=1.6
 SULCO_ALERTA_MM=3.0
 ```
 
 ```bash
-mkdir -p data logs
+mkdir -p logs
+# Postgres precisa estar acessível (Docker/serviço local)
 node src/database.js
 pm2 start deploy/ecosystem.config.cjs --env production
 pm2 save

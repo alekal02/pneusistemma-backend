@@ -46,24 +46,24 @@ const CORRECOES_REPLACE = [
   [`Tra${REPL}o`, 'Tração'],
 ];
 
-export function corrigirEncodingBanco(db) {
+export async function corrigirEncodingBanco(db) {
   if (!db) return 0;
   let total = 0;
 
   for (const [errado, correto] of CORRECOES_EXATAS) {
-    const result = db.prepare('UPDATE veiculos SET tipo = ? WHERE tipo = ?').run(correto, errado);
+    const result = await db.prepare('UPDATE veiculos SET tipo = ? WHERE tipo = ?').run(correto, errado);
     if (result.changes > 0) {
       console.log(`[encoding] tipo: → "${correto}" (${result.changes})`);
       total += result.changes;
     }
   }
 
-  const tiposRuins = db.prepare(`
+  const tiposRuins = await db.prepare(`
     SELECT DISTINCT tipo FROM veiculos
     WHERE tipo LIKE 'Truck / Tra%' AND tipo != 'Truck / Tração'
   `).all();
   for (const { tipo } of tiposRuins) {
-    const result = db.prepare('UPDATE veiculos SET tipo = ? WHERE tipo = ?').run('Truck / Tração', tipo);
+    const result = await db.prepare('UPDATE veiculos SET tipo = ? WHERE tipo = ?').run('Truck / Tração', tipo);
     if (result.changes > 0) {
       console.log(`[encoding] tipo heurístico → "Truck / Tração" (${result.changes})`);
       total += result.changes;
@@ -81,7 +81,7 @@ export function corrigirEncodingBanco(db) {
 
     for (const { sql, args } of tabelas) {
       try {
-        const result = db.prepare(sql).run(...args);
+        const result = await db.prepare(sql).run(...args);
         if (result.changes > 0) {
           console.log(`[encoding] replace "${correto}" (${result.changes})`);
           total += result.changes;
@@ -112,11 +112,13 @@ export function normalizarTipoVeiculo(tipo) {
 const isMain = process.argv[1] && String(process.argv[1]).replace(/\\/g, '/').endsWith('fix-encoding.js');
 
 if (isMain) {
-  import('./database.js').then(({ getDb }) => {
-    const total = corrigirEncodingBanco(getDb());
+  import('./database.js').then(async ({ initDatabase, closePool }) => {
+    const db = await initDatabase();
+    const total = await corrigirEncodingBanco(db);
     console.log(total
       ? `Total: ${total} registro(s) corrigido(s).`
       : 'Nenhum dado corrompido encontrado.');
+    await closePool();
   }).catch((err) => {
     console.error(err);
     process.exit(1);

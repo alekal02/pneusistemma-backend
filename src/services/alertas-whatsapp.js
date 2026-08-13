@@ -23,11 +23,11 @@ function adicionarDestino(map, { id = null, nome, whatsapp, origem, cargo = null
  * Destinos que devem receber alerta desta filial.
  * Usa o número de alertas (whatsapp_alerta). Não envia no grupo do chatbot.
  */
-export function listarDestinatariosAlerta(filialId) {
+export async function listarDestinatariosAlerta(filialId) {
   const db = getDb();
   const phones = new Map();
 
-  const filial = db.prepare(`
+  const filial = await db.prepare(`
     SELECT id, nome, whatsapp, whatsapp_grupo, whatsapp_alerta
     FROM filiais WHERE id = ? AND ativo = 1
   `).get(filialId);
@@ -44,7 +44,7 @@ export function listarDestinatariosAlerta(filialId) {
     }
   }
 
-  const cadastrados = db.prepare(`
+  const cadastrados = await db.prepare(`
     SELECT id, nome, whatsapp, escopo, filial_id
     FROM alerta_destinatarios
     WHERE ativo = 1
@@ -66,7 +66,7 @@ export function listarDestinatariosAlerta(filialId) {
 
   // Fallback só se ainda não houver nenhum destino (nem canal da unidade)
   if (phones.size === 0) {
-    const gerentes = db.prepare(`
+    const gerentes = await db.prepare(`
       SELECT id, login, cargo, whatsapp, filial_id
       FROM usuarios
       WHERE ativo = 1
@@ -102,14 +102,14 @@ export function listarDestinatariosAlerta(filialId) {
 }
 
 /** @deprecated use listarDestinatariosAlerta */
-export function listarGerentesParaAlerta(filialId) {
+export async function listarGerentesParaAlerta(filialId) {
   return listarDestinatariosAlerta(filialId);
 }
 
-export function jaNotificouMedicao(medicaoId) {
+export async function jaNotificouMedicao(medicaoId) {
   if (!medicaoId) return false;
   const db = getDb();
-  const row = db.prepare(`
+  const row = await db.prepare(`
     SELECT id FROM notificacoes_whatsapp
     WHERE medicao_id = ?
       AND tipo IN ('alerta_critico', 'alerta_desgaste')
@@ -132,12 +132,12 @@ export async function notificarGerentesAposMedicao({
 }) {
   if (!['alerta', 'critico'].includes(statusSulco)) return { enviados: 0 };
 
-  if (jaNotificouMedicao(medicaoId)) {
+  if (await jaNotificouMedicao(medicaoId)) {
     return { enviados: 0, motivo: 'ja_notificado' };
   }
 
   const filialId = veiculo.filial_id;
-  const destinatarios = listarDestinatariosAlerta(filialId);
+  const destinatarios = await listarDestinatariosAlerta(filialId);
   const tipo = statusSulco === 'critico' ? 'alerta_critico' : 'alerta_desgaste';
   const statusLabel = statusSulco === 'critico' ? 'CRÍTICO — TROCAR' : 'MONITORAR — programar substituição';
 

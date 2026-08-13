@@ -58,9 +58,12 @@ const CHAVES_TEXTO = new Set([
   CHAVES.ACAO_OK_INSTRUCAO,
 ]);
 
-function lerValor(chave) {
+/** Cache em memória — getLimites() permanece síncrono */
+let cache = null;
+
+async function lerValorAsync(chave) {
   const db = getDb();
-  const row = db.prepare('SELECT valor FROM configuracoes WHERE chave = ?').get(chave);
+  const row = await db.prepare('SELECT valor FROM configuracoes WHERE chave = ?').get(chave);
   if (!row) return PADROES[chave];
   if (CHAVES_TEXTO.has(chave)) {
     const txt = String(row.valor ?? '').trim();
@@ -70,14 +73,14 @@ function lerValor(chave) {
   return Number.isFinite(n) ? n : PADROES[chave];
 }
 
-function salvarValor(chave, valor) {
+async function salvarValor(chave, valor) {
   const db = getDb();
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO configuracoes (chave, valor, updated_at)
-    VALUES (?, ?, datetime('now', 'localtime'))
-    ON CONFLICT(chave) DO UPDATE SET
-      valor = excluded.valor,
-      updated_at = datetime('now', 'localtime')
+    VALUES (?, ?, NOW())
+    ON CONFLICT (chave) DO UPDATE SET
+      valor = EXCLUDED.valor,
+      updated_at = NOW()
   `).run(chave, String(valor));
 }
 
@@ -88,47 +91,78 @@ function textoOuPadrao(valor, padrao, { max = 200 } = {}) {
   return t.slice(0, max);
 }
 
-export function getLimites() {
-  return {
-    sulco_critico_mm: lerValor(CHAVES.CRITICO),
-    sulco_alerta_mm: lerValor(CHAVES.ALERTA),
-    sulco_recap_mm: lerValor(CHAVES.RECAP),
-    sulco_novo_mm: lerValor(CHAVES.NOVO),
-    max_recaps: Math.round(lerValor(CHAVES.MAX_RECAPS)),
-    prazo_recap_dias: Math.round(lerValor(CHAVES.PRAZO_RECAP_DIAS)),
-    diagnostico_tolerancia_mm: lerValor(CHAVES.TOLERANCIA),
-    rodizio_desvio_mm: lerValor(CHAVES.RODIZIO_DESVIO),
-    rodizio_similaridade_mm: lerValor(CHAVES.RODIZIO_SIMILARIDADE),
+export async function refreshLimitesCache() {
+  const keys = Object.values(CHAVES);
+  const values = {};
+  for (const k of keys) {
+    values[k] = await lerValorAsync(k);
+  }
+  cache = {
+    sulco_critico_mm: values[CHAVES.CRITICO],
+    sulco_alerta_mm: values[CHAVES.ALERTA],
+    sulco_recap_mm: values[CHAVES.RECAP],
+    sulco_novo_mm: values[CHAVES.NOVO],
+    max_recaps: Math.round(values[CHAVES.MAX_RECAPS]),
+    prazo_recap_dias: Math.round(values[CHAVES.PRAZO_RECAP_DIAS]),
+    diagnostico_tolerancia_mm: values[CHAVES.TOLERANCIA],
+    rodizio_desvio_mm: values[CHAVES.RODIZIO_DESVIO],
+    rodizio_similaridade_mm: values[CHAVES.RODIZIO_SIMILARIDADE],
     acoes: {
       troca: {
-        label: lerValor(CHAVES.ACAO_TROCA_LABEL),
-        instrucao: lerValor(CHAVES.ACAO_TROCA_INSTRUCAO),
+        label: values[CHAVES.ACAO_TROCA_LABEL],
+        instrucao: values[CHAVES.ACAO_TROCA_INSTRUCAO],
       },
       recap: {
-        label: lerValor(CHAVES.ACAO_RECAP_LABEL),
-        instrucao: lerValor(CHAVES.ACAO_RECAP_INSTRUCAO),
+        label: values[CHAVES.ACAO_RECAP_LABEL],
+        instrucao: values[CHAVES.ACAO_RECAP_INSTRUCAO],
       },
       monitorar: {
-        label: lerValor(CHAVES.ACAO_MONITORAR_LABEL),
-        instrucao: lerValor(CHAVES.ACAO_MONITORAR_INSTRUCAO),
+        label: values[CHAVES.ACAO_MONITORAR_LABEL],
+        instrucao: values[CHAVES.ACAO_MONITORAR_INSTRUCAO],
       },
       rodizio: {
-        label: lerValor(CHAVES.ACAO_RODIZIO_LABEL),
-        instrucao: lerValor(CHAVES.ACAO_RODIZIO_INSTRUCAO),
+        label: values[CHAVES.ACAO_RODIZIO_LABEL],
+        instrucao: values[CHAVES.ACAO_RODIZIO_INSTRUCAO],
       },
       ok: {
-        label: lerValor(CHAVES.ACAO_OK_LABEL),
-        instrucao: lerValor(CHAVES.ACAO_OK_INSTRUCAO),
+        label: values[CHAVES.ACAO_OK_LABEL],
+        instrucao: values[CHAVES.ACAO_OK_INSTRUCAO],
       },
     },
   };
+  return cache;
 }
 
-export function setLimites(body) {
+/** Sync — usa cache (chame refreshLimitesCache no boot) */
+export function getLimites() {
+  if (!cache) {
+    // Fallback com padrões até o cache aquecer
+    return {
+      sulco_critico_mm: PADROES[CHAVES.CRITICO],
+      sulco_alerta_mm: PADROES[CHAVES.ALERTA],
+      sulco_recap_mm: PADROES[CHAVES.RECAP],
+      sulco_novo_mm: PADROES[CHAVES.NOVO],
+      max_recaps: PADROES[CHAVES.MAX_RECAPS],
+      prazo_recap_dias: PADROES[CHAVES.PRAZO_RECAP_DIAS],
+      diagnostico_tolerancia_mm: PADROES[CHAVES.TOLERANCIA],
+      rodizio_desvio_mm: PADROES[CHAVES.RODIZIO_DESVIO],
+      rodizio_similaridade_mm: PADROES[CHAVES.RODIZIO_SIMILARIDADE],
+      acoes: {
+        troca: { label: PADROES[CHAVES.ACAO_TROCA_LABEL], instrucao: PADROES[CHAVES.ACAO_TROCA_INSTRUCAO] },
+        recap: { label: PADROES[CHAVES.ACAO_RECAP_LABEL], instrucao: PADROES[CHAVES.ACAO_RECAP_INSTRUCAO] },
+        monitorar: { label: PADROES[CHAVES.ACAO_MONITORAR_LABEL], instrucao: PADROES[CHAVES.ACAO_MONITORAR_INSTRUCAO] },
+        rodizio: { label: PADROES[CHAVES.ACAO_RODIZIO_LABEL], instrucao: PADROES[CHAVES.ACAO_RODIZIO_INSTRUCAO] },
+        ok: { label: PADROES[CHAVES.ACAO_OK_LABEL], instrucao: PADROES[CHAVES.ACAO_OK_INSTRUCAO] },
+      },
+    };
+  }
+  return cache;
+}
+
+export async function setLimites(body) {
   const atual = getLimites();
   const critico = body.sulco_critico_mm != null ? parseFloat(body.sulco_critico_mm) : atual.sulco_critico_mm;
   const alerta = body.sulco_alerta_mm != null ? parseFloat(body.sulco_alerta_mm) : atual.sulco_alerta_mm;
-  // Faixa de recap alinhada ao crítico (sem banda intermediária de sulco)
   const recap = body.sulco_recap_mm != null ? parseFloat(body.sulco_recap_mm) : critico;
   const novo = body.sulco_novo_mm != null ? parseFloat(body.sulco_novo_mm) : atual.sulco_novo_mm;
   const maxRecaps = body.max_recaps != null ? parseInt(body.max_recaps, 10) : atual.max_recaps;
@@ -180,30 +214,29 @@ export function setLimites(body) {
   const okLabel = textoOuPadrao(acoesBody.ok?.label ?? body.acao_ok_label, atual.acoes.ok.label, { max: 40 });
   const okInstrucao = textoOuPadrao(acoesBody.ok?.instrucao ?? body.acao_ok_instrucao, atual.acoes.ok.instrucao, { max: 240 });
 
-  salvarValor(CHAVES.CRITICO, critico);
-  salvarValor(CHAVES.ALERTA, alerta);
-  salvarValor(CHAVES.RECAP, Number.isFinite(recap) ? recap : critico);
-  salvarValor(CHAVES.NOVO, novo);
-  salvarValor(CHAVES.MAX_RECAPS, maxRecaps);
-  salvarValor(CHAVES.PRAZO_RECAP_DIAS, prazoRecap);
-  salvarValor(CHAVES.TOLERANCIA, tolerancia);
-  salvarValor(CHAVES.RODIZIO_DESVIO, rodizioDesvio);
-  salvarValor(CHAVES.RODIZIO_SIMILARIDADE, rodizioSimilaridade);
-  salvarValor(CHAVES.ACAO_TROCA_LABEL, trocaLabel);
-  salvarValor(CHAVES.ACAO_TROCA_INSTRUCAO, trocaInstrucao);
-  salvarValor(CHAVES.ACAO_RECAP_LABEL, recapLabel);
-  salvarValor(CHAVES.ACAO_RECAP_INSTRUCAO, recapInstrucao);
-  salvarValor(CHAVES.ACAO_MONITORAR_LABEL, monLabel);
-  salvarValor(CHAVES.ACAO_MONITORAR_INSTRUCAO, monInstrucao);
-  salvarValor(CHAVES.ACAO_RODIZIO_LABEL, rodLabel);
-  salvarValor(CHAVES.ACAO_RODIZIO_INSTRUCAO, rodInstrucao);
-  salvarValor(CHAVES.ACAO_OK_LABEL, okLabel);
-  salvarValor(CHAVES.ACAO_OK_INSTRUCAO, okInstrucao);
+  await salvarValor(CHAVES.CRITICO, critico);
+  await salvarValor(CHAVES.ALERTA, alerta);
+  await salvarValor(CHAVES.RECAP, Number.isFinite(recap) ? recap : critico);
+  await salvarValor(CHAVES.NOVO, novo);
+  await salvarValor(CHAVES.MAX_RECAPS, maxRecaps);
+  await salvarValor(CHAVES.PRAZO_RECAP_DIAS, prazoRecap);
+  await salvarValor(CHAVES.TOLERANCIA, tolerancia);
+  await salvarValor(CHAVES.RODIZIO_DESVIO, rodizioDesvio);
+  await salvarValor(CHAVES.RODIZIO_SIMILARIDADE, rodizioSimilaridade);
+  await salvarValor(CHAVES.ACAO_TROCA_LABEL, trocaLabel);
+  await salvarValor(CHAVES.ACAO_TROCA_INSTRUCAO, trocaInstrucao);
+  await salvarValor(CHAVES.ACAO_RECAP_LABEL, recapLabel);
+  await salvarValor(CHAVES.ACAO_RECAP_INSTRUCAO, recapInstrucao);
+  await salvarValor(CHAVES.ACAO_MONITORAR_LABEL, monLabel);
+  await salvarValor(CHAVES.ACAO_MONITORAR_INSTRUCAO, monInstrucao);
+  await salvarValor(CHAVES.ACAO_RODIZIO_LABEL, rodLabel);
+  await salvarValor(CHAVES.ACAO_RODIZIO_INSTRUCAO, rodInstrucao);
+  await salvarValor(CHAVES.ACAO_OK_LABEL, okLabel);
+  await salvarValor(CHAVES.ACAO_OK_INSTRUCAO, okInstrucao);
 
-  return getLimites();
+  return refreshLimitesCache();
 }
 
-/** < crítico = critico · até alerta = alerta (monitorar) · > alerta = ok */
 export function classificarSulco(mm) {
   if (mm === null || mm === undefined) return 'sem_dado';
   const { sulco_critico_mm, sulco_alerta_mm } = getLimites();
@@ -212,7 +245,6 @@ export function classificarSulco(mm) {
   return 'ok';
 }
 
-/** Menor sulco considerando os 4 pontos de medição */
 export function menorSulco(row) {
   const valores = [
     row.sulco_externo,
@@ -223,7 +255,6 @@ export function menorSulco(row) {
   return valores.length ? Math.min(...valores) : null;
 }
 
-/** Soma dias a uma data YYYY-MM-DD (local). */
 export function adicionarDias(dataIso, dias) {
   if (!dataIso) return null;
   const [y, m, d] = String(dataIso).slice(0, 10).split('-').map(Number);

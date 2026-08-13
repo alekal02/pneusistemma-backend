@@ -26,9 +26,9 @@ router.get('/', (_req, res) => {
   });
 });
 
-router.put('/', requireAdmin, (req, res) => {
+router.put('/', requireAdmin, async (req, res) => {
   try {
-    const limites = setLimites(req.body);
+    const limites = await setLimites(req.body);
     res.json({
       ...limites,
       mensagem: 'Limites atualizados com sucesso',

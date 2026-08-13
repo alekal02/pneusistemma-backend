@@ -15,11 +15,11 @@ router.use(requireAdmin);
  * GET /api/relatorios/diretoria
  * GET /api/relatorios/diretoria.csv
  */
-function montarRelatorioDiretoria() {
+async function montarRelatorioDiretoria() {
   const db = getDb();
   const limites = getLimites();
 
-  const filiais = db.prepare(`
+  const filiais = await db.prepare(`
     SELECT id, nome, codigo, contrato, ativo FROM filiais ORDER BY nome
   `).all();
 
@@ -36,11 +36,11 @@ function montarRelatorioDiretoria() {
   let totCustoMontado = 0;
 
   for (const f of filiais) {
-    const veiculos = db.prepare(`
+    const veiculos = Number((await db.prepare(`
       SELECT COUNT(*) as n FROM veiculos WHERE filial_id = ? AND ativo = 1
-    `).get(f.id).n;
+    `).get(f.id)).n);
 
-    const pneus = db.prepare(`
+    const pneus = await db.prepare(`
       SELECT
         p.id, p.vida_recap, p.status_pneu, p.custo, p.nota_fiscal, p.modelo, p.marca, p.numero_fogo,
         (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
@@ -112,9 +112,9 @@ function montarRelatorioDiretoria() {
     });
   }
 
-  const usuarios = db.prepare(`
+  const usuarios = Number((await db.prepare(`
     SELECT COUNT(*) as n FROM usuarios WHERE ativo = 1
-  `).get().n;
+  `).get()).n);
 
   const geradosEm = new Date().toISOString();
 
@@ -151,35 +151,43 @@ function montarRelatorioDiretoria() {
   };
 }
 
-router.get('/diretoria', (_req, res) => {
-  res.json(montarRelatorioDiretoria());
+router.get('/diretoria', async (_req, res, next) => {
+  try {
+    res.json(await montarRelatorioDiretoria());
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.get('/diretoria.csv', (_req, res) => {
-  const rel = montarRelatorioDiretoria();
-  const headers = [
-    'filial', 'codigo', 'veiculos', 'pneus_montados',
-    'sulco_ok', 'sulco_monitorar', 'sulco_critico', 'sem_medicao',
-    'acao_trocar', 'acao_monitorar', 'custo_montado', 'custo_estoque',
-  ];
-  const rows = rel.por_filial.map((r) => ({
-    filial: r.filial,
-    codigo: r.codigo,
-    veiculos: r.veiculos,
-    pneus_montados: r.pneus_montados,
-    sulco_ok: r.sulco_ok,
-    sulco_monitorar: r.sulco_monitorar,
-    sulco_critico: r.sulco_critico,
-    sem_medicao: r.sem_medicao,
-    acao_trocar: r.acao_trocar,
-    acao_monitorar: r.acao_monitorar,
-    custo_montado: r.custo_montado,
-    custo_estoque: r.custo_estoque,
-  }));
-  const csv = toCsv(headers, rows);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="relatorio-diretoria-pneus.csv"');
-  res.send(csv);
+router.get('/diretoria.csv', async (_req, res, next) => {
+  try {
+    const rel = await montarRelatorioDiretoria();
+    const headers = [
+      'filial', 'codigo', 'veiculos', 'pneus_montados',
+      'sulco_ok', 'sulco_monitorar', 'sulco_critico', 'sem_medicao',
+      'acao_trocar', 'acao_monitorar', 'custo_montado', 'custo_estoque',
+    ];
+    const rows = rel.por_filial.map((r) => ({
+      filial: r.filial,
+      codigo: r.codigo,
+      veiculos: r.veiculos,
+      pneus_montados: r.pneus_montados,
+      sulco_ok: r.sulco_ok,
+      sulco_monitorar: r.sulco_monitorar,
+      sulco_critico: r.sulco_critico,
+      sem_medicao: r.sem_medicao,
+      acao_trocar: r.acao_trocar,
+      acao_monitorar: r.acao_monitorar,
+      custo_montado: r.custo_montado,
+      custo_estoque: r.custo_estoque,
+    }));
+    const csv = toCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="relatorio-diretoria-pneus.csv"');
+    res.send(csv);
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

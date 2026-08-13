@@ -34,10 +34,11 @@ function mapUsuario(row) {
 }
 
 /** Lista usuários — admin vê todos; gerente vê operadores da(s) sua(s) filial(is) */
-router.get('/', requireGerenteOuAdmin, (req, res) => {
-  const db = getDb();
-  const escopo = filiaisEscopoIds(req);
-  let sql = `
+router.get('/', requireGerenteOuAdmin, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const escopo = filiaisEscopoIds(req);
+    let sql = `
     SELECT u.id, u.login, u.papel, u.cargo, u.whatsapp, u.ativo, u.filial_id,
       u.ultimo_login, u.created_at, u.updated_at,
       f.nome as filial_nome, f.codigo as filial_codigo
@@ -45,30 +46,33 @@ router.get('/', requireGerenteOuAdmin, (req, res) => {
     LEFT JOIN filiais f ON f.id = u.filial_id
     WHERE 1=1
   `;
-  const params = [];
+    const params = [];
 
-  if (req.user.papel === 'gerente') {
-    // Gerente não vê admin total; vê gerentes/operadores no escopo
-    sql += ` AND u.papel IN ('gerente', 'filial')`;
-    if (escopo?.length) {
-      sql += ` AND u.filial_id IN (${escopo.map(() => '?').join(',')})`;
-      params.push(...escopo);
+    if (req.user.papel === 'gerente') {
+      // Gerente não vê admin total; vê gerentes/operadores no escopo
+      sql += ` AND u.papel IN ('gerente', 'filial')`;
+      if (escopo?.length) {
+        sql += ` AND u.filial_id IN (${escopo.map(() => '?').join(',')})`;
+        params.push(...escopo);
+      }
     }
-  }
 
-  sql += ` ORDER BY
+    sql += ` ORDER BY
     CASE u.papel WHEN 'admin' THEN 0 WHEN 'gerente' THEN 1 ELSE 2 END,
     f.nome, u.login`;
 
-  const rows = db.prepare(sql).all(...params);
-  res.json({
-    usuarios: rows.map(mapUsuario),
-    papeis: PAPEIS.map((p) => ({ codigo: p, label: LABELS_PAPEL[p] })),
-  });
+    const rows = await db.prepare(sql).all(...params);
+    res.json({
+      usuarios: rows.map(mapUsuario),
+      papeis: PAPEIS.map((p) => ({ codigo: p, label: LABELS_PAPEL[p] })),
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /** Admin cria usuário */
-router.post('/', requireAdmin, (req, res) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   const { login, senha, papel, cargo, filial_id, whatsapp } = req.body || {};
   if (!login?.trim() || !senha || senha.length < 4) {
     return res.status(400).json({ erro: 'Login e senha (mín. 4 caracteres) são obrigatórios' });
@@ -86,7 +90,7 @@ router.post('/', requireAdmin, (req, res) => {
 
   const db = getDb();
   try {
-    const result = db.prepare(`
+    const result = await db.prepare(`
       INSERT INTO usuarios (login, senha_hash, papel, cargo, filial_id, whatsapp, ativo)
       VALUES (?, ?, ?, ?, ?, ?, 1)
     `).run(
@@ -97,7 +101,7 @@ router.post('/', requireAdmin, (req, res) => {
       papelFinal === 'admin' ? null : (filial_id || null),
       whatsapp?.replace(/\D/g, '') || null
     );
-    const row = db.prepare(`
+    const row = await db.prepare(`
       SELECT u.*, f.nome as filial_nome, f.codigo as filial_codigo
       FROM usuarios u LEFT JOIN filiais f ON f.id = u.filial_id WHERE u.id = ?
     `).get(result.lastInsertRowid);
@@ -108,107 +112,115 @@ router.post('/', requireAdmin, (req, res) => {
       senha_provisoria: senha,
     });
   } catch (err) {
-    if (String(err.message).includes('UNIQUE')) {
+    if (err.code === '23505' || String(err.message).includes('UNIQUE')) {
       return res.status(409).json({ erro: 'Login já existe' });
     }
-    throw err;
+    next(err);
   }
 });
 
 /** Reset de senha — admin qualquer; gerente só operadores da sua filial */
-router.post('/:id/reset-senha', requireGerenteOuAdmin, (req, res) => {
+router.post('/:id/reset-senha', requireGerenteOuAdmin, async (req, res, next) => {
   const { senha } = req.body || {};
   if (!senha || senha.length < 4) {
     return res.status(400).json({ erro: 'Informe a nova senha (mín. 4 caracteres)' });
   }
 
-  const db = getDb();
-  const alvo = db.prepare(`
-    SELECT u.*, f.nome as filial_nome FROM usuarios u
-    LEFT JOIN filiais f ON f.id = u.filial_id WHERE u.id = ?
-  `).get(req.params.id);
-  if (!alvo) return res.status(404).json({ erro: 'Usuário não encontrado' });
+  try {
+    const db = getDb();
+    const alvo = await db.prepare(`
+      SELECT u.*, f.nome as filial_nome FROM usuarios u
+      LEFT JOIN filiais f ON f.id = u.filial_id WHERE u.id = ?
+    `).get(req.params.id);
+    if (!alvo) return res.status(404).json({ erro: 'Usuário não encontrado' });
 
-  if (req.user.papel === 'gerente') {
-    if (alvo.papel === 'admin') {
-      return res.status(403).json({ erro: 'Gerente não pode alterar senha do admin total' });
+    if (req.user.papel === 'gerente') {
+      if (alvo.papel === 'admin') {
+        return res.status(403).json({ erro: 'Gerente não pode alterar senha do admin total' });
+      }
+      const escopo = filiaisEscopoIds(req);
+      if (escopo?.length && !escopo.includes(alvo.filial_id)) {
+        return res.status(403).json({ erro: 'Usuário fora do escopo da sua unidade' });
+      }
     }
-    const escopo = filiaisEscopoIds(req);
-    if (escopo?.length && !escopo.includes(alvo.filial_id)) {
-      return res.status(403).json({ erro: 'Usuário fora do escopo da sua unidade' });
-    }
+
+    await db.prepare(`
+      UPDATE usuarios SET senha_hash = ?, updated_at = NOW()
+      WHERE id = ?
+    `).run(hashSenha(senha), alvo.id);
+
+    res.json({
+      mensagem: `Senha de ${alvo.login} redefinida`,
+      login: alvo.login,
+      // Devolve só neste response — senhas nunca ficam em texto no banco
+      senha_provisoria: senha,
+    });
+  } catch (err) {
+    next(err);
   }
-
-  db.prepare(`
-    UPDATE usuarios SET senha_hash = ?, updated_at = datetime('now', 'localtime')
-    WHERE id = ?
-  `).run(hashSenha(senha), alvo.id);
-
-  res.json({
-    mensagem: `Senha de ${alvo.login} redefinida`,
-    login: alvo.login,
-    // Devolve só neste response — senhas nunca ficam em texto no banco
-    senha_provisoria: senha,
-  });
 });
 
 /** Ativar / desativar / alterar papel e filial */
-router.patch('/:id', requireAdmin, (req, res) => {
+router.patch('/:id', requireAdmin, async (req, res, next) => {
   const { ativo, cargo, whatsapp, papel, filial_id } = req.body || {};
-  const db = getDb();
-  const alvo = db.prepare('SELECT * FROM usuarios WHERE id = ?').get(req.params.id);
-  if (!alvo) return res.status(404).json({ erro: 'Usuário não encontrado' });
+  try {
+    const db = getDb();
+    const alvo = await db.prepare('SELECT * FROM usuarios WHERE id = ?').get(req.params.id);
+    if (!alvo) return res.status(404).json({ erro: 'Usuário não encontrado' });
 
-  if (Number(alvo.id) === Number(req.user.id) && ativo === false) {
-    return res.status(400).json({ erro: 'Você não pode desativar a si mesmo' });
+    if (Number(alvo.id) === Number(req.user.id) && ativo === false) {
+      return res.status(400).json({ erro: 'Você não pode desativar a si mesmo' });
+    }
+
+    const papelFinal = papel != null ? papel : alvo.papel;
+    if (!PAPEIS.includes(papelFinal)) {
+      return res.status(400).json({ erro: 'Papel inválido' });
+    }
+
+    let filialFinal = alvo.filial_id;
+    if (filial_id !== undefined) {
+      filialFinal = filial_id === null || filial_id === '' ? null : Number(filial_id);
+    }
+    if (papelFinal === 'admin') {
+      filialFinal = null;
+    }
+    if (papelFinal === 'filial' && !filialFinal) {
+      return res.status(400).json({ erro: 'Operador de filial precisa de uma filial' });
+    }
+
+    const cargoFinal = cargo != null
+      ? (String(cargo).trim() || null)
+      : (papel != null
+        ? (papelFinal === 'admin' ? 'admin' : papelFinal === 'gerente' ? 'gerente_filial' : 'funcionario')
+        : alvo.cargo);
+
+    await db.prepare(`
+      UPDATE usuarios SET
+        ativo = COALESCE(?, ativo),
+        cargo = ?,
+        whatsapp = COALESCE(?, whatsapp),
+        papel = ?,
+        filial_id = ?,
+        updated_at = NOW()
+      WHERE id = ?
+    `).run(
+      ativo == null ? null : (ativo ? 1 : 0),
+      cargoFinal,
+      whatsapp != null ? String(whatsapp).replace(/\D/g, '') || null : null,
+      papelFinal,
+      filialFinal,
+      alvo.id
+    );
+
+    const row = await db.prepare(`
+      SELECT u.*, f.nome as filial_nome, f.codigo as filial_codigo
+      FROM usuarios u LEFT JOIN filiais f ON f.id = u.filial_id WHERE u.id = ?
+    `).get(alvo.id);
+
+    res.json({ mensagem: 'Usuário atualizado', usuario: mapUsuario(row) });
+  } catch (err) {
+    next(err);
   }
-
-  const papelFinal = papel != null ? papel : alvo.papel;
-  if (!PAPEIS.includes(papelFinal)) {
-    return res.status(400).json({ erro: 'Papel inválido' });
-  }
-
-  let filialFinal = alvo.filial_id;
-  if (filial_id !== undefined) {
-    filialFinal = filial_id === null || filial_id === '' ? null : Number(filial_id);
-  }
-  if (papelFinal === 'admin') {
-    filialFinal = null;
-  }
-  if (papelFinal === 'filial' && !filialFinal) {
-    return res.status(400).json({ erro: 'Operador de filial precisa de uma filial' });
-  }
-
-  const cargoFinal = cargo != null
-    ? (String(cargo).trim() || null)
-    : (papel != null
-      ? (papelFinal === 'admin' ? 'admin' : papelFinal === 'gerente' ? 'gerente_filial' : 'funcionario')
-      : alvo.cargo);
-
-  db.prepare(`
-    UPDATE usuarios SET
-      ativo = COALESCE(?, ativo),
-      cargo = ?,
-      whatsapp = COALESCE(?, whatsapp),
-      papel = ?,
-      filial_id = ?,
-      updated_at = datetime('now', 'localtime')
-    WHERE id = ?
-  `).run(
-    ativo == null ? null : (ativo ? 1 : 0),
-    cargoFinal,
-    whatsapp != null ? String(whatsapp).replace(/\D/g, '') || null : null,
-    papelFinal,
-    filialFinal,
-    alvo.id
-  );
-
-  const row = db.prepare(`
-    SELECT u.*, f.nome as filial_nome, f.codigo as filial_codigo
-    FROM usuarios u LEFT JOIN filiais f ON f.id = u.filial_id WHERE u.id = ?
-  `).get(alvo.id);
-
-  res.json({ mensagem: 'Usuário atualizado', usuario: mapUsuario(row) });
 });
 
 export default router;

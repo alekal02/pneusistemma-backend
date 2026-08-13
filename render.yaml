@@ -1,3 +1,6 @@
+# Blueprint Render — use com Neon: defina DATABASE_URL manualmente no painel
+# (Neon Connection string URI). Se preferir Postgres do Render, descomente fromDatabase.
+
 services:
   - type: web
     name: pneusistemma-backend
@@ -14,10 +17,11 @@ services:
         value: production
       - key: HOST
         value: "0.0.0.0"
-      # Persistência: monte um disco em /var/data no painel do Render
-      # e use DB_PATH=/var/data/pneus.db
-      - key: DB_PATH
-        value: /var/data/pneus.db
+      # Cole a URI do Neon no painel (Environment)
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: "true"
       - key: JWT_SECRET
         generateValue: true
       - key: JWT_EXPIRES_IN

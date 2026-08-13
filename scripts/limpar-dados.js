@@ -2,19 +2,7 @@
  * Limpa dados operacionais para testes do zero.
  * Mantém: filiais, usuarios, configuracoes (limites).
  */
-import { DatabaseSync } from 'node:sqlite';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.resolve(__dirname, '../data/pneus.db');
-
-const db = new DatabaseSync(dbPath);
-db.exec('PRAGMA foreign_keys = ON');
-
-function count(table) {
-  return db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get().c;
-}
+import { initDatabase, getDb, closePool } from '../src/database.js';
 
 const tabelas = [
   'veiculos',
@@ -27,30 +15,42 @@ const tabelas = [
   'filiais',
 ];
 
-console.log('Banco:', dbPath);
-console.log('Antes:', Object.fromEntries(tabelas.map((t) => [t, count(t)])));
-
-db.exec('BEGIN');
-try {
-  db.exec('DELETE FROM notificacoes_whatsapp');
-  db.exec('DELETE FROM tokens_acesso_rapido');
-  db.exec('DELETE FROM medicoes');
-  db.exec('DELETE FROM movimentacoes');
-  db.exec('DELETE FROM pneus');
-  db.exec('DELETE FROM veiculos');
-  db.exec(`
-    DELETE FROM sqlite_sequence
-    WHERE name IN (
-      'veiculos','pneus','medicoes','movimentacoes',
-      'notificacoes_whatsapp','tokens_acesso_rapido'
-    )
-  `);
-  db.exec('COMMIT');
-} catch (err) {
-  db.exec('ROLLBACK');
-  throw err;
+async function contagens(db) {
+  const entries = [];
+  for (const t of tabelas) {
+    const row = await db.prepare(`SELECT COUNT(*) as c FROM ${t}`).get();
+    entries.push([t, Number(row?.c || 0)]);
+  }
+  return Object.fromEntries(entries);
 }
 
-console.log('Depois:', Object.fromEntries(tabelas.map((t) => [t, count(t)])));
-db.close();
-console.log('OK: frota limpa. Logins e limites mantidos.');
+async function main() {
+  await initDatabase();
+  const db = getDb();
+
+  console.log('Antes:', await contagens(db));
+
+  // TRUNCATE ... RESTART IDENTITY zera as sequences (equivalente ao sqlite_sequence)
+  await db.transaction(async () => {
+    await db.exec(`
+      TRUNCATE TABLE
+        notificacoes_whatsapp,
+        tokens_acesso_rapido,
+        medicoes,
+        movimentacoes,
+        pneus,
+        veiculos
+      RESTART IDENTITY CASCADE
+    `);
+  });
+
+  console.log('Depois:', await contagens(db));
+  await closePool();
+  console.log('OK: frota limpa. Logins e limites mantidos.');
+}
+
+main().catch(async (err) => {
+  console.error(err);
+  try { await closePool(); } catch { /* ignore */ }
+  process.exit(1);
+});

@@ -215,14 +215,14 @@ export function validarMontagem({ condicao, tipo_pneu, posicao }, { strictTipo =
  * Atualiza só o layout do veículo.
  * Não cria pneus fantasma — posições fora do layout voltam ao estoque.
  */
-export function aplicarLayoutPneus(db, veiculoId, layoutId, posicoesCustom) {
+export async function aplicarLayoutPneus(db, veiculoId, layoutId, posicoesCustom) {
   const layout = posicoesCustom?.length
     ? { posicoes: ordenarPosicoes(posicoesCustom) }
     : getLayout(layoutId);
 
   const desejadas = layout.posicoes;
 
-  const montados = db.prepare(`
+  const montados = await db.prepare(`
     SELECT id, posicao, filial_id FROM pneus
     WHERE veiculo_id = ? AND ativo = 1 AND status_pneu = 'montado'
   `).all(veiculoId);
@@ -242,13 +242,13 @@ export function aplicarLayoutPneus(db, veiculoId, layoutId, posicoesCustom) {
 
   for (const p of montados) {
     if (!desejadas.includes(p.posicao)) {
-      desmontar.run(p.id);
-      mov.run(p.id, veiculoId, p.posicao);
+      await desmontar.run(p.id);
+      await mov.run(p.id, veiculoId, p.posicao);
     }
   }
 
-  db.prepare(`
-    UPDATE veiculos SET layout_pneus = ?, updated_at = datetime('now', 'localtime')
+  await db.prepare(`
+    UPDATE veiculos SET layout_pneus = ?, updated_at = NOW()
     WHERE id = ?
   `).run(layoutId || 'personalizado', veiculoId);
 

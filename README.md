@@ -1,19 +1,31 @@
 # PneuSistemma — Backend (API)
 
-API REST (Node.js + Express + SQLite) para controle de desgaste de pneus.
+API REST (Node.js + Express + **PostgreSQL**) para controle de desgaste de pneus.
 
 **Deploy:** [Render](https://render.com)  
 **Repositório frontend:** https://github.com/alekal02/pneusistemma-frontend
 
 ## Stack
 
-- Node.js ≥ 22
+- Node.js ≥ 18 (recomendado 22)
 - Express
-- SQLite (`node:sqlite`)
+- PostgreSQL (`pg`)
 - JWT + bcrypt
 - Integração WuzAPI (WhatsApp)
 
 ## Local
+
+1. Suba o Postgres (Docker):
+
+```bash
+docker run -d --name pneusistemma-pg \
+  -e POSTGRES_USER=pneu \
+  -e POSTGRES_PASSWORD=pneu123 \
+  -e POSTGRES_DB=pneusistemma \
+  -p 5434:5432 postgres:16
+```
+
+2. Configure e rode a API:
 
 ```bash
 cp .env.example .env
@@ -22,17 +34,26 @@ npm run dev
 ```
 
 API: http://localhost:3000/api  
-Health: http://localhost:3000/api/health
+Health: http://localhost:3000/api/health (`"database":"postgresql"`)
+
+### Smoke test
+
+Com a API no ar:
+
+```bash
+npm run smoke
+```
 
 ## Render
 
-1. New → Web Service → este repositório
-2. Build: `npm install` · Start: `npm start`
-3. Health Check Path: `/api/health`
-4. Adicione um **Disk** montado em `/var/data`
-5. Configure as variáveis (veja `VARIAVEIS_AMBIENTE.md`)
+1. Crie um **PostgreSQL** no Render (ou use o `render.yaml`)
+2. New → Web Service → este repositório
+3. Build: `npm install` · Start: `npm start`
+4. Health Check Path: `/api/health`
+5. Defina `DATABASE_URL` (URI do **Neon** ou outro Postgres) e `DATABASE_SSL=true`
+6. Configure as demais variáveis (veja `VARIAVEIS_AMBIENTE.md` / `render.env.example`)
 
-Blueprint opcional: `render.yaml`
+> Não use `DB_PATH` nem Disk de SQLite — o banco é PostgreSQL.
 
 ## Variáveis de ambiente
 

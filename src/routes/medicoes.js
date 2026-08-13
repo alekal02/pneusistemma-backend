@@ -24,33 +24,38 @@ const router = Router();
 /**
  * JWT de filial OU token de acesso rápido (WhatsApp)
  */
-function requireAuthOrAcessoRapido(req, res, next) {
+async function requireAuthOrAcessoRapido(req, res, next) {
   const tokenAcesso = req.headers['x-acesso-rapido-token']
     || req.body?.token_acesso
     || req.query?.token_acesso;
 
-  if (tokenAcesso) {
-    const tokenRow = validarTokenAcessoRapido(String(tokenAcesso));
-    if (!tokenRow) {
-      return res.status(401).json({ erro: 'Token de acesso rápido inválido ou expirado' });
+  try {
+    if (tokenAcesso) {
+      const tokenRow = await validarTokenAcessoRapido(String(tokenAcesso));
+      if (!tokenRow) {
+        return res.status(401).json({ erro: 'Token de acesso rápido inválido ou expirado' });
+      }
+      await marcarTokenUsado(tokenRow.id);
+      req.acessoRapido = tokenRow;
+      return next();
     }
-    marcarTokenUsado(tokenRow.id);
-    req.acessoRapido = tokenRow;
-    return next();
-  }
 
-  return requireAuth(req, res, (err) => {
-    if (err) return next(err);
-    return requireFilial(req, res, next);
-  });
+    return await requireAuth(req, res, (err) => {
+      if (err) return next(err);
+      return requireFilial(req, res, next);
+    });
+  } catch (err) {
+    return next(err);
+  }
 }
 
-router.get('/alertas', requireAuth, requireFilial, (req, res) => {
-  const db = getDb();
-  const limites = getLimites();
-  const filialId = filialScopeId(req);
+router.get('/alertas', requireAuth, requireFilial, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const limites = getLimites();
+    const filialId = filialScopeId(req);
 
-  const alertas = db.prepare(`
+    const alertas = await db.prepare(`
     SELECT
       m.*,
       p.posicao, p.marca as pneu_marca, p.modelo as pneu_modelo,
@@ -78,31 +83,35 @@ router.get('/alertas', requireAuth, requireFilial, (req, res) => {
     ORDER BY menor_sulco_raw ASC
   `).all(filialId, Math.max(limites.sulco_alerta_mm, limites.sulco_recap_mm));
 
-  const resultado = alertas.map((a) => {
-    const menor = a.menor_sulco_raw === 999 ? null : a.menor_sulco_raw;
-    const diag = diagnosticarPerfil(a, limites.diagnostico_tolerancia_mm);
-    const acao = sugerirAcao(menor, limites, a.vida_recap || 0);
-    return {
-      ...a,
-      menor_sulco: menor,
-      status_sulco: classificarSulco(menor),
-      diagnostico: diag.codigo,
-      diagnostico_label: diag.label,
-      acao_sugerida: acao.codigo,
-      acao_label: acao.label,
-      acao_motivo: acao.motivo,
-    };
-  });
+    const resultado = alertas.map((a) => {
+      const menor = a.menor_sulco_raw === 999 ? null : a.menor_sulco_raw;
+      const diag = diagnosticarPerfil(a, limites.diagnostico_tolerancia_mm);
+      const acao = sugerirAcao(menor, limites, a.vida_recap || 0);
+      return {
+        ...a,
+        menor_sulco: menor,
+        status_sulco: classificarSulco(menor),
+        diagnostico: diag.codigo,
+        diagnostico_label: diag.label,
+        acao_sugerida: acao.codigo,
+        acao_label: acao.label,
+        acao_motivo: acao.motivo,
+      };
+    });
 
-  res.json(resultado);
+    res.json(resultado);
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.get('/acoes', requireAuth, requireFilial, (req, res) => {
-  const db = getDb();
-  const limites = getLimites();
-  const filialId = filialScopeId(req);
+router.get('/acoes', requireAuth, requireFilial, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const limites = getLimites();
+    const filialId = filialScopeId(req);
 
-  const pneus = db.prepare(`
+    const pneus = await db.prepare(`
     SELECT
       p.*,
       v.placa, v.apelido, v.tipo,
@@ -115,45 +124,48 @@ router.get('/acoes', requireAuth, requireFilial, (req, res) => {
     WHERE p.ativo = 1 AND p.status_pneu = 'montado'
   `).all(filialId);
 
-  const itens = pneus
-    .map((p) => {
-      const menor = menorSulco(p);
-      const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm);
-      const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
-      return {
-        pneu_id: p.id,
-        veiculo_id: p.veiculo_id,
-        placa: p.placa,
-        apelido: p.apelido,
-        posicao: p.posicao,
-        numero_fogo: p.numero_fogo,
-        menor_sulco: menor,
-        status_sulco: classificarSulco(menor),
-        diagnostico: diag.codigo,
-        diagnostico_label: diag.label,
-        acao_sugerida: acao.codigo,
-        acao_label: acao.label,
-        acao_motivo: acao.motivo,
-        vida_recap: p.vida_recap,
-        data_medicao: p.data_medicao,
-      };
-    })
-    .filter((i) => i.acao_sugerida !== 'ok')
-    .sort((a, b) => {
-      const ordem = { troca: 0, recap: 1, monitorar: 2 };
-      return (ordem[a.acao_sugerida] ?? 9) - (ordem[b.acao_sugerida] ?? 9);
-    });
+    const itens = pneus
+      .map((p) => {
+        const menor = menorSulco(p);
+        const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm);
+        const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
+        return {
+          pneu_id: p.id,
+          veiculo_id: p.veiculo_id,
+          placa: p.placa,
+          apelido: p.apelido,
+          posicao: p.posicao,
+          numero_fogo: p.numero_fogo,
+          menor_sulco: menor,
+          status_sulco: classificarSulco(menor),
+          diagnostico: diag.codigo,
+          diagnostico_label: diag.label,
+          acao_sugerida: acao.codigo,
+          acao_label: acao.label,
+          acao_motivo: acao.motivo,
+          vida_recap: p.vida_recap,
+          data_medicao: p.data_medicao,
+        };
+      })
+      .filter((i) => i.acao_sugerida !== 'ok')
+      .sort((a, b) => {
+        const ordem = { troca: 0, recap: 1, monitorar: 2 };
+        return (ordem[a.acao_sugerida] ?? 9) - (ordem[b.acao_sugerida] ?? 9);
+      });
 
-  res.json({
-    total: itens.length,
-    troca: itens.filter((i) => i.acao_sugerida === 'troca').length,
-    recap: itens.filter((i) => i.acao_sugerida === 'recap').length,
-    monitorar: itens.filter((i) => i.acao_sugerida === 'monitorar').length,
-    itens,
-  });
+    res.json({
+      total: itens.length,
+      troca: itens.filter((i) => i.acao_sugerida === 'troca').length,
+      recap: itens.filter((i) => i.acao_sugerida === 'recap').length,
+      monitorar: itens.filter((i) => i.acao_sugerida === 'monitorar').length,
+      itens,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post('/', requireAuthOrAcessoRapido, async (req, res) => {
+router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
   const {
     pneu_id,
     data_medicao,
@@ -175,18 +187,22 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res) => {
   let filialId;
   let pneu;
 
-  if (req.acessoRapido) {
-    filialId = req.acessoRapido.filial_id;
-    pneu = assertPneuDaFilial(pneu_id, filialId);
-    if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
-    // R3: só o veículo do token
-    if (Number(pneu.veiculo_id) !== Number(req.acessoRapido.veiculo_id)) {
-      return res.status(403).json({ erro: 'Este token não permite medir este veículo' });
+  try {
+    if (req.acessoRapido) {
+      filialId = req.acessoRapido.filial_id;
+      pneu = await assertPneuDaFilial(pneu_id, filialId);
+      if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
+      // R3: só o veículo do token
+      if (Number(pneu.veiculo_id) !== Number(req.acessoRapido.veiculo_id)) {
+        return res.status(403).json({ erro: 'Este token não permite medir este veículo' });
+      }
+    } else {
+      filialId = filialScopeId(req);
+      pneu = await assertPneuDaFilial(pneu_id, filialId);
+      if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
     }
-  } else {
-    filialId = filialScopeId(req);
-    pneu = assertPneuDaFilial(pneu_id, filialId);
-    if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
+  } catch (err) {
+    return next(err);
   }
 
   const limites = getLimites();
@@ -206,122 +222,134 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res) => {
     papel: pneu.posicao ? papelPosicao(pneu.posicao) : null,
   });
 
-  let candidatos = [];
-  if (pneu.veiculo_id) {
-    candidatos = db.prepare(`
-      SELECT p.id, p.posicao, p.numero_fogo,
-        (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
-        (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
-        (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
-        (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux
-      FROM pneus p
-      WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado' AND p.id != ?
-    `).all(pneu.veiculo_id, pneu_id).map((c) => ({
-      ...c,
-      posicao_label: c.posicao,
-      sulco_externo: c.ult_sulco_ext,
-      sulco_central: c.ult_sulco_cent,
-      sulco_interno: c.ult_sulco_int,
-      sulco_auxiliar: c.ult_sulco_aux,
-    }));
-  }
-
-  const acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
-    pontos: medicaoRow,
-    candidatos,
-  });
-  const statusSulco = classificarSulco(menor);
-
-  const anterior = db.prepare(`
-    SELECT * FROM medicoes WHERE pneu_id = ?
-    ORDER BY data_medicao DESC, id DESC LIMIT 1
-  `).get(pneu_id);
-
+  let acao;
+  let statusSulco;
   let desgaste = null;
-  if (anterior && km_veiculo != null) {
-    desgaste = desgastePorKm(
-      menorSulco(anterior),
-      menor,
-      anterior.km_veiculo,
-      km_veiculo
-    );
-  }
-
-  if (pneu.sulco_inicial_mm == null && menor != null) {
-    db.prepare('UPDATE pneus SET sulco_inicial_mm = ? WHERE id = ?').run(menor, pneu_id);
-  }
-
-  const data = data_medicao || new Date().toISOString().split('T')[0];
-  const responsavelFinal = responsavel?.trim()
-    || (req.acessoRapido ? `WhatsApp ${req.acessoRapido.whatsapp_origem || 'acesso-rapido'}` : null);
-
-  // Prazo de 15 dias para iniciar recap quando entra em monitorar
-  if (statusSulco === 'alerta') {
-    db.prepare(`
-      UPDATE pneus SET data_alerta_monitorar = COALESCE(data_alerta_monitorar, ?)
-      WHERE id = ?
-    `).run(data, pneu_id);
-  } else if (statusSulco === 'ok' || statusSulco === 'critico') {
-    db.prepare(`UPDATE pneus SET data_alerta_monitorar = NULL WHERE id = ?`).run(pneu_id);
-  }
-
-  const veiculo = db.prepare(`SELECT * FROM veiculos WHERE id = ?`).get(pneu.veiculo_id);
-  const placa = veiculo?.placa || pneu.placa || null;
-
-  const result = db.prepare(`
-    INSERT INTO medicoes (
-      pneu_id, data_medicao, km_veiculo, hr_veiculo,
-      sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
-      pressao_psi, responsavel, observacoes, marcacao_json,
-      diagnostico, acao_sugerida, desgaste_mm_km, veiculo_placa
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    pneu_id,
-    data,
-    km_veiculo || null,
-    hr_veiculo ?? null,
-    sulco_externo ?? null,
-    sulco_central ?? null,
-    sulco_interno ?? null,
-    sulco_auxiliar ?? null,
-    pressao_psi ?? null,
-    responsavelFinal,
-    observacoes?.trim() || null,
-    marcacao_json ? JSON.stringify(marcacao_json) : null,
-    diag.codigo,
-    acao.codigo,
-    desgaste,
-    placa
-  );
-
-  const medicaoId = result.lastInsertRowid;
-
-  if (km_veiculo) {
-    db.prepare(`
-      UPDATE veiculos SET km_atual = MAX(km_atual, ?), updated_at = datetime('now', 'localtime')
-      WHERE id = ? AND filial_id = ?
-    `).run(km_veiculo, pneu.veiculo_id, filialId);
-  }
-
-  if (hr_veiculo != null) {
-    db.prepare(`
-      UPDATE veiculos SET hr_atual = MAX(COALESCE(hr_atual, 0), ?), updated_at = datetime('now', 'localtime')
-      WHERE id = ? AND filial_id = ?
-    `).run(hr_veiculo, pneu.veiculo_id, filialId);
-  }
-
-  const pneuAtualizado = db.prepare('SELECT * FROM pneus WHERE id = ?').get(pneu_id);
-  const prazoDias = limites.prazo_recap_dias ?? 15;
+  let veiculo;
+  let placa;
+  let medicaoId;
+  let prazoDias;
   let dataLimiteRecap = null;
   let diasRestantes = null;
-  if (statusSulco === 'alerta' && pneuAtualizado?.data_alerta_monitorar) {
-    dataLimiteRecap = adicionarDias(pneuAtualizado.data_alerta_monitorar, prazoDias);
-    const [y, m, d] = String(dataLimiteRecap).split('-').map(Number);
-    const fim = new Date(y, m - 1, d);
-    const hoje = new Date();
-    diasRestantes = Math.ceil(
-      (fim - new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate())) / 86400000
+
+  try {
+    let candidatos = [];
+    if (pneu.veiculo_id) {
+      const rows = await db.prepare(`
+        SELECT p.id, p.posicao, p.numero_fogo,
+          (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
+          (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
+          (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
+          (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux
+        FROM pneus p
+        WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado' AND p.id != ?
+      `).all(pneu.veiculo_id, pneu_id);
+      candidatos = rows.map((c) => ({
+        ...c,
+        posicao_label: c.posicao,
+        sulco_externo: c.ult_sulco_ext,
+        sulco_central: c.ult_sulco_cent,
+        sulco_interno: c.ult_sulco_int,
+        sulco_auxiliar: c.ult_sulco_aux,
+      }));
+    }
+
+    acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
+      pontos: medicaoRow,
+      candidatos,
+    });
+    statusSulco = classificarSulco(menor);
+
+    const anterior = await db.prepare(`
+      SELECT * FROM medicoes WHERE pneu_id = ?
+      ORDER BY data_medicao DESC, id DESC LIMIT 1
+    `).get(pneu_id);
+
+    if (anterior && km_veiculo != null) {
+      desgaste = desgastePorKm(
+        menorSulco(anterior),
+        menor,
+        anterior.km_veiculo,
+        km_veiculo
+      );
+    }
+
+    if (pneu.sulco_inicial_mm == null && menor != null) {
+      await db.prepare('UPDATE pneus SET sulco_inicial_mm = ? WHERE id = ?').run(menor, pneu_id);
+    }
+
+    const data = data_medicao || new Date().toISOString().split('T')[0];
+    const responsavelFinal = responsavel?.trim()
+      || (req.acessoRapido ? `WhatsApp ${req.acessoRapido.whatsapp_origem || 'acesso-rapido'}` : null);
+
+    // Prazo de 15 dias para iniciar recap quando entra em monitorar
+    if (statusSulco === 'alerta') {
+      await db.prepare(`
+        UPDATE pneus SET data_alerta_monitorar = COALESCE(data_alerta_monitorar, ?)
+        WHERE id = ?
+      `).run(data, pneu_id);
+    } else if (statusSulco === 'ok' || statusSulco === 'critico') {
+      await db.prepare(`UPDATE pneus SET data_alerta_monitorar = NULL WHERE id = ?`).run(pneu_id);
+    }
+
+    veiculo = await db.prepare(`SELECT * FROM veiculos WHERE id = ?`).get(pneu.veiculo_id);
+    placa = veiculo?.placa || pneu.placa || null;
+
+    const result = await db.prepare(`
+      INSERT INTO medicoes (
+        pneu_id, data_medicao, km_veiculo, hr_veiculo,
+        sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
+        pressao_psi, responsavel, observacoes, marcacao_json,
+        diagnostico, acao_sugerida, desgaste_mm_km, veiculo_placa
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      pneu_id,
+      data,
+      km_veiculo || null,
+      hr_veiculo ?? null,
+      sulco_externo ?? null,
+      sulco_central ?? null,
+      sulco_interno ?? null,
+      sulco_auxiliar ?? null,
+      pressao_psi ?? null,
+      responsavelFinal,
+      observacoes?.trim() || null,
+      marcacao_json ? JSON.stringify(marcacao_json) : null,
+      diag.codigo,
+      acao.codigo,
+      desgaste,
+      placa
     );
+
+    medicaoId = result.lastInsertRowid;
+
+    if (km_veiculo) {
+      await db.prepare(`
+        UPDATE veiculos SET km_atual = MAX(km_atual, ?), updated_at = NOW()
+        WHERE id = ? AND filial_id = ?
+      `).run(km_veiculo, pneu.veiculo_id, filialId);
+    }
+
+    if (hr_veiculo != null) {
+      await db.prepare(`
+        UPDATE veiculos SET hr_atual = MAX(COALESCE(hr_atual, 0), ?), updated_at = NOW()
+        WHERE id = ? AND filial_id = ?
+      `).run(hr_veiculo, pneu.veiculo_id, filialId);
+    }
+
+    const pneuAtualizado = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(pneu_id);
+    prazoDias = limites.prazo_recap_dias ?? 15;
+    if (statusSulco === 'alerta' && pneuAtualizado?.data_alerta_monitorar) {
+      dataLimiteRecap = adicionarDias(pneuAtualizado.data_alerta_monitorar, prazoDias);
+      const [y, m, d] = String(dataLimiteRecap).split('-').map(Number);
+      const fim = new Date(y, m - 1, d);
+      const hoje = new Date();
+      diasRestantes = Math.ceil(
+        (fim - new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate())) / 86400000
+      );
+    }
+  } catch (err) {
+    return next(err);
   }
 
   let notificacao = null;
@@ -361,19 +389,23 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res) => {
   });
 });
 
-router.delete('/:id', requireAuth, requireFilial, (req, res) => {
-  const db = getDb();
-  const filialId = filialScopeId(req);
-  const med = db.prepare(`
-    SELECT m.id FROM medicoes m
-    JOIN pneus p ON p.id = m.pneu_id
-    JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
-    WHERE m.id = ?
-  `).get(filialId, req.params.id);
-  if (!med) return res.status(404).json({ erro: 'Medição não encontrada' });
+router.delete('/:id', requireAuth, requireFilial, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const filialId = filialScopeId(req);
+    const med = await db.prepare(`
+      SELECT m.id FROM medicoes m
+      JOIN pneus p ON p.id = m.pneu_id
+      JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
+      WHERE m.id = ?
+    `).get(filialId, req.params.id);
+    if (!med) return res.status(404).json({ erro: 'Medição não encontrada' });
 
-  db.prepare('DELETE FROM medicoes WHERE id = ?').run(req.params.id);
-  res.json({ mensagem: 'Medição removida' });
+    await db.prepare('DELETE FROM medicoes WHERE id = ?').run(req.params.id);
+    res.json({ mensagem: 'Medição removida' });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

@@ -18,10 +18,10 @@ import {
   labelTipoPneu,
 } from '../pneus-layouts.js';
 
-export function gerarTokenAcessoRapido({ veiculoId, filialId, whatsappOrigem = null }) {
+export async function gerarTokenAcessoRapido({ veiculoId, filialId, whatsappOrigem = null }) {
   const db = getDb();
   const token = randomBytes(32).toString('hex');
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO tokens_acesso_rapido (token, veiculo_id, filial_id, whatsapp_origem, expira_em)
     VALUES (?, ?, ?, ?, datetime('now', 'localtime', '+24 hours'))
   `).run(token, veiculoId, filialId, whatsappOrigem);
@@ -36,19 +36,19 @@ export function gerarTokenAcessoRapido({ veiculoId, filialId, whatsappOrigem = n
   return { token, link };
 }
 
-export function validarTokenAcessoRapido(token) {
+export async function validarTokenAcessoRapido(token) {
   if (!token) return null;
   const db = getDb();
-  const row = db.prepare(`
+  const row = await db.prepare(`
     SELECT * FROM tokens_acesso_rapido
     WHERE token = ? AND expira_em > datetime('now', 'localtime')
   `).get(token);
   return row || null;
 }
 
-export function marcarTokenUsado(tokenId) {
+export async function marcarTokenUsado(tokenId) {
   const db = getDb();
-  db.prepare(`
+  await db.prepare(`
     UPDATE tokens_acesso_rapido
     SET usado_em = COALESCE(usado_em, datetime('now', 'localtime'))
     WHERE id = ?
@@ -56,24 +56,24 @@ export function marcarTokenUsado(tokenId) {
 }
 
 /** Mesmo payload de GET /veiculos/:id */
-export function montarDetalheVeiculo(veiculoId, filialId = null) {
+export async function montarDetalheVeiculo(veiculoId, filialId = null) {
   const db = getDb();
   const limites = getLimites();
 
   let veiculo;
   if (filialId != null) {
-    veiculo = db.prepare(`
+    veiculo = await db.prepare(`
       SELECT * FROM veiculos WHERE id = ? AND filial_id = ? AND ativo = 1
     `).get(veiculoId, filialId);
   } else {
-    veiculo = db.prepare(`
+    veiculo = await db.prepare(`
       SELECT * FROM veiculos WHERE id = ? AND ativo = 1
     `).get(veiculoId);
   }
   if (!veiculo) return null;
 
   const orderSql = sqlOrderPosicao('p.posicao');
-  const pneus = db.prepare(`
+  const pneus = await db.prepare(`
     SELECT p.*,
       (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
       (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
@@ -153,7 +153,7 @@ export function montarDetalheVeiculo(veiculoId, filialId = null) {
     montado: pneusComStatus.some((p) => p.posicao === codigo),
   }));
 
-  const medicoes = db.prepare(`
+  const medicoes = await db.prepare(`
     SELECT m.*, p.posicao, p.numero_fogo
     FROM medicoes m
     JOIN pneus p ON m.pneu_id = p.id
@@ -179,8 +179,8 @@ export function montarDetalheVeiculo(veiculoId, filialId = null) {
   };
 }
 
-export function resumoStatusPneusVeiculo(veiculoId) {
-  const detalhe = montarDetalheVeiculo(veiculoId);
+export async function resumoStatusPneusVeiculo(veiculoId) {
+  const detalhe = await montarDetalheVeiculo(veiculoId);
   if (!detalhe) return { criticos: 0, alertas: 0, ok: 0, ultimaMedicao: null };
 
   const criticos = detalhe.pneus.filter((p) => p.status_sulco === 'critico').length;
@@ -205,10 +205,10 @@ export function resumoStatusPneusVeiculo(veiculoId) {
 /**
  * Resumo leve para resposta WhatsApp (evita montarDetalheVeiculo completo).
  */
-export function resumoStatusPneusVeiculoRapido(veiculoId) {
+export async function resumoStatusPneusVeiculoRapido(veiculoId) {
   const db = getDb();
 
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT
       p.posicao,
       p.numero_fogo,

@@ -56,10 +56,10 @@ export function wuzapiConfigurado(token = null) {
 }
 
 /** Token WuzAPI da filial, com fallback no .env */
-export function tokenWuzapiFilial(filialId) {
+export async function tokenWuzapiFilial(filialId) {
   if (filialId) {
     const db = getDb();
-    const row = db.prepare(`
+    const row = await db.prepare(`
       SELECT wuzapi_token FROM filiais WHERE id = ? AND ativo = 1
     `).get(filialId);
     const local = tokenWuzapiUtil(row?.wuzapi_token);
@@ -80,7 +80,7 @@ export async function enviarMensagemWhatsApp(phoneOrGroup, text, opts = {}) {
   if (!text?.trim()) throw new Error('Mensagem vazia');
 
   const tokens = [];
-  const primary = tokenWuzapiUtil(opts.token) || tokenWuzapiFilial(opts.filialId);
+  const primary = tokenWuzapiUtil(opts.token) || (await tokenWuzapiFilial(opts.filialId));
   if (primary) tokens.push(primary);
   const fallback = tokenWuzapiUtil(config.wuzapiToken);
   if (fallback && !tokens.includes(fallback)) tokens.push(fallback);
@@ -147,7 +147,7 @@ export async function enviarMensagemWhatsAppComLink(phone, text, opts = {}) {
   return enviarMensagemWhatsApp(phone, text, { ...opts, linkPreview: true });
 }
 
-export function registrarNotificacao({
+export async function registrarNotificacao({
   tipo,
   destinatario,
   mensagem,
@@ -161,7 +161,8 @@ export function registrarNotificacao({
   const dest = normalizarDestino(destinatario);
   let filial = filialId || null;
   if (!filial && veiculoId) {
-    filial = db.prepare('SELECT filial_id FROM veiculos WHERE id = ?').get(veiculoId)?.filial_id || null;
+    const v = await db.prepare('SELECT filial_id FROM veiculos WHERE id = ?').get(veiculoId);
+    filial = v?.filial_id || null;
   }
   return db.prepare(`
     INSERT INTO notificacoes_whatsapp (
@@ -196,7 +197,7 @@ export async function enviarERegistrar({
 }) {
   const dest = normalizarDestino(destinatario);
   if (!dest?.phone) {
-    registrarNotificacao({
+    await registrarNotificacao({
       tipo,
       destinatario: destinatario || '',
       mensagem,
@@ -216,7 +217,7 @@ export async function enviarERegistrar({
       token,
     });
     const status = resp?.skipped ? 'erro' : 'enviado';
-    registrarNotificacao({
+    await registrarNotificacao({
       tipo,
       destinatario: dest.logKey,
       mensagem,
@@ -229,7 +230,7 @@ export async function enviarERegistrar({
     return { ok: status === 'enviado', resp };
   } catch (err) {
     console.error(`[whatsapp] Falha ao enviar para ${dest.logKey}:`, err.message);
-    registrarNotificacao({
+    await registrarNotificacao({
       tipo,
       destinatario: dest.logKey,
       mensagem,

@@ -6,6 +6,7 @@
 import { Router } from 'express';
 import { config } from '../config.js';
 import { getDb } from '../database.js';
+import { ehViolacaoUnique } from '../db-utils.js';
 import {
   requireAuth,
   requireAdmin,
@@ -185,9 +186,9 @@ function limparCampoTexto(v) {
   return s;
 }
 
-function filialOuErro(id) {
+async function filialOuErro(id) {
   const db = getDb();
-  const f = db.prepare(`
+  const f = await db.prepare(`
     SELECT id, nome, codigo, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token, ativo
     FROM filiais WHERE id = ?
   `).get(id);
@@ -200,90 +201,104 @@ function filialOuErro(id) {
 }
 
 /** Lista chatbots cadastrados por filial (escopo do usuário) */
-router.get('/filiais-chatbot', requireGerenteOuAdmin, (_req, res) => {
-  const db = getDb();
-  const escopo = filiaisEscopoIds(_req);
-  let sql = `
-    SELECT id, nome, codigo, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token, ativo
-    FROM filiais
-    WHERE ativo = 1
-  `;
-  const params = [];
-  if (escopo?.length) {
-    sql += ` AND id IN (${escopo.map(() => '?').join(',')})`;
-    params.push(...escopo);
-  }
-  sql += ' ORDER BY nome COLLATE NOCASE';
-  const rows = db.prepare(sql).all(...params);
+router.get('/filiais-chatbot', requireGerenteOuAdmin, async (_req, res, next) => {
+  try {
+    const db = getDb();
+    const escopo = filiaisEscopoIds(_req);
+    let sql = `
+      SELECT id, nome, codigo, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token, ativo
+      FROM filiais
+      WHERE ativo = 1
+    `;
+    const params = [];
+    if (escopo?.length) {
+      sql += ` AND id IN (${escopo.map(() => '?').join(',')})`;
+      params.push(...escopo);
+    }
+    sql += ' ORDER BY LOWER(nome)';
+    const rows = await db.prepare(sql).all(...params);
 
-  res.json({
-    wuzapi_url: config.wuzapiBaseUrl,
-    filiais: rows.map((f) => ({
+    res.json({
+      wuzapi_url: config.wuzapiBaseUrl,
+      filiais: rows.map((f) => ({
+        id: f.id,
+        nome: f.nome,
+        codigo: f.codigo,
+        whatsapp: limparCampoTexto(f.whatsapp),
+        whatsapp_grupo: limparCampoTexto(f.whatsapp_grupo),
+        whatsapp_alerta: limparCampoTexto(f.whatsapp_alerta),
+        tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
+        chatbot_ok: Boolean(limparCampoTexto(f.whatsapp) || limparCampoTexto(f.whatsapp_grupo)),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Salva número/grupo/alerta/token do chatbot da filial */
+router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!assertFilialNoEscopo(req, id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  const { whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token } = req.body || {};
+
+  try {
+    const f = await filialOuErro(id);
+    const db = getDb();
+    const podeToken = isAdmin(req.user) || req.user.papel === 'gerente' || req.user.papel === 'filial';
+    await db.prepare(`
+      UPDATE filiais SET
+        whatsapp = ?,
+        whatsapp_grupo = ?,
+        whatsapp_alerta = ?,
+        wuzapi_token = ?,
+        updated_at = NOW()
+      WHERE id = ?
+    `).run(
+      whatsapp !== undefined
+        ? (limparCampoTexto(whatsapp)?.replace(/\D/g, '') || null)
+        : f.whatsapp,
+      whatsapp_grupo !== undefined ? limparCampoTexto(whatsapp_grupo) : f.whatsapp_grupo,
+      whatsapp_alerta !== undefined
+        ? (limparCampoTexto(whatsapp_alerta)?.replace(/\D/g, '') || null)
+        : f.whatsapp_alerta,
+      (podeToken && wuzapi_token !== undefined)
+        ? limparCampoTexto(wuzapi_token)
+        : f.wuzapi_token,
+      id
+    );
+
+    res.json({ mensagem: `Chatbot de ${f.nome} atualizado` });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
+/** Dados do chatbot da filial (operador/gerente/admin no escopo) */
+router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) => {
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  try {
+    const f = await filialOuErro(req.params.id);
+    res.json({
       id: f.id,
       nome: f.nome,
       codigo: f.codigo,
       whatsapp: limparCampoTexto(f.whatsapp),
       whatsapp_grupo: limparCampoTexto(f.whatsapp_grupo),
       whatsapp_alerta: limparCampoTexto(f.whatsapp_alerta),
-      tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
-      chatbot_ok: Boolean(limparCampoTexto(f.whatsapp) || limparCampoTexto(f.whatsapp_grupo)),
-    })),
-  });
-});
-
-/** Salva número/grupo/alerta/token do chatbot da filial */
-router.put('/filiais-chatbot/:id', requireChatbotAcesso, (req, res) => {
-  const id = Number(req.params.id);
-  if (!assertFilialNoEscopo(req, id)) {
-    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+      tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token) || tokenWuzapiUtil(config.wuzapiToken)),
+      admin_token_ok: Boolean(tokenWuzapiUtil(config.wuzapiAdminToken)),
+      wuzapi_url: config.wuzapiBaseUrl,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
   }
-  const f = filialOuErro(id);
-  const { whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token } = req.body || {};
-
-  const db = getDb();
-  const podeToken = isAdmin(req.user) || req.user.papel === 'gerente' || req.user.papel === 'filial';
-  db.prepare(`
-    UPDATE filiais SET
-      whatsapp = ?,
-      whatsapp_grupo = ?,
-      whatsapp_alerta = ?,
-      wuzapi_token = ?,
-      updated_at = datetime('now', 'localtime')
-    WHERE id = ?
-  `).run(
-    whatsapp !== undefined
-      ? (limparCampoTexto(whatsapp)?.replace(/\D/g, '') || null)
-      : f.whatsapp,
-    whatsapp_grupo !== undefined ? limparCampoTexto(whatsapp_grupo) : f.whatsapp_grupo,
-    whatsapp_alerta !== undefined
-      ? (limparCampoTexto(whatsapp_alerta)?.replace(/\D/g, '') || null)
-      : f.whatsapp_alerta,
-    (podeToken && wuzapi_token !== undefined)
-      ? limparCampoTexto(wuzapi_token)
-      : f.wuzapi_token,
-    id
-  );
-
-  res.json({ mensagem: `Chatbot de ${f.nome} atualizado` });
-});
-
-/** Dados do chatbot da filial (operador/gerente/admin no escopo) */
-router.get('/filial/:id/config', requireChatbotAcesso, (req, res) => {
-  if (!assertFilialNoEscopo(req, req.params.id)) {
-    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
-  }
-  const f = filialOuErro(req.params.id);
-  res.json({
-    id: f.id,
-    nome: f.nome,
-    codigo: f.codigo,
-    whatsapp: limparCampoTexto(f.whatsapp),
-    whatsapp_grupo: limparCampoTexto(f.whatsapp_grupo),
-    whatsapp_alerta: limparCampoTexto(f.whatsapp_alerta),
-    tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token) || tokenWuzapiUtil(config.wuzapiToken)),
-    admin_token_ok: Boolean(tokenWuzapiUtil(config.wuzapiAdminToken)),
-    wuzapi_url: config.wuzapiBaseUrl,
-  });
 });
 
 /**
@@ -295,7 +310,7 @@ router.post('/filial/:id/provisionar-token', requireChatbotAcesso, async (req, r
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = filialOuErro(req.params.id);
+    const f = await filialOuErro(req.params.id);
     const nomeUser = `Pneu-${(f.codigo || f.nome || f.id).toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24) || f.id}`;
 
     const lista = await wuzapiAdminFetch('/admin/users');
@@ -355,10 +370,10 @@ router.post('/filial/:id/provisionar-token', requireChatbotAcesso, async (req, r
     }
 
     const db = getDb();
-    db.prepare(`
+    await db.prepare(`
       UPDATE filiais SET
         wuzapi_token = ?,
-        updated_at = datetime('now', 'localtime')
+        updated_at = NOW()
       WHERE id = ?
     `).run(token, f.id);
 
@@ -385,8 +400,8 @@ router.get('/filial/:id/grupos', requireChatbotAcesso, async (req, res) => {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = filialOuErro(req.params.id);
-    const token = tokenWuzapiFilial(f.id);
+    const f = await filialOuErro(req.params.id);
+    const token = await tokenWuzapiFilial(f.id);
     if (!token) {
       return res.status(400).json({
         erro: 'Cadastre o token e conecte o chatbot antes de listar grupos',
@@ -417,8 +432,8 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = filialOuErro(req.params.id);
-    const token = tokenWuzapiFilial(f.id);
+    const f = await filialOuErro(req.params.id);
+    const token = await tokenWuzapiFilial(f.id);
     if (!wuzapiConfigurado(token)) {
       return res.json({
         filial_id: f.id,
@@ -448,8 +463,8 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = filialOuErro(req.params.id);
-    const token = tokenWuzapiFilial(f.id);
+    const f = await filialOuErro(req.params.id);
+    const token = await tokenWuzapiFilial(f.id);
     if (!token) {
       return res.status(400).json({
         erro: 'Cadastre o token WuzAPI desta filial antes de conectar',
@@ -501,7 +516,7 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = filialOuErro(req.params.id);
+    const f = await filialOuErro(req.params.id);
     const token = tokenWuzapiUtil(f.wuzapi_token);
     if (!token) {
       return res.status(400).json({
@@ -520,7 +535,7 @@ router.post('/filial/:id/logout', requireChatbotAcesso, async (req, res) => {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = filialOuErro(req.params.id);
+    const f = await filialOuErro(req.params.id);
     const token = tokenWuzapiUtil(f.wuzapi_token);
     if (!token) {
       return res.status(400).json({
@@ -537,16 +552,17 @@ router.post('/filial/:id/logout', requireChatbotAcesso, async (req, res) => {
 /**
  * Resumo de envios WhatsApp da filial: pendentes (erro), enviados e logs.
  */
-router.get('/filial/:id/envios', requireChatbotAcesso, (req, res) => {
+router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) => {
   if (!assertFilialNoEscopo(req, req.params.id)) {
     return res.status(403).json({ erro: 'Filial fora do seu escopo' });
   }
   const filialId = Number(req.params.id);
-  filialOuErro(filialId);
-  const db = getDb();
-  const limit = Math.min(Number(req.query.limit) || 40, 100);
+  try {
+    await filialOuErro(filialId);
+    const db = getDb();
+    const limit = Math.min(Number(req.query.limit) || 40, 100);
 
-  const rows = db.prepare(`
+    const rows = await db.prepare(`
     SELECT
       n.id,
       n.tipo,
@@ -577,49 +593,53 @@ router.get('/filial/:id/envios', requireChatbotAcesso, (req, res) => {
     LIMIT ?
   `).all(filialId, filialId, filialId, filialId, filialId, limit);
 
-  const mapRow = (n) => {
-    let erro = null;
-    try {
-      const r = n.resposta_api ? JSON.parse(n.resposta_api) : null;
-      erro = r?.erro || r?.error || null;
-    } catch { /* ignore */ }
-    const tipoLabel = {
-      link_veiculo: 'Link medição',
-      alerta_critico: 'Alerta crítico',
-      alerta_desgaste: 'Alerta monitorar',
-    }[n.tipo] || n.tipo;
-    return {
-      id: n.id,
-      tipo: n.tipo,
-      tipo_label: tipoLabel,
-      destinatario: n.destinatario_whatsapp,
-      placa: n.placa || null,
-      apelido: n.apelido || null,
-      status: n.status,
-      status_label: n.status === 'enviado' || n.status === 'entregue'
-        ? 'Enviado'
-        : (n.status === 'erro' ? 'Pendente / falha' : n.status),
-      erro,
-      mensagem: n.mensagem,
-      criado_em: n.criado_em,
-      preview: String(n.mensagem || '').replace(/\s+/g, ' ').slice(0, 120),
+    const mapRow = (n) => {
+      let erro = null;
+      try {
+        const r = n.resposta_api ? JSON.parse(n.resposta_api) : null;
+        erro = r?.erro || r?.error || null;
+      } catch { /* ignore */ }
+      const tipoLabel = {
+        link_veiculo: 'Link medição',
+        alerta_critico: 'Alerta crítico',
+        alerta_desgaste: 'Alerta monitorar',
+      }[n.tipo] || n.tipo;
+      return {
+        id: n.id,
+        tipo: n.tipo,
+        tipo_label: tipoLabel,
+        destinatario: n.destinatario_whatsapp,
+        placa: n.placa || null,
+        apelido: n.apelido || null,
+        status: n.status,
+        status_label: n.status === 'enviado' || n.status === 'entregue'
+          ? 'Enviado'
+          : (n.status === 'erro' ? 'Pendente / falha' : n.status),
+        erro,
+        mensagem: n.mensagem,
+        criado_em: n.criado_em,
+        preview: String(n.mensagem || '').replace(/\s+/g, ' ').slice(0, 120),
+      };
     };
-  };
 
-  const mapped = rows.map(mapRow);
-  const pendentes = mapped.filter((r) => r.status === 'erro');
-  const enviados = mapped.filter((r) => r.status === 'enviado' || r.status === 'entregue');
+    const mapped = rows.map(mapRow);
+    const pendentes = mapped.filter((r) => r.status === 'erro');
+    const enviados = mapped.filter((r) => r.status === 'enviado' || r.status === 'entregue');
 
-  res.json({
-    resumo: {
-      pendentes: pendentes.length,
-      enviados: enviados.length,
-      total: mapped.length,
-    },
-    pendentes,
-    enviados: enviados.slice(0, 15),
-    logs: mapped,
-  });
+    res.json({
+      resumo: {
+        pendentes: pendentes.length,
+        enviados: enviados.length,
+        total: mapped.length,
+      },
+      pendentes,
+      enviados: enviados.slice(0, 15),
+      logs: mapped,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
 });
 
 /** Reenvia uma notificação que falhou */
@@ -631,7 +651,7 @@ router.post('/filial/:id/envios/:notifId/reenviar', requireChatbotAcesso, async 
     const filialId = Number(req.params.id);
     const notifId = Number(req.params.notifId);
     const db = getDb();
-    const n = db.prepare('SELECT * FROM notificacoes_whatsapp WHERE id = ?').get(notifId);
+    const n = await db.prepare('SELECT * FROM notificacoes_whatsapp WHERE id = ?').get(notifId);
     if (!n) return res.status(404).json({ erro: 'Envio não encontrado' });
 
     const result = await enviarERegistrar({
@@ -648,7 +668,7 @@ router.post('/filial/:id/envios/:notifId/reenviar', requireChatbotAcesso, async 
       return res.status(502).json({ erro: result.erro || 'Falha ao reenviar' });
     }
     // Fecha a pendência original para não ficar listada como falha
-    db.prepare(`
+    await db.prepare(`
       UPDATE notificacoes_whatsapp
       SET status = 'entregue',
           resposta_api = ?
@@ -741,18 +761,22 @@ router.post('/logout', requireAdmin, async (_req, res) => {
 });
 
 /** Destinatários extras (além do chatbot da filial) */
-router.get('/destinatarios', requireAdmin, (_req, res) => {
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT d.*, f.nome AS filial_nome
-    FROM alerta_destinatarios d
-    LEFT JOIN filiais f ON f.id = d.filial_id
-    ORDER BY d.ativo DESC, d.nome COLLATE NOCASE
-  `).all();
-  res.json(rows);
+router.get('/destinatarios', requireAdmin, async (_req, res, next) => {
+  try {
+    const db = getDb();
+    const rows = await db.prepare(`
+      SELECT d.*, f.nome AS filial_nome
+      FROM alerta_destinatarios d
+      LEFT JOIN filiais f ON f.id = d.filial_id
+      ORDER BY d.ativo DESC, LOWER(d.nome)
+    `).all();
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
 });
 
-router.post('/destinatarios', requireAdmin, (req, res) => {
+router.post('/destinatarios', requireAdmin, async (req, res, next) => {
   const { nome, whatsapp, escopo = 'todas', filial_id = null, ativo = 1 } = req.body || {};
   if (!nome?.trim()) return res.status(400).json({ erro: 'Nome é obrigatório' });
   const phone = limparTelefone(whatsapp);
@@ -768,7 +792,7 @@ router.post('/destinatarios', requireAdmin, (req, res) => {
 
   const db = getDb();
   try {
-    const r = db.prepare(`
+    const r = await db.prepare(`
       INSERT INTO alerta_destinatarios (nome, whatsapp, ativo, escopo, filial_id)
       VALUES (?, ?, ?, ?, ?)
     `).run(
@@ -778,7 +802,7 @@ router.post('/destinatarios', requireAdmin, (req, res) => {
       escopo,
       escopo === 'filial' ? Number(filial_id) : null
     );
-    const row = db.prepare(`
+    const row = await db.prepare(`
       SELECT d.*, f.nome AS filial_nome
       FROM alerta_destinatarios d
       LEFT JOIN filiais f ON f.id = d.filial_id
@@ -786,48 +810,48 @@ router.post('/destinatarios', requireAdmin, (req, res) => {
     `).get(r.lastInsertRowid);
     res.status(201).json(row);
   } catch (err) {
-    if (String(err.message).includes('UNIQUE')) {
+    if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Este WhatsApp já está cadastrado' });
     }
-    throw err;
+    next(err);
   }
 });
 
-router.put('/destinatarios/:id', requireAdmin, (req, res) => {
+router.put('/destinatarios/:id', requireAdmin, async (req, res, next) => {
   const id = Number(req.params.id);
   const db = getDb();
-  const atual = db.prepare('SELECT * FROM alerta_destinatarios WHERE id = ?').get(id);
-  if (!atual) return res.status(404).json({ erro: 'Destinatário não encontrado' });
-
-  const nome = req.body.nome != null ? String(req.body.nome).trim() : atual.nome;
-  const phone = req.body.whatsapp != null
-    ? limparTelefone(req.body.whatsapp)
-    : atual.whatsapp;
-  const escopo = req.body.escopo != null ? req.body.escopo : atual.escopo;
-  const ativo = req.body.ativo != null ? (req.body.ativo ? 1 : 0) : atual.ativo;
-  let filialId = req.body.filial_id !== undefined ? req.body.filial_id : atual.filial_id;
-
-  if (!nome) return res.status(400).json({ erro: 'Nome é obrigatório' });
-  if (!phone || phone.length < 10) {
-    return res.status(400).json({ erro: 'WhatsApp inválido' });
-  }
-  if (!['todas', 'filial'].includes(escopo)) {
-    return res.status(400).json({ erro: 'Escopo inválido' });
-  }
-  if (escopo === 'filial' && !filialId) {
-    return res.status(400).json({ erro: 'Informe a filial' });
-  }
-  if (escopo === 'todas') filialId = null;
-
   try {
-    db.prepare(`
+    const atual = await db.prepare('SELECT * FROM alerta_destinatarios WHERE id = ?').get(id);
+    if (!atual) return res.status(404).json({ erro: 'Destinatário não encontrado' });
+
+    const nome = req.body.nome != null ? String(req.body.nome).trim() : atual.nome;
+    const phone = req.body.whatsapp != null
+      ? limparTelefone(req.body.whatsapp)
+      : atual.whatsapp;
+    const escopo = req.body.escopo != null ? req.body.escopo : atual.escopo;
+    const ativo = req.body.ativo != null ? (req.body.ativo ? 1 : 0) : atual.ativo;
+    let filialId = req.body.filial_id !== undefined ? req.body.filial_id : atual.filial_id;
+
+    if (!nome) return res.status(400).json({ erro: 'Nome é obrigatório' });
+    if (!phone || phone.length < 10) {
+      return res.status(400).json({ erro: 'WhatsApp inválido' });
+    }
+    if (!['todas', 'filial'].includes(escopo)) {
+      return res.status(400).json({ erro: 'Escopo inválido' });
+    }
+    if (escopo === 'filial' && !filialId) {
+      return res.status(400).json({ erro: 'Informe a filial' });
+    }
+    if (escopo === 'todas') filialId = null;
+
+    await db.prepare(`
       UPDATE alerta_destinatarios
       SET nome = ?, whatsapp = ?, ativo = ?, escopo = ?, filial_id = ?,
-          updated_at = datetime('now', 'localtime')
+          updated_at = NOW()
       WHERE id = ?
     `).run(nome, phone, ativo, escopo, filialId, id);
 
-    const row = db.prepare(`
+    const row = await db.prepare(`
       SELECT d.*, f.nome AS filial_nome
       FROM alerta_destinatarios d
       LEFT JOIN filiais f ON f.id = d.filial_id
@@ -835,19 +859,23 @@ router.put('/destinatarios/:id', requireAdmin, (req, res) => {
     `).get(id);
     res.json(row);
   } catch (err) {
-    if (String(err.message).includes('UNIQUE')) {
+    if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Este WhatsApp já está cadastrado' });
     }
-    throw err;
+    next(err);
   }
 });
 
-router.delete('/destinatarios/:id', requireAdmin, (req, res) => {
-  const id = Number(req.params.id);
-  const db = getDb();
-  const r = db.prepare('DELETE FROM alerta_destinatarios WHERE id = ?').run(id);
-  if (!r.changes) return res.status(404).json({ erro: 'Destinatário não encontrado' });
-  res.json({ ok: true });
+router.delete('/destinatarios/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const db = getDb();
+    const r = await db.prepare('DELETE FROM alerta_destinatarios WHERE id = ?').run(id);
+    if (!r.changes) return res.status(404).json({ erro: 'Destinatário não encontrado' });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;
