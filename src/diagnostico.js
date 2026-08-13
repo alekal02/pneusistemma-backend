@@ -14,12 +14,12 @@ export const DIAGNOSTICOS = {
   alinhamento: {
     codigo: 'alinhamento',
     label: 'Alinhamento + Balanceamento',
-    descricao: 'Desgaste em cunha (Ext ↔ Int) — verificar alinhamento e balanceamento',
+    descricao: 'Reservado — será implementado no futuro',
   },
   alinhamento_traseiro: {
     codigo: 'alinhamento_traseiro',
     label: 'Alinhamento (sem balanceamento)',
-    descricao: 'Desgaste em cunha no eixo traseiro — verificar alinhamento. Não faz balanceamento no eixo traseiro (não compensa)',
+    descricao: 'Reservado — será implementado no futuro',
   },
   desgaste_progressivo: {
     codigo: 'desgaste_progressivo',
@@ -280,20 +280,17 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
   // Cunha Ext ↔ Int
   if (ext != null && int != null && Number.isFinite(ext) && Number.isFinite(int)
     && Math.abs(ext - int) >= toleranciaMm) {
-    // Interno mais gasto = desgaste progressivo Ext→Int (foto: consumo esperado, sem rodízio)
+    // Interno mais gasto = desgaste progressivo Ext→Int (consumo esperado, sem rodízio)
     if (int < ext) {
       return {
         ...DIAGNOSTICOS.desgaste_progressivo,
         descricao: `Interno mais gasto que o externo (diferença ${Math.round((ext - int) * 10) / 10} mm). Parte interna sofre mais desgaste — consumo esperado enquanto sulco ≥ crítico. Acompanhar; não indica rodízio.`,
       };
     }
-    // Externo mais gasto = alinhar
-    const base = opcoes.papel === 'tracao'
-      ? DIAGNOSTICOS.alinhamento_traseiro
-      : DIAGNOSTICOS.alinhamento;
+    // Externo mais gasto — alinhamento/balanceamento fica para o futuro
     return {
-      ...base,
-      descricao: 'Externo mais gasto que o interno — desgaste em cunha. Verificar alinhamento.',
+      ...DIAGNOSTICOS.irregular,
+      descricao: 'Externo mais gasto que o interno — perfil irregular. Acompanhar nas próximas medições.',
     };
   }
 
@@ -316,8 +313,7 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
   const mediaMeio = meio.length ? meio.reduce((a, b) => a + b, 0) / meio.length : null;
 
   if (Math.abs(primeiro - ultimo) >= toleranciaMm) {
-    if (opcoes.papel === 'tracao') return DIAGNOSTICOS.alinhamento_traseiro;
-    return DIAGNOSTICOS.alinhamento;
+    return DIAGNOSTICOS.irregular;
   }
 
   if (mediaMeio != null) {

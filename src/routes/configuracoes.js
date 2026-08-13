@@ -16,12 +16,13 @@ router.get('/', (_req, res) => {
       critico: `Sulco < ${limites.sulco_critico_mm} mm — ${a.troca.label}: ${a.troca.instrucao}`,
       monitorar: `${limites.sulco_critico_mm} a ${limites.sulco_alerta_mm} mm — ${a.monitorar.label}: ${a.monitorar.instrucao}`,
       prazo_recap: `Prazo de ${limites.prazo_recap_dias} dias para iniciar o processo de recap ao entrar em monitorar`,
-      mudanca_posicao: `Desvio entre pontos ≥ ${limites.rodizio_desvio_mm} mm — ${a.rodizio.label}: ${a.rodizio.instrucao}`,
+      mudanca_posicao: `Desvio entre pontos > ${limites.rodizio_desvio_mm} mm — ${a.rodizio.label}: ${a.rodizio.instrucao}`,
       ok: `Acima de ${limites.sulco_alerta_mm} mm — ${a.ok.label}: ${a.ok.instrucao}`,
       novo: `Sulco típico de pneu novo: ~${limites.sulco_novo_mm} mm`,
-      balanceamento: 'Não faz balanceamento no eixo traseiro — não compensa',
     },
-    diagnosticos: Object.values(DIAGNOSTICOS),
+    diagnosticos: Object.values(DIAGNOSTICOS).filter(
+      (d) => d.codigo !== 'alinhamento' && d.codigo !== 'alinhamento_traseiro'
+    ),
     acoes_catalogo: Object.values(ACOES),
   });
 });
