@@ -420,6 +420,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       const acao = sugerirAcao(p.menor_sulco, limites, p.vida_recap || 0, {
         pontos: p._row,
         candidatos,
+        posicaoAtual: p.posicao,
       });
       const temAnomalia = acao.codigo !== 'ok' || (p.diagnostico !== 'ok' && p.diagnostico !== 'sem_dado');
       const { _row, ...rest } = p;
@@ -532,7 +533,7 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
     const db = getDb();
     const limites = getLimites();
     const med = await db.prepare(`
-      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, v.filial_id
+      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, p.posicao, v.filial_id
       FROM medicoes m
       JOIN pneus p ON p.id = m.pneu_id
       JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
@@ -563,8 +564,34 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
       return res.status(400).json({ erro: 'Informe ao menos um valor de sulco' });
     }
 
-    const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm);
-    const acao = sugerirAcao(menor, limites, med.vida_recap || 0, { pontos: row });
+    let candidatos = [];
+    if (med.veiculo_id) {
+      const rows = await db.prepare(`
+        SELECT p.*,
+          (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
+          (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
+          (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
+          (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux
+        FROM pneus p
+        WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado' AND p.id != ?
+      `).all(med.veiculo_id, med.pneu_id);
+      candidatos = rows.map((c) => ({
+        ...c,
+        sulco_externo: c.ult_sulco_ext,
+        sulco_central: c.ult_sulco_cent,
+        sulco_interno: c.ult_sulco_int,
+        sulco_auxiliar: c.ult_sulco_aux,
+      }));
+    }
+
+    const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
+      papel: med.posicao ? papelPosicao(med.posicao) : null,
+    });
+    const acao = sugerirAcao(menor, limites, med.vida_recap || 0, {
+      pontos: row,
+      candidatos,
+      posicaoAtual: med.posicao || null,
+    });
 
     await db.prepare(`
       UPDATE medicoes SET

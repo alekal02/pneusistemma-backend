@@ -131,6 +131,7 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
     const acao = sugerirAcao(p.menor_sulco, limites, p.vida_recap || 0, {
       pontos: p._row,
       candidatos,
+      posicaoAtual: p.posicao,
     });
     const { _row, ...rest } = p;
     return {

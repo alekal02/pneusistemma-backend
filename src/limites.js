@@ -31,7 +31,7 @@ const PADROES = {
   [CHAVES.MAX_RECAPS]: 6,
   [CHAVES.PRAZO_RECAP_DIAS]: 15,
   [CHAVES.TOLERANCIA]: 1.0,
-  [CHAVES.RODIZIO_DESVIO]: 3.0,
+  [CHAVES.RODIZIO_DESVIO]: 4.0,
   [CHAVES.RODIZIO_SIMILARIDADE]: 2.5,
   [CHAVES.ACAO_TROCA_LABEL]: 'Trocar',
   [CHAVES.ACAO_TROCA_INSTRUCAO]: 'Crítico — retirar e trocar o pneu',
@@ -40,7 +40,7 @@ const PADROES = {
   [CHAVES.ACAO_MONITORAR_LABEL]: 'Monitorar',
   [CHAVES.ACAO_MONITORAR_INSTRUCAO]: 'Programar substituição — iniciar processo de recap em até 15 dias',
   [CHAVES.ACAO_RODIZIO_LABEL]: 'Mudar posição',
-  [CHAVES.ACAO_RODIZIO_INSTRUCAO]: 'Mudar de posição no caminhão para equalizar o desgaste (não faz balanceamento no eixo traseiro)',
+  [CHAVES.ACAO_RODIZIO_INSTRUCAO]: 'Rodízio para o lado oposto do eixo (ex.: 1E → 1D) para equalizar o desgaste',
   [CHAVES.ACAO_OK_LABEL]: 'OK',
   [CHAVES.ACAO_OK_INSTRUCAO]: 'Manter em operação — sulco adequado',
 };

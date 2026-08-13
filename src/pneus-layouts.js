@@ -169,6 +169,45 @@ export function papelPosicao(codigo) {
   return PAPEL_POSICAO[codigo] || 'tracao';
 }
 
+/** Lado oposto no mesmo eixo (ex.: 1E ↔ 1D, 2EE ↔ 2DE). */
+const POSICAO_ESPELHADA = {
+  '1E': '1D',
+  '1D': '1E',
+  '2E': '2D',
+  '2D': '2E',
+  '2EE': '2DE',
+  '2DE': '2EE',
+  '2EI': '2DI',
+  '2DI': '2EI',
+  '3E': '3D',
+  '3D': '3E',
+  '3EE': '3DE',
+  '3DE': '3EE',
+  '3EI': '3DI',
+  '3DI': '3EI',
+  DE: 'DD',
+  DD: 'DE',
+  TE: 'TD',
+  TD: 'TE',
+  TEE: 'TDE',
+  TDE: 'TEE',
+  TEI: 'TDI',
+  TDI: 'TEI',
+  E2EE: 'E2DE',
+  E2DE: 'E2EE',
+  E2EI: 'E2DI',
+  E2DI: 'E2EI',
+  E3EE: 'E3DE',
+  E3DE: 'E3EE',
+  E3EI: 'E3DI',
+  E3DI: 'E3EI',
+};
+
+export function posicaoEspelhada(codigo) {
+  if (!codigo) return null;
+  return POSICAO_ESPELHADA[codigo] || null;
+}
+
 export function ordenarPosicoes(posicoes) {
   const ordem = ORDEM_POSICAO;
   return [...posicoes].sort((a, b) => {

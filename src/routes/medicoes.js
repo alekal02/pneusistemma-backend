@@ -257,6 +257,7 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
     acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
       pontos: medicaoRow,
       candidatos,
+      posicaoAtual: pneu.posicao || null,
     });
     statusSulco = classificarSulco(menor);
 

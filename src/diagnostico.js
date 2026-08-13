@@ -3,6 +3,8 @@
  * e sugestão de ação (OK / RODÍZIO / RECAP / TROCA).
  */
 
+import { labelPosicao, posicaoEspelhada } from './pneus-layouts.js';
+
 export const DIAGNOSTICOS = {
   ok: {
     codigo: 'ok',
@@ -12,7 +14,7 @@ export const DIAGNOSTICOS = {
   alinhamento: {
     codigo: 'alinhamento',
     label: 'Alinhamento + Balanceamento',
-    descricao: 'Desgaste em cunha (um lado mais gasto) — verificar alinhamento e balanceamento',
+    descricao: 'Desgaste em cunha (Ext ↔ Int) — verificar alinhamento e balanceamento',
   },
   alinhamento_traseiro: {
     codigo: 'alinhamento_traseiro',
@@ -86,13 +88,118 @@ export function mediaSulco(row) {
 }
 
 /**
+ * Interno mais gasto que o externo (sulco interno menor), com margem.
+ * Regra das fotos: parte interna sofre mais desgaste → preferir rodízio lado oposto.
+ */
+export function internoMaisGastoQueExterno(row, toleranciaMm = 1.0) {
+  const ext = row?.sulco_externo;
+  const int = row?.sulco_interno;
+  if (ext == null || int == null || !Number.isFinite(ext) || !Number.isFinite(int)) return false;
+  return (ext - int) >= toleranciaMm;
+}
+
+function montarSugestaoEspelho({ posicaoAtual, espelho, ocupante, pontosAtual }) {
+  const origemLabel = labelPosicao(posicaoAtual) || posicaoAtual;
+  const destLabel = labelPosicao(espelho) || espelho;
+  const desvio = desvioEntrePontos(pontosAtual);
+  const internoGasto = internoMaisGastoQueExterno(pontosAtual);
+
+  if (ocupante) {
+    const fogo = ocupante.numero_fogo ? `Fogo ${ocupante.numero_fogo}` : `Pneu #${ocupante.id}`;
+    return {
+      pneu_id: ocupante.id,
+      posicao: ocupante.posicao || espelho,
+      posicao_label: destLabel,
+      posicao_origem: posicaoAtual,
+      posicao_destino: espelho,
+      slot_vazio: false,
+      numero_fogo: ocupante.numero_fogo || null,
+      media_sulco: mediaSulco({
+        sulco_externo: ocupante.sulco_externo ?? ocupante.ult_sulco_ext ?? null,
+        sulco_central: ocupante.sulco_central ?? ocupante.ult_sulco_cent ?? null,
+        sulco_interno: ocupante.sulco_interno ?? ocupante.ult_sulco_int ?? null,
+        sulco_auxiliar: ocupante.sulco_auxiliar ?? ocupante.ult_sulco_aux ?? null,
+      }),
+      menor_sulco: menorSulco4({
+        sulco_externo: ocupante.sulco_externo ?? ocupante.ult_sulco_ext ?? null,
+        sulco_central: ocupante.sulco_central ?? ocupante.ult_sulco_cent ?? null,
+        sulco_interno: ocupante.sulco_interno ?? ocupante.ult_sulco_int ?? null,
+        sulco_auxiliar: ocupante.sulco_auxiliar ?? ocupante.ult_sulco_aux ?? null,
+      }),
+      desvio_mm: desvio,
+      label: `${fogo} (${destLabel})`,
+      motivo: internoGasto
+        ? `Troque de lado no eixo: ${origemLabel} → ${destLabel} com ${fogo} (interno mais gasto que o externo; desvio ${desvio} mm).`
+        : `Troque de posição com ${fogo} em ${destLabel} (lado oposto do eixo).`,
+    };
+  }
+
+  return {
+    pneu_id: null,
+    posicao: espelho,
+    posicao_label: destLabel,
+    posicao_origem: posicaoAtual,
+    posicao_destino: espelho,
+    slot_vazio: true,
+    numero_fogo: null,
+    media_sulco: null,
+    menor_sulco: null,
+    desvio_mm: desvio,
+    label: `${destLabel} (vazio)`,
+    motivo: internoGasto
+      ? `Mova este pneu de ${origemLabel} para ${destLabel} (vazio) — interno mais gasto que o externo; desvio ${desvio} mm.`
+      : `Mova este pneu de ${origemLabel} para ${destLabel} (posição vazia no lado oposto).`,
+  };
+}
+
+/**
  * Encontra outro pneu montado com sulco parecido (média próxima)
  * e, de preferência, perfil complementar (espelhado) para equalizar o desgaste.
+ * Prioriza o lado oposto no mesmo eixo (1E↔1D) quando a posição atual é informada.
  */
-export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}) {
+export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, opcoes = {}) {
+  const posicaoAtual = opcoes.posicaoAtual || null;
+  const tolerancia = limites.diagnostico_tolerancia_mm ?? 1.0;
+  const preferirEspelho = opcoes.preferirEspelho
+    ?? (posicaoAtual != null && internoMaisGastoQueExterno(pontosAtual, tolerancia));
+
+  const espelho = posicaoAtual ? posicaoEspelhada(posicaoAtual) : null;
+  if (preferirEspelho && espelho) {
+    const ocupante = candidatos.find((c) => c.posicao === espelho) || null;
+    return montarSugestaoEspelho({
+      posicaoAtual,
+      espelho,
+      ocupante,
+      pontosAtual,
+    });
+  }
+
+  // Sem cunha interna→ainda tenta espelho se existir ocupante no lado oposto
+  if (espelho) {
+    const ocupante = candidatos.find((c) => c.posicao === espelho);
+    if (ocupante) {
+      return montarSugestaoEspelho({
+        posicaoAtual,
+        espelho,
+        ocupante,
+        pontosAtual,
+      });
+    }
+  }
+
   const seq = pontosSulco(pontosAtual).map((v) => (v != null && Number.isFinite(v) ? v : null));
   const valsAtual = seq.filter((v) => v != null);
-  if (valsAtual.length < 2 || !candidatos.length) return null;
+  if (valsAtual.length < 2 || !candidatos.length) {
+    if (espelho) {
+      return montarSugestaoEspelho({
+        posicaoAtual,
+        espelho,
+        ocupante: null,
+        pontosAtual,
+      });
+    }
+    return null;
+  }
 
   const mediaAtual = mediaSulco(pontosAtual);
   const similaridade = limites.rodizio_similaridade_mm ?? 2.5;
@@ -113,7 +220,17 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}) 
     })
     .filter(Boolean);
 
-  if (!comMedicao.length) return null;
+  if (!comMedicao.length) {
+    if (espelho) {
+      return montarSugestaoEspelho({
+        posicaoAtual,
+        espelho,
+        ocupante: null,
+        pontosAtual,
+      });
+    }
+    return null;
+  }
 
   const parecidos = comMedicao
     .filter((c) => Math.abs(c._media - mediaAtual) <= similaridade)
@@ -155,6 +272,9 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}) 
     pneu_id: melhor.id,
     posicao: melhor.posicao || null,
     posicao_label: posLabel,
+    posicao_origem: posicaoAtual,
+    posicao_destino: melhor.posicao || null,
+    slot_vazio: false,
     numero_fogo: melhor.numero_fogo || null,
     media_sulco: melhor._media,
     menor_sulco: melhor._menor,
@@ -166,7 +286,7 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}) 
 
 /**
  * Classifica o padrão de desgaste com base nos pontos disponíveis.
- * Com 3 pontos: [ext, cent, int]. Com 4: [ext, cent, int, aux].
+ * Prioriza Ext ↔ Int (cunha) e depois centro vs bordas (calibragem).
  * @param {object} row
  * @param {number} toleranciaMm
  * @param {{ papel?: string|null }} [opcoes] papel da posição: direcional | tracao | estepe
@@ -181,6 +301,40 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
 
   if (delta <= toleranciaMm) return DIAGNOSTICOS.ok;
 
+  const ext = row.sulco_externo;
+  const int = row.sulco_interno;
+  const cent = row.sulco_central;
+
+  // Cunha Ext ↔ Int (regra das fotos: interno mais gasto que externo)
+  if (ext != null && int != null && Number.isFinite(ext) && Number.isFinite(int)
+    && Math.abs(ext - int) >= toleranciaMm) {
+    const base = opcoes.papel === 'tracao'
+      ? DIAGNOSTICOS.alinhamento_traseiro
+      : DIAGNOSTICOS.alinhamento;
+    if (int < ext) {
+      return {
+        ...base,
+        descricao: 'Interno mais gasto que o externo — desgaste em cunha. Preferir rodízio para o lado oposto do eixo.',
+      };
+    }
+    return {
+      ...base,
+      descricao: 'Externo mais gasto que o interno — desgaste em cunha. Verificar alinhamento.',
+    };
+  }
+
+  if (cent != null && Number.isFinite(cent) && ext != null && int != null
+    && Number.isFinite(ext) && Number.isFinite(int)) {
+    const mediaBordas = (ext + int) / 2;
+    if (mediaBordas - cent >= toleranciaMm) {
+      return DIAGNOSTICOS.falta_calib;
+    }
+    if (cent - mediaBordas >= toleranciaMm) {
+      return DIAGNOSTICOS.excesso_calib;
+    }
+  }
+
+  // Fallback com sequência filtrada (3+ pontos sem Ext/Int claros)
   const seq = pontosSulco(row).filter((v) => v != null && Number.isFinite(v));
   const primeiro = seq[0];
   const ultimo = seq[seq.length - 1];
@@ -188,7 +342,6 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
   const mediaMeio = meio.length ? meio.reduce((a, b) => a + b, 0) / meio.length : null;
 
   if (Math.abs(primeiro - ultimo) >= toleranciaMm) {
-    // Eixo traseiro: não sugere balanceamento — não compensa
     if (opcoes.papel === 'tracao') return DIAGNOSTICOS.alinhamento_traseiro;
     return DIAGNOSTICOS.alinhamento;
   }
@@ -207,16 +360,16 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
 }
 
 /**
- * Faixas: < crítico → trocar · até alerta → monitorar (programar sub + recap em N dias) · > alerta → OK.
- * Desvio alto entre pontos → sugerir mudança de posição no caminhão.
+ * Faixas: < crítico → trocar · até alerta → monitorar · > alerta → OK.
+ * Desvio entre pontos > limiar → rodízio (lado oposto preferencial).
  *
  * @param {number|null} menorMm
  * @param {object} limites
  * @param {number} vidaRecap
- * @param {{ pontos?: object|null, candidatos?: object[] }} [opcoes]
+ * @param {{ pontos?: object|null, candidatos?: object[], posicaoAtual?: string|null }} [opcoes]
  */
 export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
-  const { pontos = null, candidatos = [] } = opcoes;
+  const { pontos = null, candidatos = [], posicaoAtual = null } = opcoes;
   const custom = limites?.acoes || {};
   const comCustom = (base, chave) => {
     const c = custom[chave];
@@ -236,30 +389,31 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
   const monitorarAte = limites.sulco_alerta_mm;
   const maxRecap = limites.max_recaps ?? 6;
   const prazoRecap = limites.prazo_recap_dias ?? 15;
-  const rodizioDesvio = limites.rodizio_desvio_mm ?? 3;
+  const rodizioDesvio = limites.rodizio_desvio_mm ?? 4;
 
   if (menorMm < critico) {
     const acao = comCustom(ACOES.troca, 'troca');
     return {
       ...acao,
       motivo: acao.instrucao
-        || `Crítico — trocar (sulco ${menorMm} mm < ${critico} mm)`,
+        || `Crítico — retirar e trocar (sulco ${menorMm} mm < ${critico} mm)`,
       rodizio_sugestao: null,
     };
   }
 
   const desvio = pontos ? desvioEntrePontos(pontos) : null;
-  const precisaMudarPosicao = desvio != null && desvio >= rodizioDesvio;
+  // Regra das fotos: desvio > limiar (ex.: 4 mm). 10·10·6 (=4) → OK; 12·10·7 (=5) → rodízio
+  const precisaMudarPosicao = desvio != null && desvio > rodizioDesvio;
 
   if (precisaMudarPosicao) {
     const acao = comCustom(ACOES.rodizio, 'rodizio');
-    const par = encontrarParRodizio(pontos, candidatos, limites);
+    const par = encontrarParRodizio(pontos, candidatos, limites, { posicaoAtual });
     const pts = valoresValidos(pontos).join(' · ');
     const baseInstrucao = acao.instrucao
-      || 'Mudar de posição no caminhão para equalizar o desgaste.';
+      || 'Rodízio para o lado oposto do eixo para equalizar o desgaste.';
     const motivo = par
-      ? `${baseInstrucao} Medições: ${pts} mm (desvio ${desvio} mm). ${par.motivo}`
-      : `${baseInstrucao} Medições: ${pts} mm (desvio ${desvio} mm).`;
+      ? `${baseInstrucao} Medições: ${pts} mm (desvio ${desvio} mm > ${rodizioDesvio} mm). ${par.motivo}`
+      : `${baseInstrucao} Medições: ${pts} mm (desvio ${desvio} mm > ${rodizioDesvio} mm).`;
     return {
       ...acao,
       motivo,

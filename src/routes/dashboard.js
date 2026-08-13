@@ -47,7 +47,10 @@ router.get('/resumo', async (req, res, next) => {
       else if (status === 'critico') critico += 1;
       else semDado += 1;
 
-      const acao = sugerirAcao(menor, limites, p.vida_recap || 0, { pontos: p });
+      const acao = sugerirAcao(menor, limites, p.vida_recap || 0, {
+        pontos: p,
+        posicaoAtual: p.posicao || null,
+      });
       if (acao.codigo === 'troca') troca += 1;
       else if (acao.codigo === 'recap') recap += 1;
       else if (acao.codigo === 'monitorar') monitorar += 1;

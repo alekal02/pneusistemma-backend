@@ -170,6 +170,7 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
   const acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
     pontos: ultimaMedicao ? row : null,
     candidatos: candidatos.filter((c) => Number(c.id) !== Number(pneu.id)),
+    posicaoAtual: pneu.posicao || null,
   });
   const sulcoRef = pneu.sulco_inicial_mm ?? limites.sulco_novo_mm;
   const statusSulco = classificarSulco(menor);
