@@ -247,7 +247,7 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
   try {
     const f = await filialOuErro(id);
     const db = getDb();
-    const podeToken = isAdmin(req.user) || req.user.papel === 'gerente' || req.user.papel === 'filial';
+    const podeToken = isAdmin(req.user) || req.user.papel === 'gerente';
     await db.prepare(`
       UPDATE filiais SET
         whatsapp = ?,
@@ -277,7 +277,7 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
   }
 });
 
-/** Dados do chatbot da filial (operador/gerente/admin no escopo) */
+/** Dados do chatbot da filial (gerente/admin no escopo) */
 router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) => {
   if (!assertFilialNoEscopo(req, req.params.id)) {
     return res.status(403).json({ erro: 'Filial fora do seu escopo' });

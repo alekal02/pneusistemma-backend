@@ -106,15 +106,15 @@ export function requireGerenteOuAdmin(req, res, next) {
   next();
 }
 
-/** Admin, gerente ou operador — acesso ao chatbot da filial no escopo */
+/** Só gerente (e admin de suporte) — operador não configura chatbot */
 export function requireChatbotAcesso(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ erro: 'Não autenticado' });
   }
-  if (['admin', 'gerente', 'filial'].includes(req.user.papel)) {
+  if (['admin', 'gerente'].includes(req.user.papel)) {
     return next();
   }
-  return res.status(403).json({ erro: 'Sem permissão para configurar o chatbot' });
+  return res.status(403).json({ erro: 'Somente o gerente da unidade configura o chatbot' });
 }
 
 export function requireFilial(req, res, next) {
