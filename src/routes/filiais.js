@@ -367,7 +367,8 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux,
       (SELECT diagnostico FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_diagnostico,
       (SELECT acao_sugerida FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_acao,
-      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
+      (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao_id
     FROM pneus p
     WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     ORDER BY ${orderSql}
@@ -400,8 +401,9 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
         vida_label: p.vida_recap > 0
           ? `${p.vida_recap}ª recap`
           : (p.condicao === 'novo' ? 'Novo' : 'Recapado'),
-        ultima_medicao: p.ult_medicao || menor != null
+        ultima_medicao: p.ult_medicao_id
           ? {
+            id: p.ult_medicao_id,
             data: p.ult_medicao || null,
             sulco_externo: p.ult_sulco_ext,
             sulco_central: p.ult_sulco_cent,
@@ -462,6 +464,171 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       posicoes_labels: POSICOES_PNEU,
       limites,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Admin/gerente: corrige dados do veículo da filial */
+router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes } = req.body || {};
+  try {
+    const db = getDb();
+    const veiculo = await db.prepare(`
+      SELECT * FROM veiculos WHERE id = ? AND filial_id = ? AND ativo = 1
+    `).get(req.params.veiculoId, req.params.id);
+    if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado nesta filial' });
+
+    if (placa != null && !String(placa).trim()) {
+      return res.status(400).json({ erro: 'Placa não pode ficar vazia' });
+    }
+
+    await db.prepare(`
+      UPDATE veiculos SET
+        placa = ?,
+        apelido = ?,
+        tipo = ?,
+        marca = ?,
+        modelo = ?,
+        ano = ?,
+        km_atual = ?,
+        hr_atual = ?,
+        observacoes = ?,
+        updated_at = NOW()
+      WHERE id = ? AND filial_id = ? AND ativo = 1
+    `).run(
+      placa != null ? String(placa).trim().toUpperCase() : veiculo.placa,
+      apelido !== undefined ? (String(apelido).trim() || null) : veiculo.apelido,
+      tipo != null ? String(tipo).trim() : veiculo.tipo,
+      marca !== undefined ? (String(marca).trim() || null) : veiculo.marca,
+      modelo !== undefined ? (String(modelo).trim() || null) : veiculo.modelo,
+      ano !== undefined && ano !== '' ? parseInt(ano, 10) : veiculo.ano,
+      km_atual != null && km_atual !== '' ? parseInt(km_atual, 10) : (veiculo.km_atual || 0),
+      hr_atual != null && hr_atual !== '' ? parseFloat(hr_atual) : (veiculo.hr_atual || 0),
+      observacoes !== undefined ? (String(observacoes).trim() || null) : veiculo.observacoes,
+      veiculo.id,
+      req.params.id
+    );
+
+    const atualizado = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(veiculo.id);
+    res.json({ mensagem: 'Veículo atualizado', veiculo: atualizado });
+  } catch (err) {
+    if (ehViolacaoUnique(err)) {
+      return res.status(409).json({ erro: 'Já existe um veículo com esta placa' });
+    }
+    next(err);
+  }
+});
+
+/** Admin/gerente: corrige uma medição de sulco da filial */
+router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  try {
+    const db = getDb();
+    const limites = getLimites();
+    const med = await db.prepare(`
+      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, v.filial_id
+      FROM medicoes m
+      JOIN pneus p ON p.id = m.pneu_id
+      JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
+      WHERE m.id = ?
+    `).get(req.params.id, req.params.medicaoId);
+    if (!med) return res.status(404).json({ erro: 'Medição não encontrada nesta filial' });
+
+    const {
+      data_medicao,
+      km_veiculo,
+      hr_veiculo,
+      sulco_externo,
+      sulco_central,
+      sulco_interno,
+      sulco_auxiliar,
+      pressao_psi,
+      observacoes,
+    } = req.body || {};
+
+    const row = {
+      sulco_externo: sulco_externo !== undefined ? (sulco_externo === '' || sulco_externo == null ? null : parseFloat(sulco_externo)) : med.sulco_externo,
+      sulco_central: sulco_central !== undefined ? (sulco_central === '' || sulco_central == null ? null : parseFloat(sulco_central)) : med.sulco_central,
+      sulco_interno: sulco_interno !== undefined ? (sulco_interno === '' || sulco_interno == null ? null : parseFloat(sulco_interno)) : med.sulco_interno,
+      sulco_auxiliar: sulco_auxiliar !== undefined ? (sulco_auxiliar === '' || sulco_auxiliar == null ? null : parseFloat(sulco_auxiliar)) : med.sulco_auxiliar,
+    };
+    const menor = menorSulco(row);
+    if (menor == null) {
+      return res.status(400).json({ erro: 'Informe ao menos um valor de sulco' });
+    }
+
+    const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm);
+    const acao = sugerirAcao(menor, limites, med.vida_recap || 0, { pontos: row });
+
+    await db.prepare(`
+      UPDATE medicoes SET
+        data_medicao = COALESCE(?, data_medicao),
+        km_veiculo = COALESCE(?, km_veiculo),
+        hr_veiculo = COALESCE(?, hr_veiculo),
+        sulco_externo = ?,
+        sulco_central = ?,
+        sulco_interno = ?,
+        sulco_auxiliar = ?,
+        pressao_psi = COALESCE(?, pressao_psi),
+        observacoes = COALESCE(?, observacoes),
+        diagnostico = ?,
+        acao_sugerida = ?
+      WHERE id = ?
+    `).run(
+      data_medicao || null,
+      km_veiculo != null && km_veiculo !== '' ? parseInt(km_veiculo, 10) : null,
+      hr_veiculo != null && hr_veiculo !== '' ? parseFloat(hr_veiculo) : null,
+      row.sulco_externo,
+      row.sulco_central,
+      row.sulco_interno,
+      row.sulco_auxiliar,
+      pressao_psi != null && pressao_psi !== '' ? parseFloat(pressao_psi) : null,
+      observacoes !== undefined ? (String(observacoes).trim() || null) : med.observacoes,
+      diag.codigo,
+      acao.codigo,
+      med.id
+    );
+
+    const atualizada = await db.prepare('SELECT * FROM medicoes WHERE id = ?').get(med.id);
+    res.json({
+      mensagem: 'Medição corrigida',
+      medicao: {
+        ...atualizada,
+        menor_sulco: menor,
+        status_sulco: classificarSulco(menor),
+        diagnostico_label: diag.label,
+        acao_label: acao.label,
+        acao_motivo: acao.motivo,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Admin/gerente: remove medição incorreta */
+router.delete('/:id/medicoes/:medicaoId', async (req, res, next) => {
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  try {
+    const db = getDb();
+    const med = await db.prepare(`
+      SELECT m.id FROM medicoes m
+      JOIN pneus p ON p.id = m.pneu_id
+      JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
+      WHERE m.id = ?
+    `).get(req.params.id, req.params.medicaoId);
+    if (!med) return res.status(404).json({ erro: 'Medição não encontrada nesta filial' });
+
+    await db.prepare('DELETE FROM medicoes WHERE id = ?').run(med.id);
+    res.json({ mensagem: 'Medição removida' });
   } catch (err) {
     next(err);
   }
