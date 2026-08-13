@@ -21,6 +21,11 @@ export const DIAGNOSTICOS = {
     label: 'Alinhamento (sem balanceamento)',
     descricao: 'Desgaste em cunha no eixo traseiro — verificar alinhamento. Não faz balanceamento no eixo traseiro (não compensa)',
   },
+  desgaste_progressivo: {
+    codigo: 'desgaste_progressivo',
+    label: 'Desgaste progressivo Ext→Int',
+    descricao: 'Parte interna sofre mais desgaste que a externa — consumo esperado enquanto o sulco estiver acima do crítico. Acompanhar; não indica rodízio.',
+  },
   falta_calib: {
     codigo: 'falta_calib',
     label: 'Falta de calibragem',
@@ -159,12 +164,10 @@ function montarSugestaoEspelho({ posicaoAtual, espelho, ocupante, pontosAtual })
  */
 export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, opcoes = {}) {
   const posicaoAtual = opcoes.posicaoAtual || null;
-  const tolerancia = limites.diagnostico_tolerancia_mm ?? 1.0;
-  const preferirEspelho = opcoes.preferirEspelho
-    ?? (posicaoAtual != null && internoMaisGastoQueExterno(pontosAtual, tolerancia));
-
   const espelho = posicaoAtual ? posicaoEspelhada(posicaoAtual) : null;
-  if (preferirEspelho && espelho) {
+
+  // Sempre prioriza o lado oposto do mesmo eixo (ocupado ou vazio)
+  if (espelho) {
     const ocupante = candidatos.find((c) => c.posicao === espelho) || null;
     return montarSugestaoEspelho({
       posicaoAtual,
@@ -174,32 +177,9 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, 
     });
   }
 
-  // Sem cunha interna→ainda tenta espelho se existir ocupante no lado oposto
-  if (espelho) {
-    const ocupante = candidatos.find((c) => c.posicao === espelho);
-    if (ocupante) {
-      return montarSugestaoEspelho({
-        posicaoAtual,
-        espelho,
-        ocupante,
-        pontosAtual,
-      });
-    }
-  }
-
   const seq = pontosSulco(pontosAtual).map((v) => (v != null && Number.isFinite(v) ? v : null));
   const valsAtual = seq.filter((v) => v != null);
-  if (valsAtual.length < 2 || !candidatos.length) {
-    if (espelho) {
-      return montarSugestaoEspelho({
-        posicaoAtual,
-        espelho,
-        ocupante: null,
-        pontosAtual,
-      });
-    }
-    return null;
-  }
+  if (valsAtual.length < 2 || !candidatos.length) return null;
 
   const mediaAtual = mediaSulco(pontosAtual);
   const similaridade = limites.rodizio_similaridade_mm ?? 2.5;
@@ -221,14 +201,6 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, 
     .filter(Boolean);
 
   if (!comMedicao.length) {
-    if (espelho) {
-      return montarSugestaoEspelho({
-        posicaoAtual,
-        espelho,
-        ocupante: null,
-        pontosAtual,
-      });
-    }
     return null;
   }
 
@@ -305,18 +277,20 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
   const int = row.sulco_interno;
   const cent = row.sulco_central;
 
-  // Cunha Ext ↔ Int (regra das fotos: interno mais gasto que externo)
+  // Cunha Ext ↔ Int
   if (ext != null && int != null && Number.isFinite(ext) && Number.isFinite(int)
     && Math.abs(ext - int) >= toleranciaMm) {
+    // Interno mais gasto = desgaste progressivo Ext→Int (foto: consumo esperado, sem rodízio)
+    if (int < ext) {
+      return {
+        ...DIAGNOSTICOS.desgaste_progressivo,
+        descricao: `Interno mais gasto que o externo (diferença ${Math.round((ext - int) * 10) / 10} mm). Parte interna sofre mais desgaste — consumo esperado enquanto sulco ≥ crítico. Acompanhar; não indica rodízio.`,
+      };
+    }
+    // Externo mais gasto = alinhar
     const base = opcoes.papel === 'tracao'
       ? DIAGNOSTICOS.alinhamento_traseiro
       : DIAGNOSTICOS.alinhamento;
-    if (int < ext) {
-      return {
-        ...base,
-        descricao: 'Interno mais gasto que o externo — desgaste em cunha. Preferir rodízio para o lado oposto do eixo.',
-      };
-    }
     return {
       ...base,
       descricao: 'Externo mais gasto que o interno — desgaste em cunha. Verificar alinhamento.',
@@ -361,7 +335,9 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
 
 /**
  * Faixas: < crítico → trocar · até alerta → monitorar · > alerta → OK.
- * Desvio entre pontos > limiar → rodízio (lado oposto preferencial).
+ * Desvio > limiar:
+ *   - cunha Ext→Int (interno mais gasto) + sulco ≥ crítico → NÃO rodízio (consumo esperado)
+ *   - demais perfis irregulares → rodízio (lado oposto preferencial)
  *
  * @param {number|null} menorMm
  * @param {object} limites
@@ -382,7 +358,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
 
   if (menorMm == null) {
     const acao = comCustom(ACOES.ok, 'ok');
-    return { ...acao, motivo: 'Sem medição', rodizio_sugestao: null };
+    return { ...acao, motivo: 'Sem medição', rodizio_sugestao: null, desvio_mm: null };
   }
 
   const critico = limites.sulco_critico_mm;
@@ -390,6 +366,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
   const maxRecap = limites.max_recaps ?? 6;
   const prazoRecap = limites.prazo_recap_dias ?? 15;
   const rodizioDesvio = limites.rodizio_desvio_mm ?? 4;
+  const tolerancia = limites.diagnostico_tolerancia_mm ?? 1.0;
 
   if (menorMm < critico) {
     const acao = comCustom(ACOES.troca, 'troca');
@@ -398,14 +375,49 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
       motivo: acao.instrucao
         || `Crítico — retirar e trocar (sulco ${menorMm} mm < ${critico} mm)`,
       rodizio_sugestao: null,
+      desvio_mm: pontos ? desvioEntrePontos(pontos) : null,
     };
   }
 
   const desvio = pontos ? desvioEntrePontos(pontos) : null;
-  // Regra das fotos: desvio > limiar (ex.: 4 mm). 10·10·6 (=4) → OK; 12·10·7 (=5) → rodízio
-  const precisaMudarPosicao = desvio != null && desvio > rodizioDesvio;
+  const cunhaExtParaInt = pontos
+    ? internoMaisGastoQueExterno(pontos, tolerancia)
+    : false;
+  const desvioAlto = desvio != null && desvio > rodizioDesvio;
 
-  if (precisaMudarPosicao) {
+  // Foto: desgaste Ext→Int com desvio alto, mas sulco ≥ crítico → consumo esperado (sem rodízio)
+  if (desvioAlto && cunhaExtParaInt) {
+    const pts = valoresValidos(pontos).join(' · ');
+    if (menorMm <= monitorarAte) {
+      if (vidaRecap >= maxRecap) {
+        const acao = comCustom(ACOES.troca, 'troca');
+        return {
+          ...acao,
+          motivo: `Limite de recaps atingido (${vidaRecap}/${maxRecap}) — trocar`,
+          rodizio_sugestao: null,
+          desvio_mm: desvio,
+        };
+      }
+      const acao = comCustom(ACOES.monitorar, 'monitorar');
+      return {
+        ...acao,
+        motivo: `Desgaste progressivo Ext→Int (desvio ${desvio} mm) — consumo esperado enquanto ≥ ${critico} mm. Acompanhar. Medições: ${pts} mm.`,
+        prazo_recap_dias: prazoRecap,
+        rodizio_sugestao: null,
+        desvio_mm: desvio,
+      };
+    }
+    const acao = comCustom(ACOES.ok, 'ok');
+    return {
+      ...acao,
+      motivo: `Desgaste progressivo Ext→Int (desvio ${desvio} mm) — parte interna sofre mais; consumo esperado. Sem rodízio. Medições: ${pts} mm.`,
+      rodizio_sugestao: null,
+      desvio_mm: desvio,
+    };
+  }
+
+  // Outros perfis com desvio alto → rodízio
+  if (desvioAlto) {
     const acao = comCustom(ACOES.rodizio, 'rodizio');
     const par = encontrarParRodizio(pontos, candidatos, limites, { posicaoAtual });
     const pts = valoresValidos(pontos).join(' · ');
@@ -429,6 +441,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
         ...acao,
         motivo: `Limite de recaps atingido (${vidaRecap}/${maxRecap}) — trocar`,
         rodizio_sugestao: null,
+        desvio_mm: desvio,
       };
     }
     const acao = comCustom(ACOES.monitorar, 'monitorar');
@@ -438,6 +451,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
         || `Programar substituição (sulco ${menorMm} mm). Iniciar processo de recap em até ${prazoRecap} dias`,
       prazo_recap_dias: prazoRecap,
       rodizio_sugestao: null,
+      desvio_mm: desvio,
     };
   }
 
@@ -447,6 +461,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
     motivo: acao.instrucao
       || `OK (sulco ${menorMm} mm > ${monitorarAte} mm)`,
     rodizio_sugestao: null,
+    desvio_mm: desvio,
   };
 }
 
