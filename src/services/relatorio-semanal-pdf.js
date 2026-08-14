@@ -451,31 +451,61 @@ function contentWidth(doc) {
   return doc.page.width - doc.page.margins.left - doc.page.margins.right;
 }
 
-function createPager(doc, dados) {
+/** Texto absoluto sem disparar quebra de pagina do PDFKit */
+function absText(doc, text, x, y, opts = {}) {
+  const savedY = doc.y;
+  const savedBottom = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc.text(asciiSafe(text), x, y, { lineBreak: false, ...opts });
+  doc.page.margins.bottom = savedBottom;
+  doc.y = savedY;
+}
+
+function softGap(doc, px = 8) {
+  const next = doc.y + px;
+  if (next < pageBottom(doc)) doc.y = next;
+}
+
+function createPager(doc) {
   let pageNo = 1;
 
-  const stamp = () => {
-    const savedY = doc.y;
-    const savedBottom = doc.page.margins.bottom;
-    // Evita PDFKit criar pagina em branco ao desenhar no rodape
-    doc.page.margins.bottom = 0;
+  const addPage = () => {
+    doc.addPage();
+    pageNo += 1;
+  };
 
+  const ensureSpace = (need = 48) => {
+    if (doc.y + need > pageBottom(doc)) addPage();
+  };
+
+  return { ensureSpace, addPage, pageNo: () => pageNo };
+}
+
+function stampFooters(doc, dados) {
+  const range = doc.bufferedPageRange();
+  const total = range.count;
+  for (let i = 0; i < total; i += 1) {
+    doc.switchToPage(range.start + i);
     const left = doc.page.margins.left;
     const w = contentWidth(doc);
-    const y = doc.page.height - 28;
+    const y = doc.page.height - 26;
+    const savedY = doc.y;
+    const savedBottom = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+
     doc.save();
     doc.strokeColor(COLORS.line).lineWidth(0.6)
-      .moveTo(left, y - 8)
-      .lineTo(left + w, y - 8)
+      .moveTo(left, y - 7)
+      .lineTo(left + w, y - 7)
       .stroke();
     doc.font('Helvetica').fontSize(7).fillColor(COLORS.muted);
-    const leftTxt = asciiSafe(`PneuSistemma | ${dados.filial.codigo} | ${dados.periodo.label}`);
-    doc.text(leftTxt, left, y, {
-      width: w - 52,
-      lineBreak: false,
-      ellipsis: true,
-    });
-    doc.text(`Pag. ${pageNo}`, left + w - 50, y, {
+    doc.text(
+      asciiSafe(`PneuSistemma | ${dados.filial.codigo} | ${dados.periodo.label}`),
+      left,
+      y,
+      { width: w - 52, lineBreak: false }
+    );
+    doc.text(`Pag. ${i + 1}/${total}`, left + w - 50, y, {
       width: 50,
       align: 'right',
       lineBreak: false,
@@ -484,63 +514,62 @@ function createPager(doc, dados) {
 
     doc.page.margins.bottom = savedBottom;
     doc.y = savedY;
-  };
-
-  const addPage = () => {
-    stamp();
-    doc.addPage();
-    pageNo += 1;
-  };
-
-  const ensureSpace = (need = 60) => {
-    if (doc.y + need > pageBottom(doc)) addPage();
-  };
-
-  const finish = () => {
-    stamp();
-  };
-
-  return { ensureSpace, addPage, finish, pageNo: () => pageNo };
+  }
 }
 
 function sectionTitle(doc, pager, number, title) {
-  pager.ensureSpace(40);
+  pager.ensureSpace(36);
   const x = doc.page.margins.left;
   const y = doc.y;
   const w = contentWidth(doc);
-  doc.roundedRect(x, y, w, 24, 4).fill(COLORS.brand);
-  doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(11)
-    .text(`${number}.  ${asciiSafe(title)}`, x + 12, y + 6, { width: w - 24, lineBreak: false });
-  doc.y = y + 32;
+  const savedBottom = doc.page.margins.bottom;
+  doc.roundedRect(x, y, w, 22, 4).fill(COLORS.brand);
+  doc.page.margins.bottom = 0;
+  doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(10)
+    .text(asciiSafe(`${number}.  ${title}`), x + 12, y + 5, { width: w - 24, lineBreak: false });
+  doc.page.margins.bottom = savedBottom;
+  doc.y = y + 28;
 }
 
 function subTitle(doc, pager, title, accent = COLORS.brand) {
-  pager.ensureSpace(28);
+  pager.ensureSpace(22);
   const x = doc.page.margins.left;
   const y = doc.y;
-  doc.rect(x, y + 2, 3, 12).fill(accent);
-  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(10)
+  doc.rect(x, y + 1, 3, 11).fill(accent);
+  const savedY = doc.y;
+  const savedBottom = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(9)
     .text(asciiSafe(title), x + 10, y, { width: contentWidth(doc) - 10, lineBreak: false });
-  doc.y = y + 18;
+  doc.page.margins.bottom = savedBottom;
+  doc.y = y + 15;
 }
 
 function mutedLine(doc, pager, text) {
-  pager.ensureSpace(14);
-  doc.font('Helvetica').fontSize(8.5).fillColor(COLORS.muted)
-    .text(asciiSafe(text), { width: contentWidth(doc), lineBreak: false });
-  doc.moveDown(0.25);
+  pager.ensureSpace(12);
+  const y = doc.y;
+  const savedBottom = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc.font('Helvetica').fontSize(8).fillColor(COLORS.muted)
+    .text(asciiSafe(text), doc.page.margins.left, y, {
+      width: contentWidth(doc),
+      lineBreak: false,
+    });
+  doc.page.margins.bottom = savedBottom;
+  doc.y = y + 12;
 }
 
 function drawKpiGrid(doc, pager, items) {
   const cols = 4;
-  const gap = 8;
+  const gap = 6;
   const w = contentWidth(doc);
   const cardW = (w - gap * (cols - 1)) / cols;
-  const cardH = 46;
+  const cardH = 40;
   const startX = doc.page.margins.left;
-  pager.ensureSpace(cardH + 8);
+  pager.ensureSpace(cardH + 6);
   let x = startX;
   let y = doc.y;
+  const savedBottom = doc.page.margins.bottom;
 
   items.forEach((item, idx) => {
     if (idx > 0 && idx % cols === 0) {
@@ -554,52 +583,60 @@ function drawKpiGrid(doc, pager, items) {
         x = startX;
       }
     }
-    doc.roundedRect(x, y, cardW, cardH, 5).fill(item.bg || COLORS.soft);
-    doc.roundedRect(x, y, 4, cardH, 2).fill(item.accent || COLORS.brand);
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7)
-      .text(asciiSafe(item.label), x + 12, y + 8, { width: cardW - 18, lineBreak: false });
-    doc.fillColor(item.accent || COLORS.ink).font('Helvetica-Bold').fontSize(12)
-      .text(fitWidth(doc, item.value, cardW - 18, 12, true), x + 12, y + 22, {
-        width: cardW - 18,
+    doc.roundedRect(x, y, cardW, cardH, 4).fill(item.bg || COLORS.soft);
+    doc.roundedRect(x, y, 3, cardH, 2).fill(item.accent || COLORS.brand);
+
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(6.5)
+      .text(asciiSafe(item.label), x + 10, y + 7, { width: cardW - 14, lineBreak: false });
+    doc.fillColor(item.accent || COLORS.ink).font('Helvetica-Bold').fontSize(11)
+      .text(fitWidth(doc, item.value, cardW - 14, 11, true), x + 10, y + 20, {
+        width: cardW - 14,
         lineBreak: false,
       });
+    doc.page.margins.bottom = savedBottom;
     x += cardW + gap;
   });
-  doc.y = y + cardH + 12;
+  doc.y = y + cardH + 10;
 }
 
 function drawTable(doc, pager, columns, rows, { emptyText = 'Sem registros.' } = {}) {
   const x0 = doc.page.margins.left;
   const totalW = contentWidth(doc);
   const colWs = columns.map((c) => totalW * c.w);
-  const rowH = 15;
-  const headerH = 17;
+  const rowH = 14;
+  const headerH = 15;
+  const savedBottom = doc.page.margins.bottom;
 
   const drawHeader = () => {
-    pager.ensureSpace(headerH + rowH + 4);
+    pager.ensureSpace(headerH + rowH + 2);
     let x = x0;
     const y = doc.y;
     doc.rect(x0, y, totalW, headerH).fill(COLORS.ink);
+    doc.page.margins.bottom = 0;
     columns.forEach((col, i) => {
-      doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(7)
-        .text(asciiSafe(col.label), x + 3, y + 5, {
+      doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(6.5)
+        .text(asciiSafe(col.label), x + 3, y + 4, {
           width: colWs[i] - 6,
           lineBreak: false,
         });
       x += colWs[i];
     });
+    doc.page.margins.bottom = savedBottom;
     doc.y = y + headerH;
   };
 
   drawHeader();
 
   if (!rows.length) {
-    pager.ensureSpace(22);
+    pager.ensureSpace(18);
     const y = doc.y;
-    doc.rect(x0, y, totalW, 18).fill(COLORS.soft);
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8)
-      .text(asciiSafe(emptyText), x0 + 8, y + 5, { width: totalW - 16, lineBreak: false });
-    doc.y = y + 26;
+    doc.rect(x0, y, totalW, 16).fill(COLORS.soft);
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5)
+      .text(asciiSafe(emptyText), x0 + 6, y + 4, { width: totalW - 12, lineBreak: false });
+    doc.page.margins.bottom = savedBottom;
+    doc.y = y + 20;
     return;
   }
 
@@ -612,71 +649,71 @@ function drawTable(doc, pager, columns, rows, { emptyText = 'Sem registros.' } =
     const bg = ri % 2 === 0 ? COLORS.white : COLORS.soft;
     doc.rect(x0, y, totalW, rowH).fill(bg);
     let x = x0;
+    doc.page.margins.bottom = 0;
     columns.forEach((col, i) => {
       const raw = row[col.key];
       const cellW = colWs[i] - 6;
-      const val = fitWidth(doc, raw == null || raw === '' ? '-' : raw, cellW, 7, Boolean(col.bold));
+      const val = fitWidth(doc, raw == null || raw === '' ? '-' : raw, cellW, 6.5, Boolean(col.bold));
       const color = col.colorize ? statusColor(val).fg : COLORS.ink;
       doc.fillColor(color)
         .font(col.bold ? 'Helvetica-Bold' : 'Helvetica')
-        .fontSize(7)
-        .text(val, x + 3, y + 4, {
+        .fontSize(6.5)
+        .text(val, x + 3, y + 3.5, {
           width: cellW,
           align: col.align || 'left',
           lineBreak: false,
         });
       x += colWs[i];
     });
+    doc.page.margins.bottom = savedBottom;
     doc.y = y + rowH;
   });
-  doc.moveDown(0.45);
+  softGap(doc, 6);
 }
 
 function drawVehicleBlock(doc, pager, v) {
-  pager.ensureSpace(70);
+  const tableNeed = 15 + Math.max(1, v.pneus.length) * 14 + 8;
+  pager.ensureSpace(36 + Math.min(tableNeed, 80));
   const x0 = doc.page.margins.left;
   const w = contentWidth(doc);
   const st = statusColor(v.atrasado_semana ? 'atrasado' : v.status_label);
-  const headH = 32;
+  const headH = 28;
   const y0 = doc.y;
+  const savedBottom = doc.page.margins.bottom;
 
-  doc.roundedRect(x0, y0, w, headH, 4).fill(COLORS.softAlt);
-  doc.rect(x0, y0, 5, headH).fill(st.fg);
-  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(10)
+  doc.roundedRect(x0, y0, w, headH, 3).fill(COLORS.softAlt);
+  doc.rect(x0, y0, 4, headH).fill(st.fg);
+
+  doc.page.margins.bottom = 0;
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(9)
     .text(
-      fitWidth(doc, `${v.placa}${v.apelido ? ` | ${v.apelido}` : ''}`, w * 0.55, 10, true),
-      x0 + 14,
-      y0 + 5,
+      fitWidth(doc, `${v.placa}${v.apelido ? ` | ${v.apelido}` : ''}`, w * 0.55, 9, true),
+      x0 + 12,
+      y0 + 4,
       { width: w * 0.55, lineBreak: false }
     );
-  doc.fillColor(st.fg).font('Helvetica-Bold').fontSize(8)
+  doc.fillColor(st.fg).font('Helvetica-Bold').fontSize(7.5)
     .text(
-      fitWidth(doc, v.atrasado_semana ? `${v.status_label} | ATRASADO` : v.status_label, w * 0.35, 8, true),
-      x0 + 14,
-      y0 + 5,
-      { width: w - 28, align: 'right', lineBreak: false }
+      fitWidth(doc, v.atrasado_semana ? `${v.status_label} | ATRASADO` : v.status_label, w * 0.35, 7.5, true),
+      x0 + 12,
+      y0 + 4,
+      { width: w - 24, align: 'right', lineBreak: false }
     );
-  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7)
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(6.5)
     .text(
       fitWidth(doc, [
         v.tipo || null,
-        [v.marca, v.modelo].filter(Boolean).join(' ') || null,
         `KM ${formatNum(v.km_atual)}`,
         v.hr_atual != null ? `HR ${formatNum(v.hr_atual)}` : null,
         `${v.total_pneus} pneus`,
-        `Ult. medicao ${formatBr(v.ultima_medicao)}`,
-      ].filter(Boolean).join('  |  '), w - 28, 7),
-      x0 + 14,
-      y0 + 18,
-      { width: w - 28, lineBreak: false }
+        `Medicao ${formatBr(v.ultima_medicao)}`,
+      ].filter(Boolean).join('  |  '), w - 24, 6.5),
+      x0 + 12,
+      y0 + 15,
+      { width: w - 24, lineBreak: false }
     );
-
-  doc.y = y0 + headH + 4;
-
-  if (!v.pneus.length) {
-    mutedLine(doc, pager, 'Sem pneus montados neste veiculo.');
-    return;
-  }
+  doc.page.margins.bottom = savedBottom;
+  doc.y = y0 + headH + 3;
 
   drawTable(doc, pager, [
     { key: 'pos', label: 'Pos.', w: 0.07 },
@@ -708,7 +745,8 @@ export function gerarPdfRelatorioSemanal(dados) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size: 'A4',
-      margins: { top: 42, bottom: 44, left: 36, right: 36 },
+      margins: { top: 40, bottom: 40, left: 36, right: 36 },
+      bufferPages: true,
       autoFirstPage: true,
       info: {
         Title: dados.titulo,
@@ -721,17 +759,19 @@ export function gerarPdfRelatorioSemanal(dados) {
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    const pager = createPager(doc, dados);
+    const pager = createPager(doc);
     const r = dados.resumo;
     const x0 = doc.page.margins.left;
     const w = contentWidth(doc);
+    const savedBottom = doc.page.margins.bottom;
 
     // ── Cabecalho ──────────────────────────────────────
-    doc.rect(0, 0, doc.page.width, 78).fill(COLORS.brand);
-    doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(18)
-      .text('Relatorio semanal gerencial', x0, 18, { width: w, lineBreak: false });
-    doc.font('Helvetica').fontSize(9).fillColor('#99f6e4')
-      .text('Controle de desgaste de pneus - apoio a decisao do gerente da unidade', x0, 42, {
+    doc.rect(0, 0, doc.page.width, 72).fill(COLORS.brand);
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(16)
+      .text('Relatorio semanal gerencial', x0, 16, { width: w, lineBreak: false });
+    doc.font('Helvetica').fontSize(8).fillColor('#99f6e4')
+      .text('Controle de desgaste de pneus - apoio a decisao do gerente', x0, 38, {
         width: w,
         lineBreak: false,
       });
@@ -739,22 +779,24 @@ export function gerarPdfRelatorioSemanal(dados) {
       .text(
         fitWidth(doc, `${dados.filial.nome}  (${dados.filial.codigo})`, w * 0.55, 9, true),
         x0,
-        58,
+        54,
         { width: w * 0.55, lineBreak: false }
       );
     doc.font('Helvetica').fontSize(9)
-      .text(`Semana ${dados.periodo.label}`, x0, 58, { width: w, align: 'right', lineBreak: false });
+      .text(`Semana ${dados.periodo.label}`, x0, 54, { width: w, align: 'right', lineBreak: false });
+    doc.page.margins.bottom = savedBottom;
+    doc.y = 84;
 
-    doc.y = 92;
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8);
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5);
     const meta = [
       `Gerado em ${new Date(dados.gerado_em).toLocaleString('pt-BR')}`,
       dados.gerado_por ? `por ${dados.gerado_por}` : null,
-      dados.filial.contrato ? `Contrato: ${dados.filial.contrato}` : null,
       `Limites: critico <= ${dados.limites.critico_mm} mm | monitorar <= ${dados.limites.monitorar_ate_mm} mm | prazo recap ${dados.limites.prazo_recap_dias} d`,
     ].filter(Boolean).join('   |   ');
-    doc.text(asciiSafe(meta), x0, doc.y, { width: w });
-    doc.moveDown(0.8);
+    doc.text(asciiSafe(meta), x0, doc.y, { width: w, lineBreak: false });
+    doc.page.margins.bottom = savedBottom;
+    doc.y = 98;
 
     // ── 1. Resumo ──────────────────────────────────────
     sectionTitle(doc, pager, '1', 'Resumo executivo');
@@ -830,8 +872,32 @@ export function gerarPdfRelatorioSemanal(dados) {
 
     // ── 3. Frota ───────────────────────────────────────
     sectionTitle(doc, pager, '3', 'Frota - veiculo a veiculo');
-    if (!dados.frota.length) mutedLine(doc, pager, 'Nenhum veiculo ativo nesta unidade.');
-    else dados.frota.forEach((v) => drawVehicleBlock(doc, pager, v));
+    const comPneus = (dados.frota || []).filter((v) => v.pneus?.length);
+    const semPneus = (dados.frota || []).filter((v) => !v.pneus?.length);
+
+    if (!dados.frota?.length) {
+      mutedLine(doc, pager, 'Nenhum veiculo ativo nesta unidade.');
+    } else {
+      if (semPneus.length) {
+        subTitle(doc, pager, `Veiculos sem pneus montados (${semPneus.length})`, COLORS.muted);
+        drawTable(doc, pager, [
+          { key: 'placa', label: 'Placa', w: 0.22 },
+          { key: 'apelido', label: 'Apelido', w: 0.28 },
+          { key: 'tipo', label: 'Tipo', w: 0.30 },
+          { key: 'km', label: 'KM', w: 0.20, align: 'right' },
+        ], semPneus.map((v) => ({
+          placa: v.placa,
+          apelido: v.apelido || '-',
+          tipo: v.tipo || '-',
+          km: formatNum(v.km_atual),
+        })));
+      }
+
+      if (comPneus.length) {
+        subTitle(doc, pager, `Veiculos com pneus (${comPneus.length})`, COLORS.brand);
+        comPneus.forEach((v) => drawVehicleBlock(doc, pager, v));
+      }
+    }
 
     // ── 4. Estoque ─────────────────────────────────────
     sectionTitle(doc, pager, '4', 'Estoque');
@@ -871,17 +937,21 @@ export function gerarPdfRelatorioSemanal(dados) {
       obs: p.obs || '-',
     })), { emptyText: 'Nenhum pneu no estoque de descarte.' });
 
-    pager.ensureSpace(30);
-    doc.roundedRect(x0, doc.y, w, 22, 4).fill(COLORS.softAlt);
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8)
+    pager.ensureSpace(24);
+    const endY = doc.y;
+    doc.roundedRect(x0, endY, w, 20, 3).fill(COLORS.softAlt);
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5)
       .text(
         'Documento gerado pelo PneuSistemma para apoio a decisao do gerente da unidade.',
-        x0 + 10,
-        doc.y + 7,
-        { width: w - 20, lineBreak: false }
+        x0 + 8,
+        endY + 6,
+        { width: w - 16, lineBreak: false }
       );
+    doc.page.margins.bottom = savedBottom;
+    doc.y = endY + 22;
 
-    pager.finish();
+    stampFooters(doc, dados);
     doc.end();
   });
 }
