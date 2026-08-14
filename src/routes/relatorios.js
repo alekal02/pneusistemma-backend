@@ -1,14 +1,66 @@
 import { Router } from 'express';
 import { getDb } from '../database.js';
-import { requireAuth, requireAdmin } from '../auth.js';
+import {
+  requireAuth,
+  requireAdmin,
+  requireGerenteOuAdmin,
+  filiaisEscopoIds,
+} from '../auth.js';
 import { classificarSulco, getLimites, menorSulco } from '../limites.js';
 import { sugerirAcao } from '../diagnostico.js';
 import { toCsv } from '../csv-utils.js';
+import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
 
 const router = Router();
 
 router.use(requireAuth);
-router.use(requireAdmin);
+
+function assertFilialNoEscopo(req, filialId) {
+  const escopo = filiaisEscopoIds(req);
+  if (escopo === null) return true;
+  return escopo.includes(Number(filialId));
+}
+
+/**
+ * Relatório PDF semanal gerencial da unidade (gerente/admin).
+ * GET /api/relatorios/unidade/semanal.pdf?filial_id=
+ */
+router.get('/unidade/semanal.pdf', requireGerenteOuAdmin, async (req, res, next) => {
+  try {
+    let filialId = req.query.filial_id != null ? Number(req.query.filial_id) : null;
+    if (!filialId || Number.isNaN(filialId)) {
+      filialId = req.user.filial_id ? Number(req.user.filial_id) : null;
+    }
+    if (!filialId) {
+      const escopo = filiaisEscopoIds(req);
+      if (escopo?.length) {
+        filialId = escopo[0];
+      } else {
+        const row = await getDb().prepare(`
+          SELECT id FROM filiais WHERE ativo = 1 ORDER BY nome LIMIT 1
+        `).get();
+        filialId = row?.id || null;
+      }
+    }
+    if (!filialId) {
+      return res.status(400).json({ erro: 'Informe filial_id' });
+    }
+    if (!assertFilialNoEscopo(req, filialId)) {
+      return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+    }
+
+    const geradoPor = [req.user.papel, req.user.login].filter(Boolean).join(' · ');
+    const { buffer, filename } = await gerarRelatorioSemanalPdfBuffer(filialId, { geradoPor });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
 
 /**
  * Relatório executivo para diretoria — consolidado por filial + frota.
@@ -151,7 +203,7 @@ async function montarRelatorioDiretoria() {
   };
 }
 
-router.get('/diretoria', async (_req, res, next) => {
+router.get('/diretoria', requireAdmin, async (_req, res, next) => {
   try {
     res.json(await montarRelatorioDiretoria());
   } catch (err) {
@@ -159,7 +211,7 @@ router.get('/diretoria', async (_req, res, next) => {
   }
 });
 
-router.get('/diretoria.csv', async (_req, res, next) => {
+router.get('/diretoria.csv', requireAdmin, async (_req, res, next) => {
   try {
     const rel = await montarRelatorioDiretoria();
     const headers = [
