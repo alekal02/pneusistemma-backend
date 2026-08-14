@@ -237,10 +237,17 @@ export async function setLimites(body) {
   return refreshLimitesCache();
 }
 
+/** Sulco no limite crítico conta como crítico (medições de campo vêm em mm inteiros). */
+export function atingiuCritico(mm, criticoMm) {
+  if (mm == null || !Number.isFinite(mm)) return false;
+  const limiar = Number.isFinite(criticoMm) ? criticoMm : getLimites().sulco_critico_mm;
+  return mm <= limiar;
+}
+
 export function classificarSulco(mm) {
   if (mm === null || mm === undefined) return 'sem_dado';
   const { sulco_critico_mm, sulco_alerta_mm } = getLimites();
-  if (mm < sulco_critico_mm) return 'critico';
+  if (mm <= sulco_critico_mm) return 'critico';
   if (mm <= sulco_alerta_mm) return 'alerta';
   return 'ok';
 }

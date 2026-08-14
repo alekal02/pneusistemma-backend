@@ -13,8 +13,8 @@ router.get('/', (_req, res) => {
   res.json({
     ...limites,
     descricao: {
-      critico: `Sulco < ${limites.sulco_critico_mm} mm — ${a.troca.label}: ${a.troca.instrucao}`,
-      monitorar: `${limites.sulco_critico_mm} a ${limites.sulco_alerta_mm} mm — ${a.monitorar.label}: ${a.monitorar.instrucao}`,
+      critico: `Sulco ≤ ${limites.sulco_critico_mm} mm — ${a.troca.label}: ${a.troca.instrucao}`,
+      monitorar: `Acima de ${limites.sulco_critico_mm} mm até ${limites.sulco_alerta_mm} mm — ${a.monitorar.label}: ${a.monitorar.instrucao}`,
       prazo_recap: `Prazo de ${limites.prazo_recap_dias} dias para iniciar o processo de recap ao entrar em monitorar`,
       mudanca_posicao: `Desvio entre pontos > ${limites.rodizio_desvio_mm} mm — ${a.rodizio.label}: ${a.rodizio.instrucao}`,
       ok: `Acima de ${limites.sulco_alerta_mm} mm — ${a.ok.label}: ${a.ok.instrucao}`,

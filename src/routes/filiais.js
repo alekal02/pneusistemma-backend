@@ -116,7 +116,9 @@ async function pendenciasFilial(db, filialId, limites) {
   const itens = rows.map((p) => {
     const menor = menorSulco(p);
     const status = classificarSulco(menor);
-    const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm);
+    const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm, {
+      limites,
+    });
     const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
     return {
       pneu_id: p.pneu_id,
@@ -385,6 +387,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
         papel: papelPosicao(p.posicao),
         posicao: p.posicao,
+        limites,
       });
       const sulcoRef = p.sulco_inicial_mm ?? limites.sulco_novo_mm;
 
@@ -590,6 +593,7 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
     const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
       papel: med.posicao ? papelPosicao(med.posicao) : null,
       posicao: med.posicao || null,
+      limites,
     });
     const acao = sugerirAcao(menor, limites, med.vida_recap || 0, {
       pontos: row,

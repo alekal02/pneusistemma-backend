@@ -4,12 +4,18 @@
  */
 
 import { labelPosicao, posicaoEspelhada, ladoPosicao } from './pneus-layouts.js';
+import { getLimites } from './limites.js';
 
 export const DIAGNOSTICOS = {
   ok: {
     codigo: 'ok',
     label: 'OK',
-    descricao: 'Desgaste uniforme — sem indício de problema',
+    descricao: 'Desgaste uniforme — perfil sem irregularidade',
+  },
+  critico: {
+    codigo: 'critico',
+    label: 'Crítico',
+    descricao: 'Sulco no limite crítico — retirar e trocar',
   },
   alinhamento: {
     codigo: 'alinhamento',
@@ -266,85 +272,123 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, 
   };
 }
 
-/**
- * Classifica o padrão de desgaste com base nos pontos disponíveis.
- * Consumo esperado: externo mais gasto que interno (conforme o lado do caminhão).
- * @param {object} row
- * @param {number} toleranciaMm
- * @param {{ papel?: string|null, posicao?: string|null }} [opcoes]
- */
-export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
-  const pontos = valoresValidos(row);
-  if (pontos.length < 3) return DIAGNOSTICOS.sem_dado;
-
-  const max = Math.max(...pontos);
-  const min = Math.min(...pontos);
-  const delta = max - min;
-
-  if (delta <= toleranciaMm) return DIAGNOSTICOS.ok;
-
-  const ext = row.sulco_externo;
-  const int = row.sulco_interno;
-  const cent = row.sulco_central;
-  const posicao = opcoes.posicao || null;
-  const direcao = textoDirecaoConsumo(posicao);
-
-  // Ombros Ext ↔ Int
-  if (ext != null && int != null && Number.isFinite(ext) && Number.isFinite(int)
-    && Math.abs(ext - int) >= toleranciaMm) {
-    // Externo mais gasto = consumo progressivo esperado (esq→dir ou dir→esq conforme o lado)
-    if (desgasteProgressivoEsperado(row, toleranciaMm)) {
-      const dif = Math.round((int - ext) * 10) / 10;
-      return {
-        ...DIAGNOSTICOS.desgaste_progressivo,
-        descricao: `Externo mais gasto que o interno (diferença ${dif} mm). Consumo esperado — ${direcao}. Acompanhar enquanto sulco ≥ crítico; não indica rodízio.`,
-      };
-    }
-    // Interno mais gasto que o externo — fora do padrão de consumo do lado
-    return {
-      ...DIAGNOSTICOS.irregular,
-      descricao: `Interno mais gasto que o externo — fora do padrão esperado (${direcao}). Acompanhar nas próximas medições.`,
-    };
-  }
-
-  if (cent != null && Number.isFinite(cent) && ext != null && int != null
-    && Number.isFinite(ext) && Number.isFinite(int)) {
-    const mediaBordas = (ext + int) / 2;
-    if (mediaBordas - cent >= toleranciaMm) {
-      return DIAGNOSTICOS.falta_calib;
-    }
-    if (cent - mediaBordas >= toleranciaMm) {
-      return DIAGNOSTICOS.excesso_calib;
-    }
-  }
-
-  const seq = pontosSulco(row).filter((v) => v != null && Number.isFinite(v));
-  const primeiro = seq[0];
-  const ultimo = seq[seq.length - 1];
-  const meio = seq.slice(1, -1);
-  const mediaMeio = meio.length ? meio.reduce((a, b) => a + b, 0) / meio.length : null;
-
-  if (Math.abs(primeiro - ultimo) >= toleranciaMm) {
-    return DIAGNOSTICOS.irregular;
-  }
-
-  if (mediaMeio != null) {
-    const mediaBordas = (primeiro + ultimo) / 2;
-    if (mediaBordas - mediaMeio >= toleranciaMm) {
-      return DIAGNOSTICOS.falta_calib;
-    }
-    if (mediaMeio - mediaBordas >= toleranciaMm) {
-      return DIAGNOSTICOS.excesso_calib;
-    }
-  }
-
-  return DIAGNOSTICOS.irregular;
+function limiarCritico(opcoes = {}) {
+  const n = opcoes.limites?.sulco_critico_mm;
+  if (Number.isFinite(n)) return n;
+  const fallback = getLimites()?.sulco_critico_mm;
+  return Number.isFinite(fallback) ? fallback : null;
 }
 
 /**
- * Faixas: < crítico → trocar · até alerta → monitorar · > alerta → OK.
+ * Sulco ≤ crítico prevalece sobre "OK" do perfil: 3 mm no limite não é diagnóstico OK.
+ */
+function aplicarCriticoAoDiagnostico(perfil, menorMm, opcoes = {}) {
+  const critico = limiarCritico(opcoes);
+  if (menorMm == null || critico == null || menorMm > critico) return perfil;
+
+  if (perfil.codigo === 'ok' || perfil.codigo === 'sem_dado') {
+    return {
+      ...DIAGNOSTICOS.critico,
+      descricao: perfil.codigo === 'ok'
+        ? `Menor sulco ${menorMm} mm (limite crítico ${critico} mm). Desgaste uniforme — retirar e trocar.`
+        : `Menor sulco ${menorMm} mm (limite crítico ${critico} mm) — retirar e trocar.`,
+    };
+  }
+
+  return {
+    ...perfil,
+    descricao: `${perfil.descricao} Sulco crítico (${menorMm} mm ≤ ${critico} mm) — retirar e trocar.`,
+  };
+}
+
+/**
+ * Classifica o padrão de desgaste com base nos pontos disponíveis.
+ * Consumo esperado: externo mais gasto que interno (conforme o lado do caminhão).
+ * Se o menor sulco estiver no limite crítico, o diagnóstico não pode ser OK.
+ * @param {object} row
+ * @param {number} toleranciaMm
+ * @param {{ papel?: string|null, posicao?: string|null, limites?: object }} [opcoes]
+ */
+export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
+  const pontos = valoresValidos(row);
+  const menor = menorSulco4(row);
+  let perfil;
+
+  if (pontos.length < 3) {
+    perfil = DIAGNOSTICOS.sem_dado;
+  } else {
+    const max = Math.max(...pontos);
+    const min = Math.min(...pontos);
+    const delta = max - min;
+
+    if (delta <= toleranciaMm) {
+      perfil = DIAGNOSTICOS.ok;
+    } else {
+      const ext = row.sulco_externo;
+      const int = row.sulco_interno;
+      const cent = row.sulco_central;
+      const posicao = opcoes.posicao || null;
+      const direcao = textoDirecaoConsumo(posicao);
+
+      // Ombros Ext ↔ Int
+      if (ext != null && int != null && Number.isFinite(ext) && Number.isFinite(int)
+        && Math.abs(ext - int) >= toleranciaMm) {
+        // Externo mais gasto = consumo progressivo esperado (esq→dir ou dir→esq conforme o lado)
+        if (desgasteProgressivoEsperado(row, toleranciaMm)) {
+          const dif = Math.round((int - ext) * 10) / 10;
+          perfil = {
+            ...DIAGNOSTICOS.desgaste_progressivo,
+            descricao: `Externo mais gasto que o interno (diferença ${dif} mm). Consumo esperado — ${direcao}. Acompanhar enquanto sulco estiver acima do crítico; não indica rodízio.`,
+          };
+        } else {
+          // Interno mais gasto que o externo — fora do padrão de consumo do lado
+          perfil = {
+            ...DIAGNOSTICOS.irregular,
+            descricao: `Interno mais gasto que o externo — fora do padrão esperado (${direcao}). Acompanhar nas próximas medições.`,
+          };
+        }
+      } else if (cent != null && Number.isFinite(cent) && ext != null && int != null
+        && Number.isFinite(ext) && Number.isFinite(int)) {
+        const mediaBordas = (ext + int) / 2;
+        if (mediaBordas - cent >= toleranciaMm) {
+          perfil = DIAGNOSTICOS.falta_calib;
+        } else if (cent - mediaBordas >= toleranciaMm) {
+          perfil = DIAGNOSTICOS.excesso_calib;
+        }
+      }
+
+      if (!perfil) {
+        const seq = pontosSulco(row).filter((v) => v != null && Number.isFinite(v));
+        const primeiro = seq[0];
+        const ultimo = seq[seq.length - 1];
+        const meio = seq.slice(1, -1);
+        const mediaMeio = meio.length ? meio.reduce((a, b) => a + b, 0) / meio.length : null;
+
+        if (Math.abs(primeiro - ultimo) >= toleranciaMm) {
+          perfil = DIAGNOSTICOS.irregular;
+        } else if (mediaMeio != null) {
+          const mediaBordas = (primeiro + ultimo) / 2;
+          if (mediaBordas - mediaMeio >= toleranciaMm) {
+            perfil = DIAGNOSTICOS.falta_calib;
+          } else if (mediaMeio - mediaBordas >= toleranciaMm) {
+            perfil = DIAGNOSTICOS.excesso_calib;
+          } else {
+            perfil = DIAGNOSTICOS.irregular;
+          }
+        } else {
+          perfil = DIAGNOSTICOS.irregular;
+        }
+      }
+    }
+  }
+
+  return aplicarCriticoAoDiagnostico(perfil, menor, opcoes);
+}
+
+/**
+ * Faixas: ≤ crítico → trocar · até alerta → monitorar · > alerta → OK.
  * Desvio > limiar:
- *   - cunha Ext→Int (interno mais gasto) + sulco ≥ crítico → NÃO rodízio (consumo esperado)
+ *   - cunha Ext→Int (externo mais gasto) + sulco acima do crítico → NÃO rodízio (consumo esperado)
  *   - demais perfis irregulares → rodízio (lado oposto preferencial)
  *
  * @param {number|null} menorMm
@@ -376,12 +420,12 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
   const rodizioDesvio = limites.rodizio_desvio_mm ?? 4;
   const tolerancia = limites.diagnostico_tolerancia_mm ?? 1.0;
 
-  if (menorMm < critico) {
+  if (menorMm <= critico) {
     const acao = comCustom(ACOES.troca, 'troca');
     return {
       ...acao,
       motivo: acao.instrucao
-        || `Crítico — retirar e trocar (sulco ${menorMm} mm < ${critico} mm)`,
+        || `Crítico — retirar e trocar (sulco ${menorMm} mm ≤ ${critico} mm)`,
       rodizio_sugestao: null,
       desvio_mm: pontos ? desvioEntrePontos(pontos) : null,
     };
@@ -393,7 +437,7 @@ export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
     : false;
   const desvioAlto = desvio != null && desvio > rodizioDesvio;
 
-  // Consumo Ext→Int esperado (conforme lado) + sulco ≥ crítico → sem rodízio
+  // Consumo Ext→Int esperado (conforme lado) + sulco acima do crítico → sem rodízio
   if (desvioAlto && consumoEsperado) {
     const pts = valoresValidos(pontos).join(' · ');
     const direcao = textoDirecaoConsumo(posicaoAtual);
