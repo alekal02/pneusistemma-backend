@@ -294,7 +294,11 @@ router.get('/:id', async (req, res, next) => {
       LEFT JOIN medicoes m ON m.pneu_id = p.id
         AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
       WHERE p.veiculo_id = v.id AND p.ativo = 1
-      ) as menor_sulco
+      ) as menor_sulco,
+      (SELECT MAX(m.data_medicao)
+       FROM pneus p
+       JOIN medicoes m ON m.pneu_id = p.id
+       WHERE p.veiculo_id = v.id AND p.ativo = 1) as ultima_medicao
     FROM veiculos v
     WHERE v.filial_id = ? AND v.ativo = 1
     ORDER BY v.apelido, v.placa
@@ -306,6 +310,7 @@ router.get('/:id', async (req, res, next) => {
       status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco),
       pendencias_troca: pendencias.troca.filter((p) => p.veiculo_id === v.id).length,
       pendencias_recap: pendencias.recap.filter((p) => p.veiculo_id === v.id).length,
+      pendencias_monitorar: pendencias.monitorar.filter((p) => p.veiculo_id === v.id).length,
     }));
 
     res.json({
