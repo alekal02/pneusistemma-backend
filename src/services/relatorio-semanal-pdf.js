@@ -819,3 +819,5 @@ export async function gerarRelatorioSemanalPdfBuffer(filialId, opts = {}) {
     .replace(/[^\w.\-]+/g, '_');
   return { buffer, filename: nome, dados };
 }
+
+// redeploy trigger 2026-08-14T20:36:48.0998389-03:00
