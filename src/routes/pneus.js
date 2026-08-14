@@ -17,6 +17,8 @@ import {
   getLayout,
   LAYOUT_PADRAO,
   labelTipoPneu,
+  TRATAMENTOS_DESCARTE,
+  labelTratamentoDescarte,
 } from '../pneus-layouts.js';
 import {
   requireAuth,
@@ -186,6 +188,12 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
     padrao: pneu.tipo_pneu,
     padrao_label: labelTipoPneu(pneu.tipo_pneu),
     tipo_pneu_label: labelTipoPneu(pneu.tipo_pneu),
+    tratamento_descarte: pneu.status_pneu === 'descarte'
+      ? (pneu.tratamento_descarte || 'pendente')
+      : (pneu.tratamento_descarte || null),
+    tratamento_descarte_label: pneu.status_pneu === 'descarte'
+      ? labelTratamentoDescarte(pneu.tratamento_descarte || 'pendente')
+      : null,
     menor_sulco: menor,
     status_sulco: statusSulco,
     diagnostico: diagnostico.codigo,
@@ -342,7 +350,7 @@ router.post('/import', async (req, res, next) => {
   });
 });
 
-/** Lista pneus da filial (estoque / montados / todos) */
+/** Lista pneus da filial (estoque / montados / descarte / todos) */
 router.get('/', async (req, res, next) => {
   try {
     const db = getDb();
@@ -350,7 +358,10 @@ router.get('/', async (req, res, next) => {
     const status = (req.query.status || 'todos').toLowerCase();
     const q = (req.query.q || '').trim();
 
-    let where = 'p.ativo = 1 AND p.filial_id = ?';
+    // Descarte grava ativo=0 — precisa entrar na listagem ao filtrar
+    let where = status === 'descarte'
+      ? 'p.filial_id = ? AND p.status_pneu = \'descarte\''
+      : 'p.ativo = 1 AND p.filial_id = ?';
     const params = [filialId];
 
     if (status === 'estoque') {
@@ -359,6 +370,8 @@ router.get('/', async (req, res, next) => {
       where += ` AND p.status_pneu = 'montado'`;
     } else if (status === 'recapagem') {
       where += ` AND p.status_pneu = 'recapagem'`;
+    } else if (status === 'descarte') {
+      // already filtered above
     } else {
       where += ` AND p.status_pneu != 'descarte'`;
     }
@@ -384,7 +397,13 @@ router.get('/', async (req, res, next) => {
     LEFT JOIN veiculos v ON v.id = p.veiculo_id
     WHERE ${where}
     ORDER BY
-      CASE p.status_pneu WHEN 'estoque' THEN 0 WHEN 'montado' THEN 1 ELSE 2 END,
+      CASE p.status_pneu
+        WHEN 'estoque' THEN 0
+        WHEN 'montado' THEN 1
+        WHEN 'recapagem' THEN 2
+        WHEN 'descarte' THEN 3
+        ELSE 4
+      END,
       p.numero_fogo, p.id DESC
   `).all(...params);
 
@@ -962,16 +981,58 @@ router.post('/:id/evento', async (req, res, next) => {
             veiculo_id = NULL,
             posicao = NULL,
             data_alerta_monitorar = NULL,
+            tratamento_descarte = 'pendente',
+            tratamento_descarte_obs = NULL,
+            tratamento_descarte_em = ?,
             observacoes = COALESCE(observacoes || ' | ', '') || ?
           WHERE id = ?
-        `).run(`descarte em ${data}${detalhes ? ` — ${detalhes}` : ''}`, pneu.id);
+        `).run(data, `descarte em ${data}${detalhes ? ` — ${detalhes}` : ''}`, pneu.id);
       });
     }
 
     const atualizado = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(pneu.id);
 
     res.status(201).json({
-      mensagem: tipo === 'recap' ? 'Recap registrado — pneu no estoque' : 'Pneu descartado',
+      mensagem: tipo === 'recap'
+        ? 'Recap registrado — pneu no estoque'
+        : 'Pneu enviado ao estoque de descarte — defina o tratamento na aba Pneus',
+      pneu: enriquecerPneu(atualizado, await ultimaMedicaoDoPneu(db, pneu.id)),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Define o destino/tratamento de um pneu no estoque de descarte */
+router.put('/:id/tratamento-descarte', async (req, res, next) => {
+  const { tratamento, observacoes } = req.body || {};
+  if (!TRATAMENTOS_DESCARTE.includes(tratamento)) {
+    return res.status(400).json({
+      erro: `tratamento deve ser: ${TRATAMENTOS_DESCARTE.join(', ')}`,
+    });
+  }
+  try {
+    const pneu = await assertPneuDaFilial(req.params.id, filialScopeId(req));
+    if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
+    if (pneu.status_pneu !== 'descarte') {
+      return res.status(400).json({ erro: 'Só pneus no estoque de descarte recebem tratamento' });
+    }
+
+    const db = getDb();
+    const hoje = new Date().toISOString().split('T')[0];
+    const obs = observacoes != null ? String(observacoes).trim() || null : pneu.tratamento_descarte_obs;
+
+    await db.prepare(`
+      UPDATE pneus SET
+        tratamento_descarte = ?,
+        tratamento_descarte_obs = ?,
+        tratamento_descarte_em = ?
+      WHERE id = ?
+    `).run(tratamento, obs, hoje, pneu.id);
+
+    const atualizado = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(pneu.id);
+    res.json({
+      mensagem: `Tratamento: ${labelTratamentoDescarte(tratamento)}`,
       pneu: enriquecerPneu(atualizado, await ultimaMedicaoDoPneu(db, pneu.id)),
     });
   } catch (err) {

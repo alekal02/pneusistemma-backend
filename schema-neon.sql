@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS pneus (
   custo DOUBLE PRECISION,
   nota_fiscal TEXT,
   data_alerta_monitorar TEXT,
+  tratamento_descarte TEXT,
+  tratamento_descarte_obs TEXT,
+  tratamento_descarte_em TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (veiculo_id, posicao)
 );

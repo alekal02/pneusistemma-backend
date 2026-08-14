@@ -308,6 +308,9 @@ export async function initDatabase() {
 
   // Colunas extras (idempotente)
   await ensureColumn('notificacoes_whatsapp', 'filial_id', 'BIGINT');
+  await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
+  await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
+  await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
 
   await seedConfigs();
   const matrizId = await seedAuthAndFilial();

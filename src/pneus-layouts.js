@@ -147,6 +147,21 @@ export const TIPOS_PNEU = ['direcional', 'misto', 'borrachudo'];
 export const CONDICOES_PNEU = ['novo', 'recapado'];
 export const STATUS_PNEU = ['montado', 'estoque', 'recapagem', 'descarte'];
 
+/** Destino / tratamento após registrar descarte */
+export const TRATAMENTOS_DESCARTE = ['pendente', 'reciclagem', 'sucata', 'fabricante', 'outro'];
+
+export const LABELS_TRATAMENTO_DESCARTE = {
+  pendente: 'Aguardando destino',
+  reciclagem: 'Reciclagem / coleta',
+  sucata: 'Sucata / trituração',
+  fabricante: 'Devolução fabricante',
+  outro: 'Outro',
+};
+
+export function labelTratamentoDescarte(codigo) {
+  return LABELS_TRATAMENTO_DESCARTE[codigo] || LABELS_TRATAMENTO_DESCARTE.pendente;
+}
+
 export const LABELS_TIPO_PNEU = {
   direcional: 'Direcional',
   misto: 'Misto (tração)',
