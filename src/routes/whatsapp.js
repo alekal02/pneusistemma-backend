@@ -271,9 +271,42 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
     );
 
     res.json({ mensagem: `Chatbot de ${f.nome} atualizado` });
+
+    // Reaplica webhook em background (não atrasa a resposta)
+    Promise.resolve()
+      .then(() => tokenWuzapiFilial(id))
+      .then((token) => (token ? garantirWebhook(token, id) : null))
+      .catch((err) => {
+        console.warn('[whatsapp] webhook após salvar chatbot:', err.message);
+      });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
+  }
+});
+
+/** Reaplica a URL do webhook no WuzAPI (placa → link) */
+router.post('/filial/:id/reconnect-webhook', requireChatbotAcesso, async (req, res) => {
+  try {
+    if (!assertFilialNoEscopo(req, req.params.id)) {
+      return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+    }
+    const f = await filialOuErro(req.params.id);
+    const token = await tokenWuzapiFilial(f.id);
+    if (!token) {
+      return res.status(400).json({ erro: 'Cadastre/conecte o token WuzAPI antes' });
+    }
+    const webhook = await garantirWebhook(token, f.id);
+    if (!webhook) {
+      return res.status(502).json({ erro: 'Não foi possível configurar o webhook no WuzAPI' });
+    }
+    res.json({
+      mensagem: 'Webhook reaplicado',
+      webhook,
+      grupo: limparCampoTexto(f.whatsapp_grupo),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ erro: err.message });
   }
 });
 

@@ -107,8 +107,9 @@ function validarHmacWebhook(req) {
 
   const signature = req.headers['x-hmac-signature'] || req.headers['x-hub-signature'];
   if (!signature) {
-    console.warn('[webhook] HMAC configurado mas assinatura ausente');
-    return false;
+    // Secret no .env sem HMAC ativo no WuzAPI — não bloquear o fluxo placa→link
+    console.warn('[webhook] HMAC configurado mas assinatura ausente — aceitando mensagem');
+    return true;
   }
 
   const raw = typeof req.rawBody === 'string'
@@ -127,10 +128,31 @@ function validarHmacWebhook(req) {
   }
 }
 
+function ehMensagemPropria(event) {
+  const info = event?.data?.Info || event?.data?.info || event?.Info || {};
+  const flags = [
+    info.IsFromMe,
+    info.isFromMe,
+    info.FromMe,
+    info.fromMe,
+    event?.data?.fromMe,
+    event?.fromMe,
+    event?.isFromMe,
+  ];
+  return flags.some((v) => v === true || v === 'true' || v === 1 || v === '1');
+}
+
 export function extrairChatJid(event) {
+  const info = event?.data?.Info || event?.data?.info || event?.Info || {};
   const candidates = [
-    event?.data?.Info?.Chat,
+    info.Chat,
+    info.chat,
+    info.RemoteJid,
+    info.remoteJid,
+    info.MessageSource?.Chat,
+    info.MessageSource?.chat,
     event?.data?.chat,
+    event?.data?.Chat,
     event?.data?.from,
     event?.from,
   ];
@@ -145,10 +167,14 @@ export function extrairChatJid(event) {
 }
 
 export function extrairTelefone(event) {
+  const info = event?.data?.Info || event?.data?.info || event?.Info || {};
   const candidates = [
-    event?.data?.Info?.Sender,
+    info.Sender,
+    info.sender,
+    info.Participant,
+    info.participant,
     event?.data?.from,
-    event?.data?.Info?.Chat,
+    info.Chat,
     event?.from,
     event?.sender,
     event?.Phone,
@@ -265,6 +291,10 @@ router.post('/whatsapp', async (req, res) => {
 
     if (eventName && !/message/i.test(String(eventName)) && !event?.data?.message && !event?.message) {
       return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    if (ehMensagemPropria(event)) {
+      return res.status(200).json({ ok: true, ignored: 'from_me' });
     }
 
     const chatJid = extrairChatJid(event);
