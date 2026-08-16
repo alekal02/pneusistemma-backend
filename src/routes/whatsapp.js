@@ -667,13 +667,37 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     }
     const f = await filialOuErro(req.params.id);
     const token = tokenWuzapiUtil(f.wuzapi_token);
-    if (!token) {
-      return res.status(400).json({
-        erro: 'Esta filial não tem token próprio. Cadastre/gere o token antes de desconectar.',
-      });
+    let sessionDesconectada = false;
+    let aviso = null;
+
+    if (token) {
+      try {
+        await wuzapiFetch('/session/disconnect', { method: 'POST', token });
+        sessionDesconectada = true;
+      } catch (err) {
+        // Sessão pode já estar offline — ainda limpa vínculos locais
+        aviso = err.message || 'Sessão WuzAPI não respondeu; configuração local limpa.';
+      }
+    } else {
+      aviso = 'Sem token próprio — limpou só número, grupo e alertas.';
     }
-    await wuzapiFetch('/session/disconnect', { method: 'POST', token });
-    res.json({ mensagem: `Chatbot de ${f.nome} desconectado` });
+
+    const db = getDb();
+    await db.prepare(`
+      UPDATE filiais SET
+        whatsapp = NULL,
+        whatsapp_grupo = NULL,
+        whatsapp_alerta = NULL,
+        updated_at = NOW()
+      WHERE id = ?
+    `).run(f.id);
+
+    res.json({
+      mensagem: `Chatbot de ${f.nome} desconectado — número, grupo e alertas limpos`,
+      session_desconectada: sessionDesconectada,
+      aviso,
+      limpos: ['whatsapp', 'whatsapp_grupo', 'whatsapp_alerta'],
+    });
   } catch (err) {
     res.status(err.status || 500).json({ erro: err.message });
   }
