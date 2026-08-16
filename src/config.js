@@ -51,6 +51,8 @@ export const config = {
     || `http://host.docker.internal:${parseInt(process.env.PORT || '3000', 10)}/api/webhook/whatsapp`
   ).replace(/\/$/, ''),
   gerenteComprasWhatsapp: (process.env.GERENTE_COMPRAS_WHATSAPP || '').replace(/\D/g, ''),
+  /** Alertas WhatsApp pós-medição (crítico/monitorar). Desligado até segunda ordem. */
+  whatsappAlertasEnabled: String(process.env.WHATSAPP_ALERTAS_ENABLED || 'false').toLowerCase() === 'true',
   allowVercelPreviews: String(process.env.ALLOW_VERCEL_PREVIEWS || 'true').toLowerCase() !== 'false',
   rootDir,
 };

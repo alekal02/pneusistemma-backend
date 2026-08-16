@@ -132,6 +132,11 @@ export async function notificarGerentesAposMedicao({
 }) {
   if (!['alerta', 'critico'].includes(statusSulco)) return { enviados: 0 };
 
+  // Desligado até segunda ordem (WHATSAPP_ALERTAS_ENABLED=true para religar)
+  if (!config.whatsappAlertasEnabled) {
+    return { enviados: 0, motivo: 'alertas_desabilitados' };
+  }
+
   if (await jaNotificouMedicao(medicaoId)) {
     return { enviados: 0, motivo: 'ja_notificado' };
   }

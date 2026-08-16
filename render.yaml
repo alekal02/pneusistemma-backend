@@ -46,6 +46,8 @@ services:
         sync: false
       - key: GERENTE_COMPRAS_WHATSAPP
         sync: false
+      - key: WHATSAPP_ALERTAS_ENABLED
+        value: "false"
       - key: ALLOW_VERCEL_PREVIEWS
         value: "true"
       - key: SULCO_MINIMO_MM
