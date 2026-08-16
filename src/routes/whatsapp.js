@@ -791,6 +791,47 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
   }
 });
 
+/** Limpa logs de pendentes/falha da filial */
+router.delete('/filial/:id/envios/pendentes', requireChatbotAcesso, async (req, res, next) => {
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  const filialId = Number(req.params.id);
+  try {
+    await filialOuErro(filialId);
+    const db = getDb();
+    const r = await db.prepare(`
+      DELETE FROM notificacoes_whatsapp
+      WHERE status = 'erro'
+        AND (
+          filial_id = ?
+          OR (
+            filial_id IS NULL AND veiculo_id IN (
+              SELECT id FROM veiculos WHERE filial_id = ?
+            )
+          )
+          OR (
+            filial_id IS NULL AND veiculo_id IS NULL AND destinatario_whatsapp IN (
+              SELECT TRIM(whatsapp_grupo) FROM filiais WHERE id = ? AND whatsapp_grupo IS NOT NULL
+              UNION
+              SELECT TRIM(whatsapp) FROM filiais WHERE id = ? AND whatsapp IS NOT NULL
+              UNION
+              SELECT TRIM(whatsapp_alerta) FROM filiais WHERE id = ? AND whatsapp_alerta IS NOT NULL
+            )
+          )
+        )
+    `).run(filialId, filialId, filialId, filialId, filialId);
+
+    res.json({
+      mensagem: 'Pendentes / falhas limpos',
+      removidos: r.changes || 0,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
 /** Reenvia uma notificação que falhou */
 router.post('/filial/:id/envios/:notifId/reenviar', requireChatbotAcesso, async (req, res) => {
   try {
