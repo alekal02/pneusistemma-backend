@@ -128,14 +128,28 @@ function validarHmacWebhook(req) {
   }
 }
 
+/** Raiz do payload (WuzAPI real: `event`; legado/testes: `data`) */
+export function raizPayloadMensagem(payload) {
+  if (!payload || typeof payload !== 'object') return {};
+  const d = payload.data;
+  if (d && typeof d === 'object' && (d.Info || d.info || d.Message || d.message)) return d;
+  const e = payload.event;
+  if (e && typeof e === 'object' && !Array.isArray(e)
+    && (e.Info || e.info || e.Message || e.message || e.Conversation || e.conversation)) {
+    return e;
+  }
+  return payload;
+}
+
 function ehMensagemPropria(event) {
-  const info = event?.data?.Info || event?.data?.info || event?.Info || {};
+  const root = raizPayloadMensagem(event);
+  const info = root.Info || root.info || {};
   const flags = [
     info.IsFromMe,
     info.isFromMe,
     info.FromMe,
     info.fromMe,
-    event?.data?.fromMe,
+    root.fromMe,
     event?.fromMe,
     event?.isFromMe,
   ];
@@ -171,7 +185,8 @@ function jidsGrupoIguais(a, b) {
 }
 
 export function extrairChatJid(event) {
-  const info = event?.data?.Info || event?.data?.info || event?.Info || {};
+  const root = raizPayloadMensagem(event);
+  const info = root.Info || root.info || {};
   const candidates = [
     info.Chat,
     info.chat,
@@ -179,9 +194,9 @@ export function extrairChatJid(event) {
     info.remoteJid,
     info.MessageSource?.Chat,
     info.MessageSource?.chat,
-    event?.data?.chat,
-    event?.data?.Chat,
-    event?.data?.from,
+    root.chat,
+    root.Chat,
+    root.from,
     event?.from,
   ];
   for (const c of candidates) {
@@ -195,13 +210,14 @@ export function extrairChatJid(event) {
 }
 
 export function extrairTelefone(event) {
-  const info = event?.data?.Info || event?.data?.info || event?.Info || {};
+  const root = raizPayloadMensagem(event);
+  const info = root.Info || root.info || {};
   const candidates = [
     info.Sender,
     info.sender,
     info.Participant,
     info.participant,
-    event?.data?.from,
+    root.from,
     info.Chat,
     event?.from,
     event?.sender,
@@ -217,22 +233,14 @@ export function extrairTelefone(event) {
 }
 
 export function extrairTextoMensagem(event) {
-  const msg = event?.data?.message
-    || event?.data?.Message
-    || event?.message
-    || event?.Message
-    || event?.data;
-
   if (typeof event?.body === 'string' && event.body.trim()) return event.body.trim();
   if (typeof event?.text === 'string' && event.text.trim()) return event.text.trim();
   if (typeof event?.Body === 'string' && event.Body.trim()) return event.Body.trim();
 
-  if (!msg || typeof msg !== 'object') {
-    return null;
-  }
+  const root = raizPayloadMensagem(event);
+  const msg = root.Message || root.message || root;
+  if (!msg || typeof msg !== 'object') return null;
 
-  // Alguns payloads WuzAPI trazem o texto em data.Message.conversation
-  // ou em campos aninhados (extendedText / ephemeral)
   const nested = msg.message || msg.Message || msg;
   const text =
     nested.conversation
@@ -240,11 +248,13 @@ export function extrairTextoMensagem(event) {
     || nested.extendedTextMessage?.text
     || nested.ExtendedTextMessage?.Text
     || nested.extendedTextMessage?.Text
+    || nested.ExtendedTextMessage?.text
     || nested.text
     || nested.Text
     || nested.caption
     || nested.Caption
     || msg.conversation
+    || msg.Conversation
     || msg.text
     || null;
 
@@ -318,10 +328,22 @@ router.post('/whatsapp', async (req, res) => {
     }
 
     const event = req.body || {};
-    const eventName = event.event || event.type || event.Event || '';
+    // WuzAPI envia type:"Message" e event:<objeto>; não usar event.event como nome
+    const eventName = event.type || event.Event
+      || (typeof event.event === 'string' ? event.event : '')
+      || '';
 
-    if (eventName && !/message/i.test(String(eventName)) && !event?.data?.message && !event?.message) {
-      return res.status(200).json({ ok: true, ignored: true });
+    const temMensagem = Boolean(
+      extrairTextoMensagem(event)
+      || event?.data?.message
+      || event?.data?.Message
+      || event?.message
+      || event?.Message
+      || (event?.event && typeof event.event === 'object' && (event.event.Message || event.event.message))
+    );
+
+    if (eventName && !/message/i.test(String(eventName)) && !temMensagem) {
+      return res.status(200).json({ ok: true, ignored: true, tipo: eventName });
     }
 
     if (deveIgnorarMensagemPropria(event)) {
