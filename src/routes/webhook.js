@@ -142,6 +142,34 @@ function ehMensagemPropria(event) {
   return flags.some((v) => v === true || v === 'true' || v === 1 || v === '1');
 }
 
+/** Ignora eco do bot; permite testar placa/comando pelo próprio chip */
+function deveIgnorarMensagemPropria(event) {
+  if (!ehMensagemPropria(event)) return false;
+  const text = String(extrairTextoMensagem(event) || '').trim();
+  if (!text) return true;
+  // Eco das respostas do sistema
+  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada/i.test(text)) {
+    return true;
+  }
+  // Comandos e placa pura → processa mesmo se fromMe
+  const cmd = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd)) return false;
+  const placa = normalizarPlacaTexto(text);
+  if (placa && placa.length >= 5 && placa.length <= 8 && normalizarPlacaTexto(text) === placa) {
+    return false;
+  }
+  return true;
+}
+
+function jidsGrupoIguais(a, b) {
+  const na = normalizarDestino(a);
+  const nb = normalizarDestino(b);
+  if (na?.isGroup && nb?.isGroup && na.logKey === nb.logKey) return true;
+  const da = String(a || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  const db = String(b || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  return Boolean(da && db && da === db);
+}
+
 export function extrairChatJid(event) {
   const info = event?.data?.Info || event?.data?.info || event?.Info || {};
   const candidates = [
@@ -252,9 +280,9 @@ async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
 
   for (const f of filiais) {
     if (f.whatsapp_grupo) {
-      const g = normalizarDestino(f.whatsapp_grupo);
-      if (g && chatNorm && g.logKey === chatNorm.logKey) {
-        return { filial: f, replyTo: g.phone, escopoFilialId: f.id };
+      if (jidsGrupoIguais(f.whatsapp_grupo, chatJid)) {
+        const g = normalizarDestino(f.whatsapp_grupo) || normalizarDestino(chatJid);
+        return { filial: f, replyTo: g?.phone || chatNorm?.phone, escopoFilialId: f.id };
       }
     }
     if (f.whatsapp && phoneNorm) {
@@ -293,12 +321,12 @@ router.post('/whatsapp', async (req, res) => {
       return res.status(200).json({ ok: true, ignored: true });
     }
 
-    if (ehMensagemPropria(event)) {
+    if (deveIgnorarMensagemPropria(event)) {
       return res.status(200).json({ ok: true, ignored: 'from_me' });
     }
 
     const chatJid = extrairChatJid(event);
-    const isGroup = ehMensagemDeGrupo(event);
+    const isGroup = ehMensagemDeGrupo(event) || Boolean(normalizarDestino(chatJid)?.isGroup);
     const phone = extrairTelefone(event);
     const body = extrairTextoMensagem(event);
 
@@ -309,6 +337,7 @@ router.post('/whatsapp', async (req, res) => {
       phone,
       body: body ? String(body).slice(0, 80) : null,
       filial_hint: Number(req.query.filial_id) || null,
+      from_me: ehMensagemPropria(event),
     });
 
     if (!body) {
@@ -321,8 +350,13 @@ router.post('/whatsapp', async (req, res) => {
 
     // Grupo não cadastrado em nenhuma filial → ignora
     if (isGroup && !canal) {
-      console.warn('[webhook] grupo sem filial cadastrada:', chatJid);
-      return res.status(200).json({ ok: true, ignored: 'grupo_nao_cadastrado' });
+      console.warn('[webhook] grupo sem filial cadastrada:', chatJid, 'hint=', filialIdHint);
+      return res.status(200).json({
+        ok: true,
+        ignored: 'grupo_nao_cadastrado',
+        chat: chatJid,
+        dica: 'Salve o grupo no painel WhatsApp e clique em Conectar / QR para reaplicar o webhook.',
+      });
     }
 
     const replyTo = canal?.replyTo || phone;
