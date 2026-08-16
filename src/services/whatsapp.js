@@ -17,7 +17,18 @@ export function normalizarDestino(destino) {
   const raw = String(destino || '').trim();
   if (!raw) return null;
 
-  if (/@g\.us$/i.test(raw) || raw.toLowerCase().includes('@g.us')) {
+  // Já é JID de grupo — preserva o user exatamente (só limpa sufixo/espaço)
+  if (/@g\.us$/i.test(raw)) {
+    const user = raw.replace(/@g\.us$/i, '').trim();
+    if (!user) return null;
+    return {
+      phone: `${user}@g.us`,
+      isGroup: true,
+      logKey: `${user}@g.us`,
+    };
+  }
+
+  if (raw.toLowerCase().includes('@g.us')) {
     const id = raw.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
     if (!id) return null;
     return {
@@ -28,6 +39,7 @@ export function normalizarDestino(destino) {
   }
 
   const onlyId = raw.replace(/[^\d-]/g, '');
+  // Grupo clássico: 120363... (18+ dígitos) ou formato antigo com hífen
   if (/^\d{15,}-?\d*$/.test(onlyId) || (onlyId.includes('-') && onlyId.length >= 15)) {
     return {
       phone: `${onlyId}@g.us`,
@@ -39,6 +51,11 @@ export function normalizarDestino(destino) {
   const phone = limparTelefone(raw);
   if (!phone || phone.length < 10) return null;
   return { phone, isGroup: false, logKey: phone };
+}
+
+function erroEnvioGrupo(errMsg) {
+  const m = String(errMsg || '');
+  return /group members|bad-request|not in group|no group|group info|iq.*400/i.test(m);
 }
 
 /** Placeholder do .env.example não conta como token real */
@@ -194,6 +211,8 @@ export async function enviarERegistrar({
   linkPreview = false,
   filialId = null,
   token = null,
+  /** Se o envio ao grupo falhar, tenta este número (remetente) */
+  fallbackDestinatario = null,
 }) {
   const dest = normalizarDestino(destinatario);
   if (!dest?.phone) {
@@ -210,36 +229,61 @@ export async function enviarERegistrar({
     return { ok: false, erro: 'sem_whatsapp' };
   }
 
-  try {
-    const resp = await enviarMensagemWhatsApp(dest.phone, mensagem, {
-      linkPreview,
-      filialId,
-      token,
-    });
-    const status = resp?.skipped ? 'erro' : 'enviado';
-    await registrarNotificacao({
-      tipo,
-      destinatario: dest.logKey,
-      mensagem,
-      veiculoId,
-      medicaoId,
-      status,
-      respostaApi: resp,
-      filialId,
-    });
-    return { ok: status === 'enviado', resp };
-  } catch (err) {
-    console.error(`[whatsapp] Falha ao enviar para ${dest.logKey}:`, err.message);
-    await registrarNotificacao({
-      tipo,
-      destinatario: dest.logKey,
-      mensagem,
-      veiculoId,
-      medicaoId,
-      status: 'erro',
-      respostaApi: { erro: err.message },
-      filialId,
-    });
-    return { ok: false, erro: err.message };
+  const tentarEnviar = async (alvo) => {
+    const d = normalizarDestino(alvo);
+    if (!d?.phone) return { ok: false, erro: 'destino_invalido', dest: d };
+    try {
+      const resp = await enviarMensagemWhatsApp(d.phone, mensagem, {
+        linkPreview,
+        filialId,
+        token,
+      });
+      const status = resp?.skipped ? 'erro' : 'enviado';
+      await registrarNotificacao({
+        tipo,
+        destinatario: d.logKey,
+        mensagem,
+        veiculoId,
+        medicaoId,
+        status,
+        respostaApi: resp,
+        filialId,
+      });
+      return { ok: status === 'enviado', resp, dest: d, erro: resp?.skipped ? (resp.reason || 'skipped') : null };
+    } catch (err) {
+      console.error(`[whatsapp] Falha ao enviar para ${d.logKey}:`, err.message);
+      await registrarNotificacao({
+        tipo,
+        destinatario: d.logKey,
+        mensagem,
+        veiculoId,
+        medicaoId,
+        status: 'erro',
+        respostaApi: { erro: err.message },
+        filialId,
+      });
+      return { ok: false, erro: err.message, dest: d };
+    }
+  };
+
+  let result = await tentarEnviar(dest.phone);
+
+  // Grupo rejeitado pelo WhatsApp → envia o link no privado do remetente
+  if (!result.ok && dest.isGroup && fallbackDestinatario && erroEnvioGrupo(result.erro)) {
+    const fb = normalizarDestino(fallbackDestinatario);
+    if (fb?.phone && !fb.isGroup && fb.logKey !== dest.logKey) {
+      console.warn('[whatsapp] Grupo falhou — tentando privado:', fb.logKey, result.erro);
+      const msgPrivado = `${mensagem}\n\n_Obs: não consegui responder no grupo; enviei no privado._`;
+      result = await tentarEnviar(fb.phone);
+      if (result.ok) {
+        return { ...result, via: 'privado_fallback', grupo_erro: true };
+      }
+    }
   }
+
+  if (!result.ok && erroEnvioGrupo(result.erro)) {
+    result.erro = 'Não foi possível enviar no grupo (chip precisa estar no grupo e o grupo precisa estar atualizado na lista). Tente: Atualizar lista → selecionar o grupo de novo → Conectar / QR.';
+  }
+
+  return result;
 }

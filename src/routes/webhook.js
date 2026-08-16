@@ -281,8 +281,11 @@ async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
   for (const f of filiais) {
     if (f.whatsapp_grupo) {
       if (jidsGrupoIguais(f.whatsapp_grupo, chatJid)) {
-        const g = normalizarDestino(f.whatsapp_grupo) || normalizarDestino(chatJid);
-        return { filial: f, replyTo: g?.phone || chatNorm?.phone, escopoFilialId: f.id };
+        // Sempre responde no chat da mensagem (JID atual), não no valor antigo salvo
+        const replyTo = chatNorm?.phone
+          || normalizarDestino(chatJid)?.phone
+          || normalizarDestino(f.whatsapp_grupo)?.phone;
+        return { filial: f, replyTo, escopoFilialId: f.id };
       }
     }
     if (f.whatsapp && phoneNorm) {
@@ -363,16 +366,19 @@ router.post('/whatsapp', async (req, res) => {
     if (!replyTo) {
       return res.status(200).json({ ok: true });
     }
+    // Em grupo, prioriza o JID do chat da mensagem (mais atual que o valor salvo)
+    const destinoEnvio = (isGroup && chatJid) ? chatJid : replyTo;
 
     // Rate limit por remetente (não pelo grupo — evita bloquear a frota inteira)
-    const rateKey = phone || replyTo;
+    const rateKey = phone || destinoEnvio;
     if (!rateLimitOk(rateKey)) {
       console.warn(`[webhook] Rate limit: ${rateKey}`);
       await enviarERegistrar({
         tipo: 'link_veiculo',
-        destinatario: replyTo,
+        destinatario: destinoEnvio,
         mensagem: '⏳ Muitas consultas em pouco tempo. Aguarde 1 minuto e envie a placa novamente.',
         filialId: canal?.escopoFilialId || null,
+        fallbackDestinatario: phone,
       });
       return res.status(200).json({ ok: true, rate_limited: true });
     }
@@ -385,9 +391,10 @@ router.post('/whatsapp', async (req, res) => {
       const mensagem = `${await listarFrotaMensagem(db, null)}\n\n_Comandos: frota | placa do caminhão_`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
-        destinatario: replyTo,
+        destinatario: destinoEnvio,
         mensagem,
         filialId: canal?.escopoFilialId || null,
+        fallbackDestinatario: phone,
       });
       return res.status(200).json({ ok: true, comando: 'frota' });
     }
@@ -409,9 +416,10 @@ router.post('/whatsapp', async (req, res) => {
       const mensagem = `❌ Placa *${texto}* não encontrada.\n\n${lista}`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
-        destinatario: replyTo,
+        destinatario: destinoEnvio,
         mensagem,
         filialId: canal?.escopoFilialId || null,
+        fallbackDestinatario: phone,
       });
       return res.status(200).json({ ok: true, encontrados: 0 });
     }
@@ -421,9 +429,10 @@ router.post('/whatsapp', async (req, res) => {
       const mensagem = `🔍 Encontrei ${veiculos.length} veículos:\n${lista}\n\nEnvie a placa exata para abrir a medição.`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
-        destinatario: replyTo,
+        destinatario: destinoEnvio,
         mensagem,
         filialId: canal?.escopoFilialId || null,
+        fallbackDestinatario: phone,
       });
       return res.status(200).json({ ok: true, encontrados: veiculos.length });
     }
@@ -435,7 +444,7 @@ router.post('/whatsapp', async (req, res) => {
     const { link } = await gerarTokenAcessoRapido({
       veiculoId: veiculo.id,
       filialId: veiculo.filial_id,
-      whatsappOrigem: phone || replyTo,
+      whatsappOrigem: phone || destinoEnvio,
     });
     const tToken = performance.now();
 
@@ -478,11 +487,12 @@ router.post('/whatsapp', async (req, res) => {
     const tAntesEnvio = performance.now();
     enviarERegistrar({
       tipo: 'link_veiculo',
-      destinatario: replyTo,
+      destinatario: destinoEnvio,
       mensagem,
       veiculoId: veiculo.id,
       linkPreview: false,
       filialId: veiculo.filial_id,
+      fallbackDestinatario: phone,
     }).then((envio) => {
       console.log('[webhook] timing_ms', {
         placa: veiculo.placa,
@@ -492,6 +502,7 @@ router.post('/whatsapp', async (req, res) => {
         envio: Math.round(performance.now() - tAntesEnvio),
         total: Math.round(performance.now() - t0),
         enviado: Boolean(envio?.ok),
+        via: envio?.via || 'grupo',
         erro: envio?.erro || null,
       });
     }).catch((err) => {
