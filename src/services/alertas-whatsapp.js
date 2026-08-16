@@ -33,12 +33,16 @@ export async function listarDestinatariosAlerta(filialId) {
   `).get(filialId);
 
   if (filial) {
-    // Número dedicado para alertas (prioridade)
-    if (filial.whatsapp_alerta) {
+    // Destinos marcados no checklist (números e/ou grupos), separados por vírgula
+    const destinosAlerta = String(filial.whatsapp_alerta || '')
+      .split(/[,;\n]+/)
+      .map((s) => String(s || '').trim())
+      .filter(Boolean);
+    for (const dest of destinosAlerta) {
       adicionarDestino(phones, {
         id: filial.id,
         nome: `${filial.nome} (alerta)`,
-        whatsapp: filial.whatsapp_alerta,
+        whatsapp: dest,
         origem: 'filial_alerta',
       });
     }

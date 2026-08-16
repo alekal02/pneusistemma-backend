@@ -138,15 +138,26 @@ async function wuzapiFetch(path, { method = 'GET', body, token } = {}) {
   return data;
 }
 
+/** Extrai número do JID WhatsApp (ignora device :xx) */
+export function telefoneFromJid(jid) {
+  const user = String(jid || '').split('@')[0] || '';
+  const base = user.split(':')[0] || '';
+  const digits = base.replace(/\D/g, '');
+  return digits.length >= 10 ? digits : '';
+}
+
 function normalizarStatus(payload, extra = {}) {
   const d = payload?.data || payload || {};
+  const jid = d.jid || d.JID || null;
+  const phone = telefoneFromJid(jid) || telefoneFromJid(d.phone || d.Phone) || null;
   return {
     configurado: true,
     wuzapi_url: config.wuzapiBaseUrl,
     connected: Boolean(d.connected ?? d.Connected),
     loggedIn: Boolean(d.loggedIn ?? d.LoggedIn),
     name: d.name || d.Name || null,
-    jid: d.jid || d.JID || null,
+    jid,
+    phone,
     webhook: d.webhook || d.Webhook || null,
     events: d.events || d.Events || null,
     qrcode: d.qrcode || d.QRCode || null,
@@ -248,6 +259,22 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
     const f = await filialOuErro(id);
     const db = getDb();
     const podeToken = isAdmin(req.user) || req.user.papel === 'gerente';
+
+    let alertaSalvo = f.whatsapp_alerta;
+    if (whatsapp_alerta !== undefined) {
+      const lista = Array.isArray(whatsapp_alerta)
+        ? whatsapp_alerta
+        : String(whatsapp_alerta || '').split(/[,;\n]+/);
+      const limpos = [...new Set(
+        lista
+          .map((v) => limparCampoTexto(v))
+          .filter(Boolean)
+          .map((v) => (/@g\.us/i.test(v) ? v : v.replace(/\D/g, '')))
+          .filter((v) => v && (v.includes('@') || v.length >= 10))
+      )];
+      alertaSalvo = limpos.length ? limpos.join(',') : null;
+    }
+
     await db.prepare(`
       UPDATE filiais SET
         whatsapp = ?,
@@ -261,9 +288,7 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
         ? (limparCampoTexto(whatsapp)?.replace(/\D/g, '') || null)
         : f.whatsapp,
       whatsapp_grupo !== undefined ? limparCampoTexto(whatsapp_grupo) : f.whatsapp_grupo,
-      whatsapp_alerta !== undefined
-        ? (limparCampoTexto(whatsapp_alerta)?.replace(/\D/g, '') || null)
-        : f.whatsapp_alerta,
+      alertaSalvo,
       (podeToken && wuzapi_token !== undefined)
         ? limparCampoTexto(wuzapi_token)
         : f.wuzapi_token,
@@ -456,6 +481,97 @@ router.get('/filial/:id/grupos', requireChatbotAcesso, async (req, res) => {
     res.status(err.status || 500).json({
       erro: err.message,
       grupos: [],
+    });
+  }
+});
+
+/**
+ * Opções para checklist de alertas: grupos WhatsApp + usuários com WhatsApp.
+ */
+router.get('/filial/:id/alerta-opcoes', requireChatbotAcesso, async (req, res) => {
+  try {
+    if (!assertFilialNoEscopo(req, req.params.id)) {
+      return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+    }
+    const f = await filialOuErro(req.params.id);
+    const db = getDb();
+    const selecionados = String(f.whatsapp_alerta || '')
+      .split(/[,;\n]+/)
+      .map((s) => limparCampoTexto(s))
+      .filter(Boolean);
+
+    const opcoes = [];
+
+    // Usuários do sistema com WhatsApp (unidade + gerentes/compras)
+    const usuarios = await db.prepare(`
+      SELECT id, login, papel, cargo, whatsapp
+      FROM usuarios
+      WHERE ativo = 1
+        AND whatsapp IS NOT NULL AND TRIM(whatsapp) != ''
+        AND (
+          filial_id = ?
+          OR papel = 'admin'
+          OR cargo IN ('gerente_compras', 'gerente_filial')
+          OR (papel = 'gerente' AND (filial_id IS NULL OR filial_id = ?))
+        )
+      ORDER BY LOWER(login)
+      LIMIT 80
+    `).all(f.id, f.id);
+
+    for (const u of usuarios) {
+      const phone = String(u.whatsapp || '').replace(/\D/g, '');
+      if (phone.length < 10) continue;
+      const cargo = u.cargo || u.papel || 'usuario';
+      opcoes.push({
+        id: `user:${u.id}`,
+        valor: phone,
+        nome: u.login,
+        tipo: 'usuario',
+        detalhe: cargo,
+      });
+    }
+
+    // Grupos do chip (mesma fonte do passo 2)
+    try {
+      const token = await tokenWuzapiFilial(f.id);
+      if (token) {
+        const data = await wuzapiFetch('/group/list', { token });
+        const raw = data?.data?.Groups || data?.data?.groups || data?.Groups || data?.groups || [];
+        for (const g of (Array.isArray(raw) ? raw : [])) {
+          const jid = limparCampoTexto(g.JID || g.jid || g.Id || g.id);
+          if (!jid) continue;
+          opcoes.push({
+            id: `grupo:${jid}`,
+            valor: jid,
+            nome: limparCampoTexto(g.Name || g.name || g.Subject || g.subject) || jid,
+            tipo: 'grupo',
+            detalhe: 'grupo WhatsApp',
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[whatsapp] alerta-opcoes grupos:', err.message);
+    }
+
+    // Mantém selecionados que não estão mais na lista
+    for (const sel of selecionados) {
+      if (!opcoes.some((o) => o.valor === sel)) {
+        opcoes.push({
+          id: `salvo:${sel}`,
+          valor: sel,
+          nome: sel.includes('@g.us') ? 'Grupo salvo' : 'Número salvo',
+          tipo: sel.includes('@g.us') ? 'grupo' : 'numero',
+          detalhe: 'cadastrado',
+        });
+      }
+    }
+
+    res.json({ opcoes, selecionados });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      erro: err.message,
+      opcoes: [],
+      selecionados: [],
     });
   }
 });
