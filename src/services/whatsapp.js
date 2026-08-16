@@ -164,6 +164,158 @@ export async function enviarMensagemWhatsAppComLink(phone, text, opts = {}) {
   return enviarMensagemWhatsApp(phone, text, { ...opts, linkPreview: true });
 }
 
+/**
+ * Envia documento (PDF etc.) via WuzAPI POST /chat/send/document
+ * @param {string} phoneOrGroup
+ * @param {Buffer|Uint8Array} buffer
+ * @param {string} fileName
+ * @param {{ token?: string, filialId?: number, mime?: string }} [opts]
+ */
+export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, opts = {}) {
+  const dest = normalizarDestino(phoneOrGroup);
+  if (!dest?.phone) throw new Error('Destino WhatsApp inválido');
+  if (!buffer?.length) throw new Error('Documento vazio');
+  const nome = String(fileName || 'documento.pdf').replace(/[^\w.\-]+/g, '_');
+  const mime = opts.mime || 'application/pdf';
+
+  const tokens = [];
+  const primary = tokenWuzapiUtil(opts.token) || (await tokenWuzapiFilial(opts.filialId));
+  if (primary) tokens.push(primary);
+  const fallback = tokenWuzapiUtil(config.wuzapiToken);
+  if (fallback && !tokens.includes(fallback)) tokens.push(fallback);
+
+  if (!tokens.length || !config.wuzapiBaseUrl) {
+    console.warn('[whatsapp] WuzAPI não configurado — documento não enviado:', dest.logKey);
+    return {
+      skipped: true,
+      reason: 'wuzapi_nao_configurado',
+      Phone: dest.phone,
+      FileName: nome,
+    };
+  }
+
+  const b64 = Buffer.from(buffer).toString('base64');
+  const payload = {
+    Phone: dest.phone,
+    FileName: nome,
+    Document: `data:${mime};base64,${b64}`,
+  };
+
+  let lastErr = null;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    const res = await fetch(`${config.wuzapiBaseUrl}/chat/send/document`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        token,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    const raw = await res.text();
+    let data;
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = { raw };
+    }
+
+    if (res.ok) return data;
+
+    const msg = data?.error || data?.erro || JSON.stringify(data);
+    lastErr = new Error(`WuzAPI erro ${res.status}: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
+    if (/no session/i.test(String(msg)) && i < tokens.length - 1) {
+      console.warn('[whatsapp] Token sem sessão (documento) — tentando fallback .env');
+      continue;
+    }
+    throw lastErr;
+  }
+
+  throw lastErr || new Error('Falha ao enviar documento WhatsApp');
+}
+
+/**
+ * Envia PDF e registra em notificacoes_whatsapp (com fallback privado se o grupo falhar)
+ */
+export async function enviarDocumentoERegistrar({
+  tipo,
+  destinatario,
+  buffer,
+  fileName,
+  mensagem = '',
+  veiculoId = null,
+  filialId = null,
+  token = null,
+  fallbackDestinatario = null,
+}) {
+  const dest = normalizarDestino(destinatario);
+  const preview = mensagem || `📎 ${fileName || 'documento.pdf'}`;
+
+  if (!dest?.phone) {
+    await registrarNotificacao({
+      tipo,
+      destinatario: destinatario || '',
+      mensagem: preview,
+      veiculoId,
+      status: 'erro',
+      respostaApi: { erro: 'WhatsApp não cadastrado' },
+      filialId,
+    });
+    return { ok: false, erro: 'sem_whatsapp' };
+  }
+
+  const tentar = async (alvo) => {
+    const d = normalizarDestino(alvo);
+    if (!d?.phone) return { ok: false, erro: 'destino_invalido', dest: d };
+    try {
+      const resp = await enviarDocumentoWhatsApp(d.phone, buffer, fileName, {
+        filialId,
+        token,
+      });
+      const status = resp?.skipped ? 'erro' : 'enviado';
+      await registrarNotificacao({
+        tipo,
+        destinatario: d.logKey,
+        mensagem: preview,
+        veiculoId,
+        status,
+        respostaApi: resp,
+        filialId,
+      });
+      return { ok: status === 'enviado', resp, dest: d, erro: resp?.skipped ? (resp.reason || 'skipped') : null };
+    } catch (err) {
+      console.error(`[whatsapp] Falha documento para ${d.logKey}:`, err.message);
+      await registrarNotificacao({
+        tipo,
+        destinatario: d.logKey,
+        mensagem: preview,
+        veiculoId,
+        status: 'erro',
+        respostaApi: { erro: err.message },
+        filialId,
+      });
+      return { ok: false, erro: err.message, dest: d };
+    }
+  };
+
+  let result = await tentar(dest.phone);
+
+  if (!result.ok && dest.isGroup && fallbackDestinatario && erroEnvioGrupo(result.erro)) {
+    const fb = normalizarDestino(fallbackDestinatario);
+    if (fb?.phone && !fb.isGroup && fb.logKey !== dest.logKey) {
+      console.warn('[whatsapp] Documento no grupo falhou — tentando privado:', fb.logKey);
+      result = await tentar(fb.phone);
+      if (result.ok) {
+        return { ...result, via: 'privado_fallback', grupo_erro: true };
+      }
+    }
+  }
+
+  return result;
+}
+
 export async function registrarNotificacao({
   tipo,
   destinatario,

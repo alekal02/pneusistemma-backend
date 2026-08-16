@@ -6,11 +6,12 @@ import { Router } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { getDb } from '../database.js';
 import { config } from '../config.js';
-import { enviarERegistrar, limparTelefone, normalizarDestino } from '../services/whatsapp.js';
+import { enviarERegistrar, enviarDocumentoERegistrar, limparTelefone, normalizarDestino } from '../services/whatsapp.js';
 import {
   gerarTokenAcessoRapido,
   resumoStatusPneusVeiculoRapido,
 } from '../services/acesso-rapido.js';
+import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
 
 const router = Router();
 
@@ -162,12 +163,13 @@ function deveIgnorarMensagemPropria(event) {
   const text = String(extrairTextoMensagem(event) || '').trim();
   if (!text) return true;
   // Eco das respostas do sistema
-  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada/i.test(text)) {
+  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada|relat[oó]rio gerencial|Gerando o \*relat/i.test(text)) {
     return true;
   }
   // Comandos e placa pura → processa mesmo se fromMe
   const cmd = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
   if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd)) return false;
+  if (/^(relatorio|report|pdf)\b/i.test(cmd)) return false;
   const placa = normalizarPlacaTexto(text);
   if (placa && placa.length >= 5 && placa.length <= 8 && normalizarPlacaTexto(text) === placa) {
     return false;
@@ -410,7 +412,7 @@ router.post('/whatsapp', async (req, res) => {
 
     // Comandos de frota / ajuda
     if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd) || /^(frota|placas)\b/i.test(cmd)) {
-      const mensagem = `${await listarFrotaMensagem(db, null)}\n\n_Comandos: frota | placa do caminhão_`;
+      const mensagem = `${await listarFrotaMensagem(db, canal?.escopoFilialId || null)}\n\n_Comandos: frota | relatorio | placa do caminhão_`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
         destinatario: destinoEnvio,
@@ -419,6 +421,93 @@ router.post('/whatsapp', async (req, res) => {
         fallbackDestinatario: phone,
       });
       return res.status(200).json({ ok: true, comando: 'frota' });
+    }
+
+    // Relatório gerencial PDF (mesmo da unidade)
+    if (/^(relatorio|report|pdf)\b/i.test(cmd)) {
+      const filialId = canal?.escopoFilialId || null;
+      if (!filialId) {
+        await enviarERegistrar({
+          tipo: 'relatorio_semanal',
+          destinatario: destinoEnvio,
+          mensagem: '❌ Não identifiquei a unidade deste chat. Configure o grupo no painel WhatsApp e tente de novo.',
+          filialId: null,
+          fallbackDestinatario: phone,
+        });
+        return res.status(200).json({ ok: true, comando: 'relatorio', erro: 'sem_filial' });
+      }
+
+      res.status(200).json({ ok: true, comando: 'relatorio', aceito: true, filial_id: filialId });
+
+      (async () => {
+        try {
+          await enviarERegistrar({
+            tipo: 'relatorio_semanal',
+            destinatario: destinoEnvio,
+            mensagem: '📊 Gerando o *relatório gerencial* da unidade… aguarde alguns segundos.',
+            filialId,
+            fallbackDestinatario: phone,
+          });
+
+          const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(filialId, {
+            geradoPor: `WhatsApp · ${phone || destinoEnvio}`,
+          });
+
+          const caption = [
+            `📊 *Relatório gerencial* — ${dados.filial?.nome || 'Unidade'}`,
+            dados.filial?.codigo ? `Código: ${dados.filial.codigo}` : null,
+            `_Arquivo: ${filename}_`,
+          ].filter(Boolean).join('\n');
+
+          await enviarERegistrar({
+            tipo: 'relatorio_semanal',
+            destinatario: destinoEnvio,
+            mensagem: caption,
+            filialId,
+            fallbackDestinatario: phone,
+          });
+
+          const envio = await enviarDocumentoERegistrar({
+            tipo: 'relatorio_semanal',
+            destinatario: destinoEnvio,
+            buffer,
+            fileName: filename,
+            mensagem: caption,
+            filialId,
+            fallbackDestinatario: phone,
+          });
+
+          if (!envio?.ok) {
+            await enviarERegistrar({
+              tipo: 'relatorio_semanal',
+              destinatario: destinoEnvio,
+              mensagem: `❌ Não consegui enviar o PDF. ${envio?.erro || 'Tente de novo em instantes.'}`,
+              filialId,
+              fallbackDestinatario: phone,
+            });
+          } else {
+            console.log('[webhook] relatorio enviado', {
+              filial_id: filialId,
+              arquivo: filename,
+              via: envio.via || 'grupo',
+              bytes: buffer.length,
+            });
+          }
+        } catch (err) {
+          console.error('[webhook] relatorio falhou:', err.message);
+          try {
+            await enviarERegistrar({
+              tipo: 'relatorio_semanal',
+              destinatario: destinoEnvio,
+              mensagem: `❌ Falha ao gerar o relatório: ${err.message}`,
+              filialId,
+              fallbackDestinatario: phone,
+            });
+          } catch { /* ignore */ }
+        }
+      })();
+
+      return;
     }
 
     const placaLimpa = normalizarPlacaTexto(texto);
