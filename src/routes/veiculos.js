@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getDb, classificarSulco } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { TIPOS_VEICULO } from '../config.js';
-import { requireAuth, requireFilial, filialScopeId, assertVeiculoDaFilial } from '../auth.js';
+import { requireAuth, requireFilial, requireGerenteOuAdmin, filialScopeId, filiaisEscopoIds, assertVeiculoDaFilial } from '../auth.js';
 import {
   POSICOES_PNEU,
   LAYOUTS_PNEU,
@@ -196,6 +196,54 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
 });
 
 router.use(requireAuth);
+
+/** Layout do veículo — só gerente/admin (operador não altera estrutura) */
+router.put('/:id/layout', requireGerenteOuAdmin, async (req, res, next) => {
+  const { layout_pneus, posicoes_custom } = req.body;
+  const db = getDb();
+
+  let veiculo;
+  try {
+    veiculo = await db.prepare(`
+      SELECT id, filial_id FROM veiculos WHERE id = ? AND ativo = 1
+    `).get(req.params.id);
+  } catch (err) {
+    return next(err);
+  }
+  if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
+
+  const escopo = filiaisEscopoIds(req);
+  if (escopo !== null && !escopo.includes(Number(veiculo.filial_id))) {
+    return res.status(403).json({ erro: 'Veículo fora do seu escopo' });
+  }
+
+  if (!layout_pneus && (!posicoes_custom || !posicoes_custom.length)) {
+    return res.status(400).json({ erro: 'Informe um layout ou lista de posições' });
+  }
+
+  try {
+    const posicoes = await aplicarLayoutPneus(
+      db,
+      req.params.id,
+      layout_pneus || 'personalizado',
+      posicoes_custom
+    );
+
+    res.json({
+      layout_pneus: layout_pneus || 'personalizado',
+      total_posicoes: posicoes.length,
+      posicoes: posicoes.map((p) => ({
+        codigo: p,
+        label: labelPosicao(p),
+        papel: papelPosicao(p),
+      })),
+      mensagem: `Configuração atualizada — ${posicoes.length} posições (monte pneus do estoque)`,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.use(requireFilial);
 
 router.get('/meta', (_req, res) => {
@@ -445,48 +493,6 @@ router.post('/', async (req, res, next) => {
       return res.status(409).json({ erro: 'Placa já cadastrada' });
     }
     next(err);
-  }
-});
-
-router.put('/:id/layout', async (req, res, next) => {
-  const { layout_pneus, posicoes_custom } = req.body;
-  const db = getDb();
-  const filialId = filialScopeId(req);
-
-  let veiculo;
-  try {
-    veiculo = await db.prepare(`
-      SELECT id FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
-    `).get(req.params.id, filialId);
-  } catch (err) {
-    return next(err);
-  }
-  if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
-
-  if (!layout_pneus && (!posicoes_custom || !posicoes_custom.length)) {
-    return res.status(400).json({ erro: 'Informe um layout ou lista de posições' });
-  }
-
-  try {
-    const posicoes = await aplicarLayoutPneus(
-      db,
-      req.params.id,
-      layout_pneus || 'personalizado',
-      posicoes_custom
-    );
-
-    res.json({
-      layout_pneus: layout_pneus || 'personalizado',
-      total_posicoes: posicoes.length,
-      posicoes: posicoes.map((p) => ({
-        codigo: p,
-        label: labelPosicao(p),
-        papel: papelPosicao(p),
-      })),
-      mensagem: `Configuração atualizada — ${posicoes.length} posições (monte pneus do estoque)`,
-    });
-  } catch (err) {
-    res.status(400).json({ erro: err.message });
   }
 });
 
