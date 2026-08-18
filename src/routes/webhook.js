@@ -34,9 +34,21 @@ function normalizarPlacaTexto(texto) {
   return String(texto || '')
     .normalize('NFKC')
     .toUpperCase()
-    // remove zero-width / invisíveis comuns do WhatsApp
     .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
     .replace(/[^A-Z0-9]/g, '');
+}
+
+/** Placa brasileira antiga (ABC1234) ou Mercosul (ABC1D23). Ignora conversa comum. */
+function extrairPlacaValida(texto) {
+  const compact = normalizarPlacaTexto(texto);
+  if (/^[A-Z]{3}[0-9][A-Z][0-9]{2}$/.test(compact)) return compact;
+  if (/^[A-Z]{3}[0-9]{4}$/.test(compact)) return compact;
+  const raw = String(texto || '').toUpperCase();
+  const mercosul = raw.match(/\b[A-Z]{3}\s*-?\s*[0-9][A-Z][0-9]{2}\b/);
+  if (mercosul) return normalizarPlacaTexto(mercosul[0]);
+  const antiga = raw.match(/\b[A-Z]{3}\s*-?\s*[0-9]{4}\b/);
+  if (antiga) return normalizarPlacaTexto(antiga[0]);
+  return null;
 }
 
 async function listarFrotaMensagem(db, filialId = null) {
@@ -81,16 +93,14 @@ async function buscarVeiculosPorPlaca(db, placaLimpa, filialPreferida = null) {
 
   const like = `%${placaLimpa}%`;
 
-  // 1) Prioriza frota da unidade do grupo
   if (filialPreferida) {
     const locais = await db.prepare(`${baseSql} AND v.filial_id = ? ORDER BY v.placa LIMIT 20`)
       .all(like, like, filialPreferida);
-    if (locais.length) return { veiculos: locais, escopo: 'filial' };
+    return { veiculos: locais, escopo: 'filial' };
   }
 
-  // 2) Fallback: frota inteira (todas as filiais)
   const todos = await db.prepare(`${baseSql} ORDER BY v.placa LIMIT 20`).all(like, like);
-  return { veiculos: todos, escopo: filialPreferida ? 'todas' : 'todas' };
+  return { veiculos: todos, escopo: 'todas' };
 }
 
 function escolherVeiculoExato(veiculos, placaLimpa) {
@@ -170,10 +180,8 @@ function deveIgnorarMensagemPropria(event) {
   const cmd = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
   if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd)) return false;
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) return false;
-  const placa = normalizarPlacaTexto(text);
-  if (placa && placa.length >= 5 && placa.length <= 8 && normalizarPlacaTexto(text) === placa) {
-    return false;
-  }
+  const placa = extrairPlacaValida(text);
+  if (placa) return false;
   return true;
 }
 
@@ -300,7 +308,7 @@ async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
         return { filial: f, replyTo, escopoFilialId: f.id };
       }
     }
-    if (f.whatsapp && phoneNorm) {
+    if (f.whatsapp && phoneNorm && !String(chatJid || '').includes('@g.us')) {
       const n = limparTelefone(f.whatsapp);
       // Remetente usa o chip do chatbot da filial, ou chat privado com o bot
       if (n && n === phoneNorm) {
@@ -309,12 +317,10 @@ async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
     }
   }
 
-  // Webhook veio com ?filial_id= — escopo forçado mesmo sem match de grupo
-  if (filialIdHint && filiais[0]) {
+  // Hint ?filial_id= só vale no privado do chip — grupo precisa estar selecionado
+  if (filialIdHint && filiais[0] && !String(chatJid || '').includes('@g.us')) {
     const f = filiais[0];
-    const replyTo = chatNorm?.isGroup
-      ? chatNorm.phone
-      : (phoneNorm || limparTelefone(f.whatsapp) || chatNorm?.phone);
+    const replyTo = phoneNorm || limparTelefone(f.whatsapp) || chatNorm?.phone;
     if (replyTo) {
       return { filial: f, replyTo, escopoFilialId: f.id };
     }
@@ -357,16 +363,6 @@ router.post('/whatsapp', async (req, res) => {
     const phone = extrairTelefone(event);
     const body = extrairTextoMensagem(event);
 
-    console.log('[webhook] msg', {
-      event: eventName || '(sem nome)',
-      chat: chatJid,
-      isGroup,
-      phone,
-      body: body ? String(body).slice(0, 80) : null,
-      filial_hint: Number(req.query.filial_id) || null,
-      from_me: ehMensagemPropria(event),
-    });
-
     if (!body) {
       return res.status(200).json({ ok: true, ignored: 'sem_texto' });
     }
@@ -375,14 +371,12 @@ router.post('/whatsapp', async (req, res) => {
     const filialIdHint = Number(req.query.filial_id) || null;
     const canal = await resolverCanalFilial(db, chatJid, phone, filialIdHint);
 
-    // Grupo não cadastrado em nenhuma filial → ignora
+    // Grupo não é o selecionado na unidade → ignora (sem resposta e sem log)
     if (isGroup && !canal) {
-      console.warn('[webhook] grupo sem filial cadastrada:', chatJid, 'hint=', filialIdHint);
       return res.status(200).json({
         ok: true,
-        ignored: 'grupo_nao_cadastrado',
+        ignored: 'grupo_nao_selecionado',
         chat: chatJid,
-        dica: 'Salve o grupo no painel WhatsApp e clique em Conectar / QR para reaplicar o webhook.',
       });
     }
 
@@ -396,14 +390,6 @@ router.post('/whatsapp', async (req, res) => {
     // Rate limit por remetente (não pelo grupo — evita bloquear a frota inteira)
     const rateKey = phone || destinoEnvio;
     if (!rateLimitOk(rateKey)) {
-      console.warn(`[webhook] Rate limit: ${rateKey}`);
-      await enviarERegistrar({
-        tipo: 'link_veiculo',
-        destinatario: destinoEnvio,
-        mensagem: '⏳ Muitas consultas em pouco tempo. Aguarde 1 minuto e envie a placa novamente.',
-        filialId: canal?.escopoFilialId || null,
-        fallbackDestinatario: phone,
-      });
       return res.status(200).json({ ok: true, rate_limited: true });
     }
 
@@ -419,6 +405,7 @@ router.post('/whatsapp', async (req, res) => {
         mensagem,
         filialId: canal?.escopoFilialId || null,
         fallbackDestinatario: phone,
+        registrar: false,
       });
       return res.status(200).json({ ok: true, comando: 'frota' });
     }
@@ -433,6 +420,7 @@ router.post('/whatsapp', async (req, res) => {
           mensagem: '❌ Não identifiquei a unidade deste chat. Configure o grupo no painel WhatsApp e tente de novo.',
           filialId: null,
           fallbackDestinatario: phone,
+          registrar: false,
         });
         return res.status(200).json({ ok: true, comando: 'relatorio', erro: 'sem_filial' });
       }
@@ -447,6 +435,7 @@ router.post('/whatsapp', async (req, res) => {
             mensagem: '📊 Gerando o *relatório gerencial* da unidade… aguarde alguns segundos.',
             filialId,
             fallbackDestinatario: phone,
+            registrar: false,
           });
 
           const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(filialId, {
@@ -465,6 +454,7 @@ router.post('/whatsapp', async (req, res) => {
             mensagem: caption,
             filialId,
             fallbackDestinatario: phone,
+            registrar: false,
           });
 
           const envio = await enviarDocumentoERegistrar({
@@ -510,9 +500,9 @@ router.post('/whatsapp', async (req, res) => {
       return;
     }
 
-    const placaLimpa = normalizarPlacaTexto(texto);
-    if (!placaLimpa || placaLimpa.length < 3) {
-      return res.status(200).json({ ok: true, ignored: 'texto_curto' });
+    const placaLimpa = extrairPlacaValida(texto);
+    if (!placaLimpa) {
+      return res.status(200).json({ ok: true, ignored: 'nao_e_placa' });
     }
 
     const { veiculos: encontrados } = await buscarVeiculosPorPlaca(
@@ -523,44 +513,39 @@ router.post('/whatsapp', async (req, res) => {
     const veiculos = escolherVeiculoExato(encontrados, placaLimpa);
 
     if (veiculos.length === 0) {
-      const lista = await listarFrotaMensagem(db, null);
-      const mensagem = `❌ Placa *${texto}* não encontrada.\n\n${lista}`;
       await enviarERegistrar({
         tipo: 'link_veiculo',
         destinatario: destinoEnvio,
-        mensagem,
+        mensagem: `❌ Placa *${placaLimpa}* não encontrada nesta unidade. Envie *frota* para ver as placas.`,
         filialId: canal?.escopoFilialId || null,
         fallbackDestinatario: phone,
+        registrar: false,
       });
       return res.status(200).json({ ok: true, encontrados: 0 });
     }
 
     if (veiculos.length > 1) {
-      const lista = veiculos.map((v) => `• ${v.placa}${v.apelido ? ` — ${v.apelido}` : ''} (${v.tipo}) - ${v.filial_nome}`).join('\n');
-      const mensagem = `🔍 Encontrei ${veiculos.length} veículos:\n${lista}\n\nEnvie a placa exata para abrir a medição.`;
+      const lista = veiculos.map((v) => `• ${v.placa}${v.apelido ? ` — ${v.apelido}` : ''} (${v.tipo})`).join('\n');
       await enviarERegistrar({
         tipo: 'link_veiculo',
         destinatario: destinoEnvio,
-        mensagem,
+        mensagem: `🔍 Encontrei ${veiculos.length} veículos:\n${lista}\n\nEnvie a placa exata para abrir a medição.`,
         filialId: canal?.escopoFilialId || null,
         fallbackDestinatario: phone,
+        registrar: false,
       });
       return res.status(200).json({ ok: true, encontrados: veiculos.length });
     }
 
     const veiculo = veiculos[0];
-    const t0 = performance.now();
-    console.log('[webhook] veiculo encontrado', { id: veiculo.id, placa: veiculo.placa, filial_id: veiculo.filial_id });
 
     const { link } = await gerarTokenAcessoRapido({
       veiculoId: veiculo.id,
       filialId: veiculo.filial_id,
       whatsappOrigem: phone || destinoEnvio,
     });
-    const tToken = performance.now();
 
     const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
-    const tResumo = performance.now();
 
     let mensagem = `🚛 *${veiculo.placa}* — ${veiculo.tipo}\n`;
     if (veiculo.apelido) mensagem += `🏷️ ${veiculo.apelido}\n`;
@@ -595,7 +580,6 @@ router.post('/whatsapp', async (req, res) => {
       aceito: true,
     });
 
-    const tAntesEnvio = performance.now();
     enviarERegistrar({
       tipo: 'link_veiculo',
       destinatario: destinoEnvio,
@@ -605,17 +589,9 @@ router.post('/whatsapp', async (req, res) => {
       filialId: veiculo.filial_id,
       fallbackDestinatario: phone,
     }).then((envio) => {
-      console.log('[webhook] timing_ms', {
-        placa: veiculo.placa,
-        token: Math.round(tToken - t0),
-        resumo: Math.round(tResumo - tToken),
-        prep: Math.round(tAntesEnvio - t0),
-        envio: Math.round(performance.now() - tAntesEnvio),
-        total: Math.round(performance.now() - t0),
-        enviado: Boolean(envio?.ok),
-        via: envio?.via || 'grupo',
-        erro: envio?.erro || null,
-      });
+      if (!envio?.ok) {
+        console.error('[webhook] falha ao enviar link', veiculo.placa, envio?.erro || '');
+      }
     }).catch((err) => {
       console.error('[webhook] falha ao enviar link', err.message);
     });

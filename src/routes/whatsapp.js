@@ -21,6 +21,7 @@ import {
   tokenWuzapiFilial,
   tokenWuzapiUtil,
   enviarERegistrar,
+  normalizarDestino,
 } from '../services/whatsapp.js';
 import crypto from 'crypto';
 
@@ -836,10 +837,24 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
   }
   const filialId = Number(req.params.id);
   try {
-    await filialOuErro(filialId);
+    const f = await filialOuErro(filialId);
+    const grupoSelecionado = limparCampoTexto(f.whatsapp_grupo);
     const db = getDb();
-    const limit = Math.min(Number(req.query.limit) || 40, 100);
+    const limit = Math.min(Number(req.query.limit) || 80, 150);
 
+    if (!grupoSelecionado) {
+      return res.json({
+        alertas_enabled: Boolean(config.whatsappAlertasEnabled),
+        grupo: null,
+        resumo: { pendentes: 0, enviados: 0, alertas: 0, chatbot: 0, total: 0 },
+        pendentes: [],
+        enviados: [],
+        logs: [],
+        mensagem: 'Selecione o grupo da medição para ver os envios desse grupo.',
+      });
+    }
+
+    const grupoKey = normalizarDestino(grupoSelecionado)?.logKey || grupoSelecionado;
     const rows = await db.prepare(`
     SELECT
       n.id,
@@ -858,18 +873,29 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
     LEFT JOIN veiculos v ON v.id = n.veiculo_id
     WHERE n.filial_id = ?
        OR (n.filial_id IS NULL AND v.filial_id = ?)
-       OR (
-         n.filial_id IS NULL AND n.veiculo_id IS NULL AND n.destinatario_whatsapp IN (
-           SELECT TRIM(whatsapp_grupo) FROM filiais WHERE id = ? AND whatsapp_grupo IS NOT NULL
-           UNION
-           SELECT TRIM(whatsapp) FROM filiais WHERE id = ? AND whatsapp IS NOT NULL
-           UNION
-           SELECT TRIM(whatsapp_alerta) FROM filiais WHERE id = ? AND whatsapp_alerta IS NOT NULL
-         )
-       )
     ORDER BY n.id DESC
     LIMIT ?
-  `).all(filialId, filialId, filialId, filialId, filialId, limit);
+  `).all(filialId, filialId, limit);
+
+    const destDoGrupo = (dest) => {
+      const n = normalizarDestino(dest);
+      if (n?.isGroup && n.logKey === grupoKey) return true;
+      const a = String(dest || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+      const b = String(grupoSelecionado).replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+      return Boolean(a && b && a === b);
+    };
+
+    const ehRuido = (n) => {
+      const msg = String(n.mensagem || '');
+      if (/muitas consultas/i.test(msg)) return true;
+      if (/n[aã]o encontrada/i.test(msg)) return true;
+      if (/frota cadastrada|frota completa/i.test(msg) && !/abrir medi/i.test(msg)) return true;
+      if (/gerando o \*relat/i.test(msg)) return true;
+      if (/comandos:\s*frota/i.test(msg)) return true;
+      return false;
+    };
+
+    const filtradas = rows.filter((n) => destDoGrupo(n.destinatario_whatsapp) && !ehRuido(n));
 
     const classificarEnvio = (n) => {
       const msg = String(n.mensagem || '');
@@ -920,12 +946,13 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
       };
     };
 
-    const mapped = rows.map(mapRow);
+    const mapped = filtradas.map(mapRow);
     const pendentes = mapped.filter((r) => r.status === 'erro');
     const enviados = mapped.filter((r) => r.status === 'enviado' || r.status === 'entregue');
 
     res.json({
       alertas_enabled: Boolean(config.whatsappAlertasEnabled),
+      grupo: grupoSelecionado,
       resumo: {
         pendentes: pendentes.length,
         enviados: enviados.length,

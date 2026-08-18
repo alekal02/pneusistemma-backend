@@ -365,19 +365,22 @@ export async function enviarERegistrar({
   token = null,
   /** Se o envio ao grupo falhar, tenta este número (remetente) */
   fallbackDestinatario = null,
+  registrar = true,
 }) {
   const dest = normalizarDestino(destinatario);
   if (!dest?.phone) {
-    await registrarNotificacao({
-      tipo,
-      destinatario: destinatario || '',
-      mensagem,
-      veiculoId,
-      medicaoId,
-      status: 'erro',
-      respostaApi: { erro: 'WhatsApp não cadastrado' },
-      filialId,
-    });
+    if (registrar) {
+      await registrarNotificacao({
+        tipo,
+        destinatario: destinatario || '',
+        mensagem,
+        veiculoId,
+        medicaoId,
+        status: 'erro',
+        respostaApi: { erro: 'WhatsApp não cadastrado' },
+        filialId,
+      });
+    }
     return { ok: false, erro: 'sem_whatsapp' };
   }
 
@@ -391,29 +394,33 @@ export async function enviarERegistrar({
         token,
       });
       const status = resp?.skipped ? 'erro' : 'enviado';
-      await registrarNotificacao({
-        tipo,
-        destinatario: d.logKey,
-        mensagem,
-        veiculoId,
-        medicaoId,
-        status,
-        respostaApi: resp,
-        filialId,
-      });
+      if (registrar) {
+        await registrarNotificacao({
+          tipo,
+          destinatario: d.logKey,
+          mensagem,
+          veiculoId,
+          medicaoId,
+          status,
+          respostaApi: resp,
+          filialId,
+        });
+      }
       return { ok: status === 'enviado', resp, dest: d, erro: resp?.skipped ? (resp.reason || 'skipped') : null };
     } catch (err) {
       console.error(`[whatsapp] Falha ao enviar para ${d.logKey}:`, err.message);
-      await registrarNotificacao({
-        tipo,
-        destinatario: d.logKey,
-        mensagem,
-        veiculoId,
-        medicaoId,
-        status: 'erro',
-        respostaApi: { erro: err.message },
-        filialId,
-      });
+      if (registrar) {
+        await registrarNotificacao({
+          tipo,
+          destinatario: d.logKey,
+          mensagem,
+          veiculoId,
+          medicaoId,
+          status: 'erro',
+          respostaApi: { erro: err.message },
+          filialId,
+        });
+      }
       return { ok: false, erro: err.message, dest: d };
     }
   };
