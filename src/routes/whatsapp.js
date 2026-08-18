@@ -207,6 +207,12 @@ async function statusComQr(token, extra = {}) {
   const status = normalizarStatus(data, extra);
   if (status.loggedIn) {
     status.qrcode = '';
+    if (!status.phone) {
+      const extraSessao = await telefoneDaSessaoWuzapi(token);
+      if (extraSessao.phone) status.phone = extraSessao.phone;
+      if (extraSessao.jid && !status.jid) status.jid = extraSessao.jid;
+      if (extraSessao.name && !status.name) status.name = extraSessao.name;
+    }
     return status;
   }
   try {
@@ -215,6 +221,26 @@ async function statusComQr(token, extra = {}) {
     status.qr_erro = err.message;
   }
   return status;
+}
+
+/** /session/status muitas vezes não traz JID; o admin/users traz o chip que leu o QR. */
+async function telefoneDaSessaoWuzapi(token) {
+  try {
+    const lista = await wuzapiAdminFetch('/admin/users');
+    const users = Array.isArray(lista?.data) ? lista.data : (Array.isArray(lista) ? lista : []);
+    const t = tokenWuzapiUtil(token);
+    const u = users.find((x) => t && tokenWuzapiUtil(x.token) === t)
+      || users.find((x) => (x.loggedIn || x.LoggedIn) && (x.jid || x.JID));
+    if (!u) return { phone: '', jid: null, name: null };
+    const jid = u.jid || u.JID || '';
+    return {
+      phone: telefoneFromJid(jid) || telefoneFromJid(u.phone || u.Phone),
+      jid: jid || null,
+      name: u.name || u.Name || null,
+    };
+  } catch {
+    return { phone: '', jid: null, name: null };
+  }
 }
 
 async function conectarSessao(token) {
