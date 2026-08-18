@@ -72,6 +72,82 @@ export function wuzapiConfigurado(token = null) {
   return Boolean(config.wuzapiBaseUrl && t);
 }
 
+function tokenNaoEAdmin(token) {
+  const t = tokenWuzapiUtil(token);
+  if (!t) return '';
+  const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
+  if (admin && t === admin) return '';
+  return t;
+}
+
+async function fetchAdminUsers() {
+  const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
+  if (!admin || !config.wuzapiBaseUrl) return [];
+  try {
+    const res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
+      headers: { Authorization: admin },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+  } catch {
+    return [];
+  }
+}
+
+async function gravarTokenFilial(filialId, token) {
+  const t = tokenNaoEAdmin(token);
+  if (!filialId || !t) return;
+  try {
+    const db = getDb();
+    await db.prepare(`
+      UPDATE filiais SET wuzapi_token = ?, updated_at = NOW() WHERE id = ? AND ativo = 1
+    `).run(t, filialId);
+  } catch (err) {
+    console.warn('[whatsapp] não gravou token ativo:', err.message);
+  }
+}
+
+/** Tokens para envio: filial → sessão logada no WuzAPI → .env */
+async function listarTokensEnvio(filialId, explicitToken) {
+  const tokens = [];
+  const add = (t) => {
+    const u = tokenNaoEAdmin(t);
+    if (u && !tokens.includes(u)) tokens.push(u);
+  };
+  add(explicitToken);
+  add(await tokenWuzapiFilial(filialId));
+
+  const users = await fetchAdminUsers();
+  for (const u of users) {
+    if (u.loggedIn || u.LoggedIn) add(u.token);
+  }
+  add(config.wuzapiToken);
+  return tokens;
+}
+
+function ehFalhaAuthWuzapi(status, msg) {
+  return status === 401 || status === 403
+    || /unauthor|invalid token|no session|not logged|não autentic/i.test(String(msg || ''));
+}
+
+function headersUsuarioWuzapi(token) {
+  // WuzAPI: endpoints de usuário usam o header `token`. Authorization é só admin.
+  return {
+    'Content-Type': 'application/json',
+    token,
+  };
+}
+
+function mensagemErroWuzapi(status, msg) {
+  const texto = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  if (ehFalhaAuthWuzapi(status, texto)) {
+    return 'Sessão WhatsApp recusada (401). Clique em Gerar token e depois Conectar / QR com o chip da unidade.';
+  }
+  return `WuzAPI erro ${status}: ${texto}`;
+}
+
 /** Token WuzAPI da filial, com fallback no .env */
 export async function tokenWuzapiFilial(filialId) {
   if (filialId) {
@@ -79,10 +155,10 @@ export async function tokenWuzapiFilial(filialId) {
     const row = await db.prepare(`
       SELECT wuzapi_token FROM filiais WHERE id = ? AND ativo = 1
     `).get(filialId);
-    const local = tokenWuzapiUtil(row?.wuzapi_token);
+    const local = tokenNaoEAdmin(row?.wuzapi_token);
     if (local) return local;
   }
-  return tokenWuzapiUtil(config.wuzapiToken);
+  return tokenNaoEAdmin(config.wuzapiToken);
 }
 
 /**
@@ -96,12 +172,7 @@ export async function enviarMensagemWhatsApp(phoneOrGroup, text, opts = {}) {
   if (!dest?.phone) throw new Error('Destino WhatsApp inválido');
   if (!text?.trim()) throw new Error('Mensagem vazia');
 
-  const tokens = [];
-  const primary = tokenWuzapiUtil(opts.token) || (await tokenWuzapiFilial(opts.filialId));
-  if (primary) tokens.push(primary);
-  const fallback = tokenWuzapiUtil(config.wuzapiToken);
-  if (fallback && !tokens.includes(fallback)) tokens.push(fallback);
-
+  const tokens = await listarTokensEnvio(opts.filialId, opts.token);
   if (!tokens.length || !config.wuzapiBaseUrl) {
     console.warn('[whatsapp] WuzAPI não configurado — mensagem não enviada:', dest.logKey);
     return {
@@ -124,10 +195,7 @@ export async function enviarMensagemWhatsApp(phoneOrGroup, text, opts = {}) {
     const tSend = performance.now();
     const res = await fetch(`${config.wuzapiBaseUrl}/chat/send/text`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        token,
-      },
+      headers: headersUsuarioWuzapi(token),
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(8_000),
     });
@@ -141,6 +209,7 @@ export async function enviarMensagemWhatsApp(phoneOrGroup, text, opts = {}) {
     }
 
     if (res.ok) {
+      if (i > 0) await gravarTokenFilial(opts.filialId, token);
       if (performance.now() - tSend > 1500) {
         console.warn('[whatsapp] envio lento', Math.round(performance.now() - tSend), 'ms');
       }
@@ -148,12 +217,12 @@ export async function enviarMensagemWhatsApp(phoneOrGroup, text, opts = {}) {
     }
 
     const msg = data?.error || data?.erro || JSON.stringify(data);
-    lastErr = new Error(`WuzAPI erro ${res.status}: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
-    // Se o token da filial não tem sessão, tenta o token global (.env)
-    if (/no session/i.test(String(msg)) && i < tokens.length - 1) {
-      console.warn('[whatsapp] Token sem sessão — tentando fallback .env');
+    lastErr = new Error(mensagemErroWuzapi(res.status, msg));
+    if (ehFalhaAuthWuzapi(res.status, msg) && i < tokens.length - 1) {
+      console.warn('[whatsapp] Token recusado — tentando outra sessão WuzAPI');
       continue;
     }
+    if (i < tokens.length - 1) continue;
     throw lastErr;
   }
 
@@ -178,12 +247,7 @@ export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, op
   const nome = String(fileName || 'documento.pdf').replace(/[^\w.\-]+/g, '_');
   const mime = opts.mime || 'application/pdf';
 
-  const tokens = [];
-  const primary = tokenWuzapiUtil(opts.token) || (await tokenWuzapiFilial(opts.filialId));
-  if (primary) tokens.push(primary);
-  const fallback = tokenWuzapiUtil(config.wuzapiToken);
-  if (fallback && !tokens.includes(fallback)) tokens.push(fallback);
-
+  const tokens = await listarTokensEnvio(opts.filialId, opts.token);
   if (!tokens.length || !config.wuzapiBaseUrl) {
     console.warn('[whatsapp] WuzAPI não configurado — documento não enviado:', dest.logKey);
     return {
@@ -206,10 +270,7 @@ export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, op
     const token = tokens[i];
     const res = await fetch(`${config.wuzapiBaseUrl}/chat/send/document`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        token,
-      },
+      headers: headersUsuarioWuzapi(token),
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(60_000),
     });
@@ -222,14 +283,18 @@ export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, op
       data = { raw };
     }
 
-    if (res.ok) return data;
+    if (res.ok) {
+      if (i > 0) await gravarTokenFilial(opts.filialId, token);
+      return data;
+    }
 
     const msg = data?.error || data?.erro || JSON.stringify(data);
-    lastErr = new Error(`WuzAPI erro ${res.status}: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
-    if (/no session/i.test(String(msg)) && i < tokens.length - 1) {
-      console.warn('[whatsapp] Token sem sessão (documento) — tentando fallback .env');
+    lastErr = new Error(mensagemErroWuzapi(res.status, msg));
+    if (ehFalhaAuthWuzapi(res.status, msg) && i < tokens.length - 1) {
+      console.warn('[whatsapp] Token recusado (documento) — tentando outra sessão');
       continue;
     }
+    if (i < tokens.length - 1) continue;
     throw lastErr;
   }
 

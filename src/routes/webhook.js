@@ -586,7 +586,8 @@ router.post('/whatsapp', async (req, res) => {
       mensagem,
       veiculoId: veiculo.id,
       linkPreview: false,
-      filialId: veiculo.filial_id,
+      filialId: canal?.escopoFilialId || veiculo.filial_id,
+      token: canal?.filial?.wuzapi_token,
       fallbackDestinatario: phone,
     }).then((envio) => {
       if (!envio?.ok) {
