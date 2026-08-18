@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS configuracoes (
 
 CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
   id BIGSERIAL PRIMARY KEY,
-  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal')),
   destinatario_whatsapp TEXT NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
   medicao_id BIGINT REFERENCES medicoes(id),

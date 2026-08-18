@@ -238,7 +238,7 @@ export async function enviarMensagemWhatsAppComLink(phone, text, opts = {}) {
  * @param {string} phoneOrGroup
  * @param {Buffer|Uint8Array} buffer
  * @param {string} fileName
- * @param {{ token?: string, filialId?: number, mime?: string }} [opts]
+ * @param {{ token?: string, filialId?: number, mime?: string, caption?: string }} [opts]
  */
 export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, opts = {}) {
   const dest = normalizarDestino(phoneOrGroup);
@@ -264,6 +264,7 @@ export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, op
     FileName: nome,
     Document: `data:${mime};base64,${b64}`,
   };
+  if (opts.caption) payload.Caption = String(opts.caption);
 
   let lastErr = null;
   for (let i = 0; i < tokens.length; i += 1) {
@@ -314,6 +315,7 @@ export async function enviarDocumentoERegistrar({
   filialId = null,
   token = null,
   fallbackDestinatario = null,
+  caption = '',
 }) {
   const dest = normalizarDestino(destinatario);
   const preview = mensagem || `📎 ${fileName || 'documento.pdf'}`;
@@ -338,29 +340,38 @@ export async function enviarDocumentoERegistrar({
       const resp = await enviarDocumentoWhatsApp(d.phone, buffer, fileName, {
         filialId,
         token,
+        caption: caption || preview,
       });
       const status = resp?.skipped ? 'erro' : 'enviado';
-      await registrarNotificacao({
-        tipo,
-        destinatario: d.logKey,
-        mensagem: preview,
-        veiculoId,
-        status,
-        respostaApi: resp,
-        filialId,
-      });
+      try {
+        await registrarNotificacao({
+          tipo,
+          destinatario: d.logKey,
+          mensagem: preview,
+          veiculoId,
+          status,
+          respostaApi: resp,
+          filialId,
+        });
+      } catch (regErr) {
+        console.warn('[whatsapp] não registrou documento:', regErr.message);
+      }
       return { ok: status === 'enviado', resp, dest: d, erro: resp?.skipped ? (resp.reason || 'skipped') : null };
     } catch (err) {
       console.error(`[whatsapp] Falha documento para ${d.logKey}:`, err.message);
-      await registrarNotificacao({
-        tipo,
-        destinatario: d.logKey,
-        mensagem: preview,
-        veiculoId,
-        status: 'erro',
-        respostaApi: { erro: err.message },
-        filialId,
-      });
+      try {
+        await registrarNotificacao({
+          tipo,
+          destinatario: d.logKey,
+          mensagem: preview,
+          veiculoId,
+          status: 'erro',
+          respostaApi: { erro: err.message },
+          filialId,
+        });
+      } catch (regErr) {
+        console.warn('[whatsapp] não registrou falha de documento:', regErr.message);
+      }
       return { ok: false, erro: err.message, dest: d };
     }
   };

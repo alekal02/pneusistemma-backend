@@ -11,7 +11,7 @@ import {
   gerarTokenAcessoRapido,
   resumoStatusPneusVeiculoRapido,
 } from '../services/acesso-rapido.js';
-import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
+import { gerarRelatorioSemanalPdfBuffer, formatarDataHoraBrasil } from '../services/relatorio-semanal-pdf.js';
 
 const router = Router();
 
@@ -429,33 +429,13 @@ router.post('/whatsapp', async (req, res) => {
 
       (async () => {
         try {
-          await enviarERegistrar({
-            tipo: 'relatorio_semanal',
-            destinatario: destinoEnvio,
-            mensagem: '📊 Gerando o *relatório gerencial* da unidade… aguarde alguns segundos.',
-            filialId,
-            fallbackDestinatario: phone,
-            registrar: false,
-          });
-
           const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(filialId, {
             geradoPor: `WhatsApp · ${phone || destinoEnvio}`,
           });
 
-          const caption = [
-            `📊 *Relatório gerencial* — ${dados.filial?.nome || 'Unidade'}`,
-            dados.filial?.codigo ? `Código: ${dados.filial.codigo}` : null,
-            `_Arquivo: ${filename}_`,
-          ].filter(Boolean).join('\n');
-
-          await enviarERegistrar({
-            tipo: 'relatorio_semanal',
-            destinatario: destinoEnvio,
-            mensagem: caption,
-            filialId,
-            fallbackDestinatario: phone,
-            registrar: false,
-          });
+          const geradoEm = formatarDataHoraBrasil(dados.gerado_em);
+          const unidade = dados.filial?.nome || 'Unidade';
+          const caption = `Relatório gerencial — ${unidade} · gerado em ${geradoEm}`;
 
           const envio = await enviarDocumentoERegistrar({
             tipo: 'relatorio_semanal',
@@ -463,6 +443,7 @@ router.post('/whatsapp', async (req, res) => {
             buffer,
             fileName: filename,
             mensagem: caption,
+            caption,
             filialId,
             fallbackDestinatario: phone,
           });
@@ -471,9 +452,10 @@ router.post('/whatsapp', async (req, res) => {
             await enviarERegistrar({
               tipo: 'relatorio_semanal',
               destinatario: destinoEnvio,
-              mensagem: `❌ Não consegui enviar o PDF. ${envio?.erro || 'Tente de novo em instantes.'}`,
+              mensagem: '❌ Não consegui enviar o PDF. Tente de novo em instantes.',
               filialId,
               fallbackDestinatario: phone,
+              registrar: false,
             });
           } else {
             console.log('[webhook] relatorio enviado', {
@@ -489,9 +471,10 @@ router.post('/whatsapp', async (req, res) => {
             await enviarERegistrar({
               tipo: 'relatorio_semanal',
               destinatario: destinoEnvio,
-              mensagem: `❌ Falha ao gerar o relatório: ${err.message}`,
+              mensagem: '❌ Não consegui gerar o PDF. Tente de novo em instantes.',
               filialId,
               fallbackDestinatario: phone,
+              registrar: false,
             });
           } catch { /* ignore */ }
         }
