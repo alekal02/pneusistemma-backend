@@ -138,12 +138,23 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
   return data;
 }
 
-/** Extrai número do JID WhatsApp (ignora device :xx) */
+/** Extrai número pessoal do JID WhatsApp (ignora device :xx e JID de grupo). */
 export function telefoneFromJid(jid) {
-  const user = String(jid || '').split('@')[0] || '';
+  const raw = String(jid || '').trim();
+  if (!raw) return '';
+  if (/@(g\.us|newsletter|broadcast)$/i.test(raw)) return '';
+  const user = raw.split('@')[0] || '';
   const base = user.split(':')[0] || '';
   const digits = base.replace(/\D/g, '');
-  return digits.length >= 10 ? digits : '';
+  return pareceNumeroCelular(digits) ? digits : '';
+}
+
+function pareceNumeroCelular(digits) {
+  const d = String(digits || '').replace(/\D/g, '');
+  if (d.length < 10 || d.length > 15) return false;
+  // Grupo WhatsApp costuma ser 17–19 dígitos começando em 120363…
+  if (d.length >= 15 && d.startsWith('120')) return false;
+  return true;
 }
 
 function normalizarStatus(payload, extra = {}) {
@@ -385,7 +396,9 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
       WHERE id = ?
     `).run(
       whatsapp !== undefined
-        ? (limparCampoTexto(whatsapp)?.replace(/\D/g, '') || null)
+        ? (pareceNumeroCelular(limparCampoTexto(whatsapp)?.replace(/\D/g, '') || '')
+          ? String(whatsapp).replace(/\D/g, '')
+          : null)
         : f.whatsapp,
       whatsapp_grupo !== undefined ? limparCampoTexto(whatsapp_grupo) : f.whatsapp_grupo,
       alertaSalvo,
@@ -753,16 +766,22 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     }
     const f = await filialOuErro(req.params.id);
     const token = tokenWuzapiUtil(f.wuzapi_token);
-    let sessionDesconectada = false;
+    let sessionEncerrada = false;
     let aviso = null;
 
     if (token) {
       try {
-        await wuzapiFetch('/session/disconnect', { method: 'POST', token });
-        sessionDesconectada = true;
-      } catch (err) {
-        // Sessão pode já estar offline — ainda limpa vínculos locais
-        aviso = err.message || 'Sessão WuzAPI não respondeu; configuração local limpa.';
+        await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 15_000 });
+        sessionEncerrada = true;
+      } catch (errLogout) {
+        try {
+          await wuzapiFetch('/session/disconnect', { method: 'POST', token });
+          sessionEncerrada = true;
+          aviso = 'Sessão desconectada; se o QR antigo voltar, clique em Conectar / QR de novo.';
+        } catch (errDisc) {
+          aviso = errLogout.message || errDisc.message
+            || 'WuzAPI não respondeu; número, grupo e alertas foram limpos mesmo assim.';
+        }
       }
     } else {
       aviso = 'Sem token próprio — limpou só número, grupo e alertas.';
@@ -779,8 +798,8 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     `).run(f.id);
 
     res.json({
-      mensagem: `Chatbot de ${f.nome} desconectado — número, grupo e alertas limpos`,
-      session_desconectada: sessionDesconectada,
+      mensagem: `Chatbot de ${f.nome} desconectado — número, grupo e alertas apagados. Conecte o próximo chip pelo QR.`,
+      session_desconectada: sessionEncerrada,
       aviso,
       limpos: ['whatsapp', 'whatsapp_grupo', 'whatsapp_alerta'],
     });
