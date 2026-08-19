@@ -4,6 +4,7 @@ import { classificarSulco, getLimites, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
 import { papelPosicao } from '../pneus-layouts.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
+import { normalizarDiaMedicao, labelDiaMedicao, semanaMedicaoBrasil } from '../dia-medicao.js';
 
 const router = Router();
 
@@ -69,6 +70,11 @@ router.get('/resumo', async (req, res, next) => {
       SELECT COUNT(*) as total FROM veiculos WHERE ativo = 1 AND filial_id = ?
     `).get(filialId);
 
+    const filial = await db.prepare(`
+      SELECT dia_medicao FROM filiais WHERE id = ?
+    `).get(filialId);
+    const semana = semanaMedicaoBrasil();
+
     res.json({
       veiculos_ativos: veiculos.total,
       pneus_total: pneus.length,
@@ -80,6 +86,32 @@ router.get('/resumo', async (req, res, next) => {
       diagnosticos,
       limites,
       filial_id: filialId,
+      dia_medicao: normalizarDiaMedicao(filial?.dia_medicao),
+      dia_medicao_label: labelDiaMedicao(filial?.dia_medicao),
+      semana,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/dia-medicao', async (req, res, next) => {
+  try {
+    const filialId = filialScopeId(req);
+    if (!filialId) {
+      return res.status(400).json({ erro: 'Usuário sem unidade vinculada' });
+    }
+    const dia = normalizarDiaMedicao(req.body?.dia_medicao);
+    const db = getDb();
+    await db.prepare(`
+      UPDATE filiais SET dia_medicao = ?, updated_at = NOW() WHERE id = ? AND ativo = 1
+    `).run(dia, filialId);
+    res.json({
+      mensagem: dia
+        ? `Dia da medição da frota: ${labelDiaMedicao(dia)}`
+        : 'Dia da medição da frota removido',
+      dia_medicao: dia,
+      dia_medicao_label: labelDiaMedicao(dia),
     });
   } catch (err) {
     next(err);

@@ -17,6 +17,7 @@ import {
   getLayout,
 } from '../pneus-layouts.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
+import { normalizarDiaMedicao } from '../dia-medicao.js';
 import {
   parseCsv,
   toCsv,
@@ -414,6 +415,7 @@ router.get('/', async (req, res, next) => {
       status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco),
       pneus_medidos: Number(v.pneus_medidos) || 0,
       ultima_medicao: v.ultima_medicao || null,
+      dia_medicao: normalizarDiaMedicao(v.dia_medicao),
     }));
 
     res.json(resultado);
@@ -466,6 +468,7 @@ router.post('/', async (req, res, next) => {
   const {
     placa, apelido, tipo, marca, modelo, ano,
     km_atual, hr_atual, observacoes, layout_pneus, posicoes_custom,
+    dia_medicao,
   } = req.body;
   if (!placa?.trim()) return res.status(400).json({ erro: 'Placa é obrigatória' });
 
@@ -474,8 +477,8 @@ router.post('/', async (req, res, next) => {
   try {
     const layoutId = layout_pneus || LAYOUT_PADRAO;
     const result = await db.prepare(`
-      INSERT INTO veiculos (placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO veiculos (placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id, dia_medicao)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       placa.trim().toUpperCase(),
       apelido?.trim() || null,
@@ -487,7 +490,8 @@ router.post('/', async (req, res, next) => {
       hr_atual || 0,
       observacoes?.trim() || null,
       layoutId,
-      filialId
+      filialId,
+      normalizarDiaMedicao(dia_medicao)
     );
 
     const posicoes = await aplicarLayoutPneus(
@@ -511,10 +515,18 @@ router.post('/', async (req, res, next) => {
 });
 
 router.put('/:id', async (req, res, next) => {
-  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes } = req.body;
+  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, dia_medicao } = req.body;
   try {
     const db = getDb();
     const filialId = filialScopeId(req);
+    const atual = await db.prepare(`
+      SELECT id, dia_medicao FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
+    `).get(req.params.id, filialId);
+    if (!atual) return res.status(404).json({ erro: 'Veículo não encontrado' });
+
+    const diaSalvo = Object.prototype.hasOwnProperty.call(req.body || {}, 'dia_medicao')
+      ? normalizarDiaMedicao(dia_medicao)
+      : atual.dia_medicao;
 
     const result = await db.prepare(`
       UPDATE veiculos SET
@@ -527,6 +539,7 @@ router.put('/:id', async (req, res, next) => {
         km_atual = COALESCE(?, km_atual),
         hr_atual = COALESCE(?, hr_atual),
         observacoes = ?,
+        dia_medicao = ?,
         updated_at = NOW()
       WHERE id = ? AND ativo = 1 AND filial_id = ?
     `).run(
@@ -539,6 +552,7 @@ router.put('/:id', async (req, res, next) => {
       km_atual != null ? km_atual : null,
       hr_atual != null ? hr_atual : null,
       observacoes?.trim() || null,
+      diaSalvo,
       req.params.id,
       filialId
     );

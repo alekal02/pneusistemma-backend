@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS filiais (
   whatsapp_grupo TEXT,
   whatsapp_alerta TEXT,
   wuzapi_token TEXT,
+  dia_medicao INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS veiculos (
   observacoes TEXT,
   filial_id BIGINT REFERENCES filiais(id) ON DELETE RESTRICT,
   layout_pneus TEXT DEFAULT 'truck_10',
+  dia_medicao INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -327,6 +329,8 @@ export async function initDatabase() {
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
+  await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
+  await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
 
   await seedConfigs();
   const matrizId = await seedAuthAndFilial();
