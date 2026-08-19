@@ -389,7 +389,19 @@ router.get('/', async (req, res, next) => {
       LEFT JOIN medicoes m ON m.pneu_id = p.id
         AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
       WHERE p.veiculo_id = v.id AND p.ativo = 1
-      ) as menor_sulco
+      ) as menor_sulco,
+      (SELECT MAX(m.data_medicao)
+       FROM pneus p
+       JOIN medicoes m ON m.pneu_id = p.id
+       WHERE p.veiculo_id = v.id AND p.ativo = 1) as ultima_medicao,
+      (SELECT MAX(m.created_at)
+       FROM pneus p
+       JOIN medicoes m ON m.pneu_id = p.id
+       WHERE p.veiculo_id = v.id AND p.ativo = 1) as ultima_atualizacao,
+      (SELECT COUNT(DISTINCT p.id)
+       FROM pneus p
+       JOIN medicoes m ON m.pneu_id = p.id
+       WHERE p.veiculo_id = v.id AND p.ativo = 1 AND p.status_pneu = 'montado') as pneus_medidos
     FROM veiculos v
     WHERE v.ativo = 1 AND v.filial_id = ?
     ORDER BY v.apelido, v.placa
@@ -400,6 +412,8 @@ router.get('/', async (req, res, next) => {
       tipo: normalizarTipoVeiculo(v.tipo),
       menor_sulco: v.menor_sulco === 999 ? null : v.menor_sulco,
       status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco),
+      pneus_medidos: Number(v.pneus_medidos) || 0,
+      ultima_medicao: v.ultima_medicao || null,
     }));
 
     res.json(resultado);
