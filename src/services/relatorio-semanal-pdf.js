@@ -16,6 +16,33 @@ function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
+const TZ_BR = 'America/Sao_Paulo';
+
+export function partesDataBrasil(iso) {
+  const parts = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: TZ_BR,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(iso || Date.now()));
+  const get = (t) => parts.find((p) => p.type === t)?.value || '';
+  return {
+    yyyy: get('year'),
+    mm: get('month'),
+    dd: get('day'),
+    hh: get('hour'),
+    mi: get('minute'),
+  };
+}
+
+export function formatarDataHoraBrasil(iso) {
+  const p = partesDataBrasil(iso);
+  return `${p.dd}/${p.mm}/${p.yyyy} ${p.hh}:${p.mi}`;
+}
+
 /** Data YYYY-MM-DD no fuso local do servidor */
 function dataISO(d = new Date()) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
@@ -790,7 +817,7 @@ export function gerarPdfRelatorioSemanal(dados) {
     doc.page.margins.bottom = 0;
     doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5);
     const meta = [
-      `Gerado em ${new Date(dados.gerado_em).toLocaleString('pt-BR')}`,
+      `Gerado em ${formatarDataHoraBrasil(dados.gerado_em)}`,
       dados.gerado_por ? `por ${dados.gerado_por}` : null,
       `Limites: critico <= ${dados.limites.critico_mm} mm | monitorar <= ${dados.limites.monitorar_ate_mm} mm | prazo recap ${dados.limites.prazo_recap_dias} d`,
     ].filter(Boolean).join('   |   ');
@@ -957,15 +984,10 @@ export function gerarPdfRelatorioSemanal(dados) {
 }
 
 function nomeArquivoPdf(dados) {
-  const gerado = new Date(dados.gerado_em || Date.now());
-  const yyyy = gerado.getFullYear();
-  const mm = String(gerado.getMonth() + 1).padStart(2, '0');
-  const dd = String(gerado.getDate()).padStart(2, '0');
-  const hh = String(gerado.getHours()).padStart(2, '0');
-  const mi = String(gerado.getMinutes()).padStart(2, '0');
+  const p = partesDataBrasil(dados.gerado_em);
   const codigo = String(dados.filial?.codigo || dados.filial?.id || 'unidade')
     .replace(/[^\w\-]+/g, '_');
-  return `relatorio-semanal-${codigo}-${yyyy}-${mm}-${dd}_${hh}h${mi}.pdf`;
+  return `relatorio-semanal-${codigo}-${p.yyyy}-${p.mm}-${p.dd}_${p.hh}h${p.mi}.pdf`;
 }
 
 export async function gerarRelatorioSemanalPdfBuffer(filialId, opts = {}) {

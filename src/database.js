@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS filiais (
   whatsapp_grupo TEXT,
   whatsapp_alerta TEXT,
   wuzapi_token TEXT,
+  dia_medicao INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS veiculos (
   observacoes TEXT,
   filial_id BIGINT REFERENCES filiais(id) ON DELETE RESTRICT,
   layout_pneus TEXT DEFAULT 'truck_10',
+  dia_medicao INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -128,7 +130,7 @@ CREATE TABLE IF NOT EXISTS configuracoes (
 
 CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
   id BIGSERIAL PRIMARY KEY,
-  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal')),
   destinatario_whatsapp TEXT NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
   medicao_id BIGINT REFERENCES medicoes(id),
@@ -189,6 +191,21 @@ CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
 async function ensureColumn(table, column, ddl) {
   // db.exec quebra o SQL por ';', então blocos DO $$ ... $$ não podem ser usados aqui.
   await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${ddl}`);
+}
+
+async function ensureNotificacoesTipoRelatorio() {
+  try {
+    await db.exec(`
+      ALTER TABLE notificacoes_whatsapp DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check
+    `);
+    await db.exec(`
+      ALTER TABLE notificacoes_whatsapp
+        ADD CONSTRAINT notificacoes_whatsapp_tipo_check
+        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal'))
+    `);
+  } catch (err) {
+    console.warn('[database] constraint tipo notificacoes:', err.message);
+  }
 }
 
 async function seedConfigs() {
@@ -322,9 +339,12 @@ export async function initDatabase() {
 
   // Colunas extras (idempotente)
   await ensureColumn('notificacoes_whatsapp', 'filial_id', 'BIGINT');
+  await ensureNotificacoesTipoRelatorio();
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
+  await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
+  await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
 
   // Permite tipos extras do menu WhatsApp (relatorio, menu, cadastros…)
   try {
