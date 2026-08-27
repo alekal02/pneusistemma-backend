@@ -21,7 +21,6 @@ import {
   tokenWuzapiFilial,
   tokenWuzapiUtil,
   enviarERegistrar,
-  normalizarDestino,
 } from '../services/whatsapp.js';
 import crypto from 'crypto';
 
@@ -84,7 +83,7 @@ async function wuzapiAdminFetch(path, { method = 'GET', body } = {}) {
   return data;
 }
 
-async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_000 } = {}) {
+async function wuzapiFetch(path, { method = 'GET', body, token } = {}) {
   const t = tokenWuzapiUtil(token || config.wuzapiToken);
   if (!wuzapiConfigurado(t)) {
     const err = new Error('WuzAPI não configurado (URL + token da filial ou .env)');
@@ -102,7 +101,7 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
         token: t,
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(12_000),
     });
   } catch (e) {
     const cause = e?.cause?.code || e?.code || e?.name || '';
@@ -139,23 +138,12 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
   return data;
 }
 
-/** Extrai número pessoal do JID WhatsApp (ignora device :xx e JID de grupo). */
+/** Extrai número do JID WhatsApp (ignora device :xx) */
 export function telefoneFromJid(jid) {
-  const raw = String(jid || '').trim();
-  if (!raw) return '';
-  if (/@(g\.us|newsletter|broadcast)$/i.test(raw)) return '';
-  const user = raw.split('@')[0] || '';
+  const user = String(jid || '').split('@')[0] || '';
   const base = user.split(':')[0] || '';
   const digits = base.replace(/\D/g, '');
-  return pareceNumeroCelular(digits) ? digits : '';
-}
-
-function pareceNumeroCelular(digits) {
-  const d = String(digits || '').replace(/\D/g, '');
-  if (d.length < 10 || d.length > 15) return false;
-  // Grupo WhatsApp costuma ser 17–19 dígitos começando em 120363…
-  if (d.length >= 15 && d.startsWith('120')) return false;
-  return true;
+  return digits.length >= 10 ? digits : '';
 }
 
 function normalizarStatus(payload, extra = {}) {
@@ -172,135 +160,9 @@ function normalizarStatus(payload, extra = {}) {
     phone,
     webhook: d.webhook || d.Webhook || null,
     events: d.events || d.Events || null,
-    qrcode: extrairQr(payload),
+    qrcode: d.qrcode || d.QRCode || null,
     token_configurado: Boolean(extra.token || config.wuzapiToken),
     ...extra,
-  };
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Aceita data URL, base64 puro ou campos QRCode/qrcode em vários formatos da WuzAPI. */
-function extrairQr(payload) {
-  const d = payload?.data && typeof payload.data === 'object' ? payload.data : {};
-  const raw = d.QRCode || d.qrcode || d.QrCode
-    || payload?.QRCode || payload?.qrcode || payload?.QrCode || '';
-  let qr = String(raw || '').trim();
-  if (!qr || qr === 'null' || qr === 'undefined') return '';
-  if (qr.startsWith('data:image')) return qr;
-  const compact = qr.replace(/\s/g, '');
-  if (compact.length > 80 && /^[A-Za-z0-9+/]+=*$/.test(compact)) {
-    return `data:image/png;base64,${compact}`;
-  }
-  return qr;
-}
-
-async function buscarQr(token) {
-  const qrData = await wuzapiFetch('/session/qr', { token, timeoutMs: 15_000 });
-  return extrairQr(qrData);
-}
-
-async function statusComQr(token, extra = {}) {
-  const data = await wuzapiFetch('/session/status', { token });
-  const status = normalizarStatus(data, extra);
-  if (status.loggedIn) {
-    status.qrcode = '';
-    if (!status.phone) {
-      const extraSessao = await telefoneDaSessaoWuzapi(token);
-      if (extraSessao.phone) status.phone = extraSessao.phone;
-      if (extraSessao.jid && !status.jid) status.jid = extraSessao.jid;
-      if (extraSessao.name && !status.name) status.name = extraSessao.name;
-    }
-    return status;
-  }
-  try {
-    status.qrcode = (await buscarQr(token)) || status.qrcode || '';
-  } catch (err) {
-    status.qr_erro = err.message;
-  }
-  return status;
-}
-
-/** /session/status muitas vezes não traz JID; o admin/users traz o chip que leu o QR. */
-async function telefoneDaSessaoWuzapi(token) {
-  try {
-    const lista = await wuzapiAdminFetch('/admin/users');
-    const users = Array.isArray(lista?.data) ? lista.data : (Array.isArray(lista) ? lista : []);
-    const t = tokenWuzapiUtil(token);
-    const u = users.find((x) => t && tokenWuzapiUtil(x.token) === t)
-      || users.find((x) => (x.loggedIn || x.LoggedIn) && (x.jid || x.JID));
-    if (!u) return { phone: '', jid: null, name: null };
-    const jid = u.jid || u.JID || '';
-    return {
-      phone: telefoneFromJid(jid) || telefoneFromJid(u.phone || u.Phone),
-      jid: jid || null,
-      name: u.name || u.Name || null,
-    };
-  } catch {
-    return { phone: '', jid: null, name: null };
-  }
-}
-
-async function conectarSessao(token) {
-  try {
-    return await wuzapiFetch('/session/connect', {
-      method: 'POST',
-      token,
-      timeoutMs: 20_000,
-      body: { Subscribe: ['Message'], Immediate: true },
-    });
-  } catch (err) {
-    const msg = String(err.message || '').toLowerCase();
-    if (/already connected|already logged|in progress|session already/i.test(msg)) {
-      return { already: true, error: err.message };
-    }
-    throw err;
-  }
-}
-
-/**
- * Conecta e espera o QR. Sessão antiga (disconnect sem logout) não gera QR —
- * nesse caso encerra a sessão e conecta de novo.
- */
-async function conectarEObterQr(token, extra = {}) {
-  let status = null;
-  let ultimoErro = null;
-
-  const esperarQr = async (tentativas) => {
-    for (let i = 0; i < tentativas; i++) {
-      await sleep(i === 0 ? 700 : 1000);
-      try {
-        status = await statusComQr(token, extra);
-        ultimoErro = status.qr_erro || null;
-        if (status.loggedIn || status.qrcode) return status;
-      } catch (err) {
-        ultimoErro = err.message;
-      }
-    }
-    return status;
-  };
-
-  await conectarSessao(token);
-  status = await esperarQr(8);
-  if (status?.loggedIn || status?.qrcode) return status;
-
-  try {
-    await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 15_000 });
-  } catch {
-    // sessão pode já estar morta
-  }
-  await sleep(400);
-  await conectarSessao(token);
-  status = await esperarQr(8);
-  if (status?.loggedIn || status?.qrcode) return status;
-
-  return {
-    ...(status || normalizarStatus({}, extra)),
-    qrcode: '',
-    qr_erro: ultimoErro || status?.qr_erro
-      || 'WuzAPI não devolveu o QR. Confira se o serviço está no ar e tente de novo.',
   };
 }
 
@@ -423,9 +285,7 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
       WHERE id = ?
     `).run(
       whatsapp !== undefined
-        ? (pareceNumeroCelular(limparCampoTexto(whatsapp)?.replace(/\D/g, '') || '')
-          ? String(whatsapp).replace(/\D/g, '')
-          : null)
+        ? (limparCampoTexto(whatsapp)?.replace(/\D/g, '') || null)
         : f.whatsapp,
       whatsapp_grupo !== undefined ? limparCampoTexto(whatsapp_grupo) : f.whatsapp_grupo,
       alertaSalvo,
@@ -492,7 +352,6 @@ router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) =>
       tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token) || tokenWuzapiUtil(config.wuzapiToken)),
       admin_token_ok: Boolean(tokenWuzapiUtil(config.wuzapiAdminToken)),
       wuzapi_url: config.wuzapiBaseUrl,
-      alertas_enabled: Boolean(config.whatsappAlertasEnabled),
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });
@@ -735,13 +594,13 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         mensagem: 'Cadastre o token WuzAPI desta filial (ou o token global no .env)',
       });
     }
-    const status = await statusComQr(token, {
+    const data = await wuzapiFetch('/session/status', { token });
+    res.json(normalizarStatus(data, {
       filial_id: f.id,
       nome: f.nome,
       whatsapp: f.whatsapp,
       tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
-    });
-    res.json(status);
+    }));
   } catch (err) {
     const code = err.status === 401 || err.status === 403 ? 502 : (err.status || 500);
     res.status(code).json({ erro: err.message });
@@ -761,25 +620,40 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       });
     }
 
-    const status = await conectarEObterQr(token, {
-      filial_id: f.id,
-      nome: f.nome,
-    });
     const webhook = await garantirWebhook(token, f.id);
+    const data = await wuzapiFetch('/session/connect', {
+      method: 'POST',
+      token,
+      body: { Subscribe: ['Message'], Immediate: true },
+    });
 
-    let mensagem = `Conexão do chatbot “${f.nome}” iniciada — escaneie o QR`;
-    if (status.loggedIn) {
-      mensagem = `Chatbot “${f.nome}” já está conectado`;
-    } else if (!status.qrcode) {
-      mensagem = status.qr_erro
-        || 'Não foi possível gerar o QR. Confira o WuzAPI e clique em Conectar / QR de novo.';
+    await new Promise((r) => setTimeout(r, 1500));
+    let status;
+    try {
+      status = normalizarStatus(await wuzapiFetch('/session/status', { token }), {
+        filial_id: f.id,
+        nome: f.nome,
+      });
+    } catch {
+      status = null;
+    }
+
+    let qrcode = status?.qrcode || '';
+    if (!qrcode && !status?.loggedIn) {
+      try {
+        const qrData = await wuzapiFetch('/session/qr', { token });
+        qrcode = qrData?.data?.QRCode || qrData?.data?.qrcode || '';
+      } catch {
+        // ignore
+      }
     }
 
     res.json({
-      mensagem,
+      mensagem: `Conexão do chatbot “${f.nome}” iniciada — escaneie o QR`,
       webhook,
-      ...status,
-      tem_qr: Boolean(status.qrcode),
+      ...(status || {}),
+      qrcode,
+      wuzapi: data?.data || data,
     });
   } catch (err) {
     res.status(err.status || 500).json({ erro: err.message });
@@ -793,22 +667,16 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     }
     const f = await filialOuErro(req.params.id);
     const token = tokenWuzapiUtil(f.wuzapi_token);
-    let sessionEncerrada = false;
+    let sessionDesconectada = false;
     let aviso = null;
 
     if (token) {
       try {
-        await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 15_000 });
-        sessionEncerrada = true;
-      } catch (errLogout) {
-        try {
-          await wuzapiFetch('/session/disconnect', { method: 'POST', token });
-          sessionEncerrada = true;
-          aviso = 'Sessão desconectada; se o QR antigo voltar, clique em Conectar / QR de novo.';
-        } catch (errDisc) {
-          aviso = errLogout.message || errDisc.message
-            || 'WuzAPI não respondeu; número, grupo e alertas foram limpos mesmo assim.';
-        }
+        await wuzapiFetch('/session/disconnect', { method: 'POST', token });
+        sessionDesconectada = true;
+      } catch (err) {
+        // Sessão pode já estar offline — ainda limpa vínculos locais
+        aviso = err.message || 'Sessão WuzAPI não respondeu; configuração local limpa.';
       }
     } else {
       aviso = 'Sem token próprio — limpou só número, grupo e alertas.';
@@ -825,8 +693,8 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     `).run(f.id);
 
     res.json({
-      mensagem: `Chatbot de ${f.nome} desconectado — número, grupo e alertas apagados. Conecte o próximo chip pelo QR.`,
-      session_desconectada: sessionEncerrada,
+      mensagem: `Chatbot de ${f.nome} desconectado — número, grupo e alertas limpos`,
+      session_desconectada: sessionDesconectada,
       aviso,
       limpos: ['whatsapp', 'whatsapp_grupo', 'whatsapp_alerta'],
     });
@@ -863,24 +731,10 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
   }
   const filialId = Number(req.params.id);
   try {
-    const f = await filialOuErro(filialId);
-    const grupoSelecionado = limparCampoTexto(f.whatsapp_grupo);
+    await filialOuErro(filialId);
     const db = getDb();
-    const limit = Math.min(Number(req.query.limit) || 80, 150);
+    const limit = Math.min(Number(req.query.limit) || 40, 100);
 
-    if (!grupoSelecionado) {
-      return res.json({
-        alertas_enabled: Boolean(config.whatsappAlertasEnabled),
-        grupo: null,
-        resumo: { pendentes: 0, enviados: 0, alertas: 0, chatbot: 0, total: 0 },
-        pendentes: [],
-        enviados: [],
-        logs: [],
-        mensagem: 'Selecione o grupo da medição para ver os envios desse grupo.',
-      });
-    }
-
-    const grupoKey = normalizarDestino(grupoSelecionado)?.logKey || grupoSelecionado;
     const rows = await db.prepare(`
     SELECT
       n.id,
@@ -899,49 +753,18 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
     LEFT JOIN veiculos v ON v.id = n.veiculo_id
     WHERE n.filial_id = ?
        OR (n.filial_id IS NULL AND v.filial_id = ?)
+       OR (
+         n.filial_id IS NULL AND n.veiculo_id IS NULL AND n.destinatario_whatsapp IN (
+           SELECT TRIM(whatsapp_grupo) FROM filiais WHERE id = ? AND whatsapp_grupo IS NOT NULL
+           UNION
+           SELECT TRIM(whatsapp) FROM filiais WHERE id = ? AND whatsapp IS NOT NULL
+           UNION
+           SELECT TRIM(whatsapp_alerta) FROM filiais WHERE id = ? AND whatsapp_alerta IS NOT NULL
+         )
+       )
     ORDER BY n.id DESC
     LIMIT ?
-  `).all(filialId, filialId, limit);
-
-    const destDoGrupo = (dest) => {
-      const n = normalizarDestino(dest);
-      if (n?.isGroup && n.logKey === grupoKey) return true;
-      const a = String(dest || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
-      const b = String(grupoSelecionado).replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
-      return Boolean(a && b && a === b);
-    };
-
-    const ehRuido = (n) => {
-      const msg = String(n.mensagem || '');
-      if (/muitas consultas/i.test(msg)) return true;
-      if (/n[aã]o encontrada/i.test(msg)) return true;
-      if (/frota cadastrada|frota completa/i.test(msg) && !/abrir medi/i.test(msg)) return true;
-      if (/gerando o \*relat/i.test(msg)) return true;
-      if (/comandos:\s*frota/i.test(msg)) return true;
-      return false;
-    };
-
-    const filtradas = rows.filter((n) => destDoGrupo(n.destinatario_whatsapp) && !ehRuido(n));
-
-    const classificarEnvio = (n) => {
-      const msg = String(n.mensagem || '');
-      if (n.tipo === 'alerta_critico' || n.tipo === 'alerta_desgaste') {
-        return {
-          categoria: 'alerta',
-          tipo_label: n.tipo === 'alerta_critico' ? 'Alerta crítico' : 'Alerta monitorar',
-        };
-      }
-      if (n.tipo === 'relatorio_semanal' || /relat[oó]rio gerencial/i.test(msg)) {
-        return { categoria: 'chatbot', tipo_label: 'Chatbot (relatório)' };
-      }
-      if (/muitas consultas/i.test(msg)) {
-        return { categoria: 'chatbot', tipo_label: 'Chatbot (aguarde)' };
-      }
-      if (/\bcomandos:\b/i.test(msg) || /^(frota|placas)\b/i.test(msg)) {
-        return { categoria: 'chatbot', tipo_label: 'Chatbot (frota)' };
-      }
-      return { categoria: 'chatbot', tipo_label: 'Chatbot (link)' };
-    };
+  `).all(filialId, filialId, filialId, filialId, filialId, limit);
 
     const mapRow = (n) => {
       let erro = null;
@@ -949,15 +772,15 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
         const r = n.resposta_api ? JSON.parse(n.resposta_api) : null;
         erro = r?.erro || r?.error || null;
       } catch { /* ignore */ }
-      const { categoria, tipo_label } = classificarEnvio(n);
-      const ehAlerta = categoria === 'alerta';
+      const tipoLabel = {
+        link_veiculo: 'Link medição',
+        alerta_critico: 'Alerta crítico',
+        alerta_desgaste: 'Alerta monitorar',
+      }[n.tipo] || n.tipo;
       return {
         id: n.id,
         tipo: n.tipo,
-        categoria,
-        eh_alerta: ehAlerta,
-        tipo_label,
-        pode_reenviar: !ehAlerta || config.whatsappAlertasEnabled,
+        tipo_label: tipoLabel,
         destinatario: n.destinatario_whatsapp,
         placa: n.placa || null,
         apelido: n.apelido || null,
@@ -972,18 +795,14 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
       };
     };
 
-    const mapped = filtradas.map(mapRow);
+    const mapped = rows.map(mapRow);
     const pendentes = mapped.filter((r) => r.status === 'erro');
     const enviados = mapped.filter((r) => r.status === 'enviado' || r.status === 'entregue');
 
     res.json({
-      alertas_enabled: Boolean(config.whatsappAlertasEnabled),
-      grupo: grupoSelecionado,
       resumo: {
         pendentes: pendentes.length,
         enviados: enviados.length,
-        alertas: mapped.filter((r) => r.eh_alerta).length,
-        chatbot: mapped.filter((r) => !r.eh_alerta).length,
         total: mapped.length,
       },
       pendentes,
@@ -1049,12 +868,6 @@ router.post('/filial/:id/envios/:notifId/reenviar', requireChatbotAcesso, async 
     const n = await db.prepare('SELECT * FROM notificacoes_whatsapp WHERE id = ?').get(notifId);
     if (!n) return res.status(404).json({ erro: 'Envio não encontrado' });
 
-    if (['alerta_critico', 'alerta_desgaste'].includes(n.tipo) && !config.whatsappAlertasEnabled) {
-      return res.status(409).json({
-        erro: 'Alertas pós-medição estão pausados. Este envio não pode ser reenviado.',
-      });
-    }
-
     const result = await enviarERegistrar({
       tipo: n.tipo,
       destinatario: n.destinatario_whatsapp,
@@ -1093,8 +906,8 @@ router.get('/status', requireAdmin, async (_req, res) => {
         mensagem: 'Use o token por filial ou configure WUZAPI_TOKEN no .env',
       });
     }
-    const status = await statusComQr(config.wuzapiToken);
-    res.json(status);
+    const data = await wuzapiFetch('/session/status');
+    res.json(normalizarStatus(data));
   } catch (err) {
     res.status(err.status || 500).json({ erro: err.message, configurado: wuzapiConfigurado() });
   }
@@ -1102,7 +915,8 @@ router.get('/status', requireAdmin, async (_req, res) => {
 
 router.get('/qr', requireAdmin, async (_req, res) => {
   try {
-    const qr = await buscarQr(config.wuzapiToken);
+    const data = await wuzapiFetch('/session/qr');
+    const qr = data?.data?.QRCode || data?.data?.qrcode || data?.QRCode || '';
     res.json({ qrcode: qr, tem_qr: Boolean(qr) });
   } catch (err) {
     res.status(err.status || 500).json({ erro: err.message });
@@ -1111,15 +925,31 @@ router.get('/qr', requireAdmin, async (_req, res) => {
 
 router.post('/connect', requireAdmin, async (_req, res) => {
   try {
-    const status = await conectarEObterQr(config.wuzapiToken);
     const webhook = await garantirWebhook(config.wuzapiToken, null);
+    const data = await wuzapiFetch('/session/connect', {
+      method: 'POST',
+      body: { Subscribe: ['Message'], Immediate: true },
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    let status;
+    try {
+      status = normalizarStatus(await wuzapiFetch('/session/status'));
+    } catch {
+      status = null;
+    }
+    let qrcode = status?.qrcode || '';
+    if (!qrcode && !status?.loggedIn) {
+      try {
+        const qrData = await wuzapiFetch('/session/qr');
+        qrcode = qrData?.data?.QRCode || qrData?.data?.qrcode || '';
+      } catch { /* ignore */ }
+    }
     res.json({
-      mensagem: status.loggedIn
-        ? 'Sessão padrão já está conectada'
-        : (status.qrcode ? 'Conexão padrão iniciada — escaneie o QR' : (status.qr_erro || 'QR não gerado')),
+      mensagem: 'Conexão padrão (.env) iniciada',
       webhook,
-      ...status,
-      tem_qr: Boolean(status.qrcode),
+      ...(status || {}),
+      qrcode,
+      wuzapi: data?.data || data,
     });
   } catch (err) {
     res.status(err.status || 500).json({ erro: err.message });

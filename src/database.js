@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS filiais (
   whatsapp_grupo TEXT,
   whatsapp_alerta TEXT,
   wuzapi_token TEXT,
-  dia_medicao INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -52,7 +51,6 @@ CREATE TABLE IF NOT EXISTS veiculos (
   observacoes TEXT,
   filial_id BIGINT REFERENCES filiais(id) ON DELETE RESTRICT,
   layout_pneus TEXT DEFAULT 'truck_10',
-  dia_medicao INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -130,7 +128,7 @@ CREATE TABLE IF NOT EXISTS configuracoes (
 
 CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
   id BIGSERIAL PRIMARY KEY,
-  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste')),
   destinatario_whatsapp TEXT NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
   medicao_id BIGINT REFERENCES medicoes(id),
@@ -172,26 +170,25 @@ CREATE INDEX IF NOT EXISTS idx_veiculos_filial ON veiculos(filial_id);
 CREATE INDEX IF NOT EXISTS idx_usuarios_filial ON usuarios(filial_id);
 CREATE INDEX IF NOT EXISTS idx_notif_whatsapp_medicao ON notificacoes_whatsapp(medicao_id);
 CREATE INDEX IF NOT EXISTS idx_tokens_acesso_token ON tokens_acesso_rapido(token);
+
+CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
+  id BIGSERIAL PRIMARY KEY,
+  chave TEXT NOT NULL UNIQUE,
+  filial_id BIGINT NOT NULL,
+  chat_jid TEXT,
+  telefone TEXT,
+  fluxo TEXT NOT NULL,
+  passo TEXT NOT NULL,
+  dados JSONB DEFAULT '{}'::jsonb,
+  atualizado_em TIMESTAMPTZ DEFAULT NOW(),
+  expira_em TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
 `;
 
 async function ensureColumn(table, column, ddl) {
   // db.exec quebra o SQL por ';', então blocos DO $$ ... $$ não podem ser usados aqui.
   await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${ddl}`);
-}
-
-async function ensureNotificacoesTipoRelatorio() {
-  try {
-    await db.exec(`
-      ALTER TABLE notificacoes_whatsapp DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check
-    `);
-    await db.exec(`
-      ALTER TABLE notificacoes_whatsapp
-        ADD CONSTRAINT notificacoes_whatsapp_tipo_check
-        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal'))
-    `);
-  } catch (err) {
-    console.warn('[database] constraint tipo notificacoes:', err.message);
-  }
 }
 
 async function seedConfigs() {
@@ -325,12 +322,35 @@ export async function initDatabase() {
 
   // Colunas extras (idempotente)
   await ensureColumn('notificacoes_whatsapp', 'filial_id', 'BIGINT');
-  await ensureNotificacoesTipoRelatorio();
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
-  await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
-  await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
+
+  // Permite tipos extras do menu WhatsApp (relatorio, menu, cadastros…)
+  try {
+    await db.exec(`
+      ALTER TABLE notificacoes_whatsapp
+        DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check
+    `);
+  } catch (err) {
+    console.warn('[migrate] notificacoes tipo check:', err.message);
+  }
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
+      id BIGSERIAL PRIMARY KEY,
+      chave TEXT NOT NULL UNIQUE,
+      filial_id BIGINT NOT NULL,
+      chat_jid TEXT,
+      telefone TEXT,
+      fluxo TEXT NOT NULL,
+      passo TEXT NOT NULL,
+      dados JSONB DEFAULT '{}'::jsonb,
+      atualizado_em TIMESTAMPTZ DEFAULT NOW(),
+      expira_em TIMESTAMPTZ NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
+  `);
 
   await seedConfigs();
   const matrizId = await seedAuthAndFilial();

@@ -20,7 +20,6 @@ import {
   POSICOES_PNEU,
   labelTipoPneu,
 } from '../pneus-layouts.js';
-import { normalizarDiaMedicao } from '../dia-medicao.js';
 
 const router = Router();
 
@@ -510,7 +509,6 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
         km_atual = ?,
         hr_atual = ?,
         observacoes = ?,
-        dia_medicao = ?,
         updated_at = NOW()
       WHERE id = ? AND filial_id = ? AND ativo = 1
     `).run(
@@ -523,9 +521,6 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
       km_atual != null && km_atual !== '' ? parseInt(km_atual, 10) : (veiculo.km_atual || 0),
       hr_atual != null && hr_atual !== '' ? parseFloat(hr_atual) : (veiculo.hr_atual || 0),
       observacoes !== undefined ? (String(observacoes).trim() || null) : veiculo.observacoes,
-      Object.prototype.hasOwnProperty.call(req.body || {}, 'dia_medicao')
-        ? normalizarDiaMedicao(req.body.dia_medicao)
-        : veiculo.dia_medicao,
       veiculo.id,
       req.params.id
     );
@@ -847,11 +842,6 @@ router.put('/:id', async (req, res, next) => {
         tokenNaoAdmin,
         req.params.id
       );
-    }
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'dia_medicao')) {
-      await db.prepare(`
-        UPDATE filiais SET dia_medicao = ?, updated_at = NOW() WHERE id = ?
-      `).run(normalizarDiaMedicao(req.body.dia_medicao), req.params.id);
     }
     res.json({ mensagem: 'Filial atualizada' });
   } catch (err) {
