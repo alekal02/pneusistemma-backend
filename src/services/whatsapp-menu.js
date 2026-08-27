@@ -54,6 +54,27 @@ function normalizarPlaca(texto) {
     .replace(/[^A-Z0-9]/g, '');
 }
 
+/** Placa BR (antiga ABC1234 ou Mercosul ABC1D23) — evita pegar conversa solta */
+function parecePlacaBrasil(texto) {
+  const p = normalizarPlaca(texto);
+  if (p.length !== 7) return false;
+  return /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(p);
+}
+
+/** Candidato a nº de fogo (atalho fora do menu) */
+function pareceFogoAvulso(texto) {
+  const t = String(texto || '').trim();
+  if (!t || /^[0-9]$/.test(t)) return false;
+  if (/^(menu|ajuda|help|frota|placas|lista|relatorio|report|pdf|cancelar|cancela|sair|voltar)$/i.test(norm(t))) {
+    return false;
+  }
+  const fogo = t.replace(/^fogo\s+/i, '').trim();
+  if (!fogo || /\s/.test(fogo)) return false;
+  if (fogo.length < 1 || fogo.length > 24) return false;
+  if (parecePlacaBrasil(fogo)) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9\-_./]*$/.test(fogo);
+}
+
 function ehCancelar(cmd) {
   return /^(0|cancelar|cancela|sair|voltar|menu)$/i.test(cmd);
 }
@@ -130,14 +151,17 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio) {
 }
 
 async function fluxoMedirPlaca(ctx, texto) {
-  const placaLimpa = normalizarPlaca(texto);
-  if (!placaLimpa || placaLimpa.length < 3) {
-    await reply(ctx, 'Envie a *placa* do caminhão (ex.: ABC1D23).\n_0 = cancelar_');
+  if (!parecePlacaBrasil(texto)) {
+    await reply(
+      ctx,
+      'Isso não parece uma *placa* (ex.: ABC1D23 ou ABC1234).\nEnvie a placa ou *0* para cancelar.'
+    );
     return;
   }
+  const placaLimpa = normalizarPlaca(texto);
   const veiculos = await ops.buscarVeiculoPorPlaca(ctx.filialId, placaLimpa);
   if (!veiculos.length) {
-    await reply(ctx, `❌ Placa *${texto}* não encontrada nesta unidade.\n\nDigite *9* para ver a frota ou *menu*.`);
+    await reply(ctx, `❌ Placa *${placaLimpa}* não encontrada nesta unidade.\n\nDigite *9* para ver a frota ou *menu*.`);
     await clear(ctx);
     return;
   }
@@ -150,6 +174,36 @@ async function fluxoMedirPlaca(ctx, texto) {
   const mensagem = await montarMensagemMedicao(veiculo, ctx.phone, ctx.destino);
   await reply(ctx, mensagem);
   await clear(ctx);
+}
+
+async function atalhoFogo(ctx, texto) {
+  const fogo = String(texto).replace(/^fogo\s+/i, '').trim();
+  const pneu = await ops.buscarPneuPorFogo(ctx.filialId, fogo);
+  if (!pneu) return false;
+
+  let onde = 'estoque';
+  if (pneu.status_pneu === 'montado') {
+    onde = `montado em *${pneu.placa || '?'}* (${pneu.posicao || '?'})`;
+  } else if (pneu.status_pneu === 'recapagem') {
+    onde = 'em recapagem';
+  } else if (pneu.status_pneu === 'descarte') {
+    onde = 'no descarte';
+  } else if (pneu.status_pneu === 'estoque') {
+    onde = 'no estoque';
+  }
+
+  await reply(
+    ctx,
+    [
+      `🛞 Fogo *${pneu.numero_fogo}* — ${onde}`,
+      pneu.marca || pneu.modelo ? `• ${[pneu.marca, pneu.modelo].filter(Boolean).join(' ')}` : null,
+      '',
+      'O que fazer?',
+      '*4* Montar/trocar · *5* Estoque · *6* Recap · *7* Descarte',
+      '*0* / *menu* — menu completo',
+    ].filter(Boolean).join('\n')
+  );
+  return true;
 }
 
 async function enviarRelatorio(ctx) {
@@ -245,11 +299,11 @@ async function iniciarOpcao(ctx, n) {
 async function passoCaminhao(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
   if (sessao.passo === 'placa') {
-    const placa = normalizarPlaca(texto);
-    if (placa.length < 5) {
-      await reply(ctx, 'Placa inválida. Envie de novo (ex.: ABC1D23).');
+    if (!parecePlacaBrasil(texto)) {
+      await reply(ctx, 'Placa inválida. Use o formato ABC1D23 ou ABC1234.\n_0 = cancelar_');
       return;
     }
+    const placa = normalizarPlaca(texto);
     d.placa = placa;
     await setFluxo(ctx, 'caminhao', 'apelido', d);
     await reply(ctx, 'Apelido do caminhão? (ou `-` para pular)');
@@ -416,6 +470,10 @@ async function passoPneu(ctx, sessao, texto) {
 async function passoTroca(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
   if (sessao.passo === 'placa') {
+    if (!parecePlacaBrasil(texto)) {
+      await reply(ctx, 'Placa inválida (ex.: ABC1D23). Tente de novo ou *0* para cancelar.');
+      return;
+    }
     const placa = normalizarPlaca(texto);
     const veiculos = await ops.buscarVeiculoPorPlaca(ctx.filialId, placa);
     if (!veiculos.length) {
@@ -778,12 +836,18 @@ export async function processarMensagemMenu(ctx) {
     return { handled: true };
   }
 
-  // Placa direta (sem menu) — Fase A compatível
-  const placaLimpa = normalizarPlaca(texto);
-  if (placaLimpa && placaLimpa.length >= 5 && placaLimpa.length <= 8 && normalizarPlaca(texto) === placaLimpa) {
+  // Placa válida (Mercosul/antiga) → medir
+  if (parecePlacaBrasil(texto)) {
     await fluxoMedirPlaca(ctx, texto);
     return { handled: true };
   }
 
+  // Nº de fogo cadastrado → status + atalhos (só se existir no banco)
+  if (pareceFogoAvulso(texto)) {
+    const ok = await atalhoFogo(ctx, texto);
+    if (ok) return { handled: true };
+  }
+
+  // Conversa do grupo → ignora em silêncio
   return { handled: false };
 }

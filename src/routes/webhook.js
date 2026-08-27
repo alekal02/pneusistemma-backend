@@ -7,7 +7,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { getDb } from '../database.js';
 import { config } from '../config.js';
 import { enviarERegistrar, limparTelefone, normalizarDestino } from '../services/whatsapp.js';
-import { processarMensagemMenu, textoMenu } from '../services/whatsapp-menu.js';
+import { processarMensagemMenu } from '../services/whatsapp-menu.js';
 
 const router = Router();
 
@@ -103,10 +103,9 @@ function deveIgnorarMensagemPropria(event) {
   if (/^(frota|placas|lista|ajuda|help|menu|\?|cancelar|cancela|sair|voltar)$/i.test(cmd)) return false;
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) return false;
   if (/^[0-9]$/.test(cmd)) return false;
+  // Placa BR estrita (7 chars Mercosul/antiga)
   const placa = normalizarPlacaTexto(text);
-  if (placa && placa.length >= 5 && placa.length <= 8 && normalizarPlacaTexto(text) === placa) {
-    return false;
-  }
+  if (/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)) return false;
   return true;
 }
 
@@ -359,13 +358,8 @@ router.post('/whatsapp', async (req, res) => {
         });
         return;
       }
-      return enviarERegistrar({
-        tipo: 'link_veiculo',
-        destinatario: destinoEnvio,
-        mensagem: `Não entendi.\n\n${textoMenu()}`,
-        filialId: canal?.escopoFilialId || null,
-        fallbackDestinatario: phone,
-      });
+      // Conversa livre no grupo — não responde
+      console.log('[webhook] ignorado (conversa)', { texto: texto.slice(0, 40) });
     }).catch((err) => {
       console.error('[webhook] menu falhou:', err.message);
       enviarERegistrar({
