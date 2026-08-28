@@ -6,8 +6,21 @@ import { Router } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { getDb } from '../database.js';
 import { config } from '../config.js';
-import { enviarERegistrar, limparTelefone, normalizarDestino } from '../services/whatsapp.js';
-import { processarMensagemMenu } from '../services/whatsapp-menu.js';
+import { enviarERegistrar, enviarDocumentoERegistrar, limparTelefone, normalizarDestino, idGrupoCanonico } from '../services/whatsapp.js';
+import {
+  gerarTokenAcessoRapido,
+  resumoStatusPneusVeiculoRapido,
+} from '../services/acesso-rapido.js';
+import { gerarRelatorioSemanalPdfBuffer, formatarDataHoraBrasil } from '../services/relatorio-semanal-pdf.js';
+import {
+  parseComandoRecap,
+  buscarPneuPorFogo,
+  enviarPneuParaRecap,
+  receberRecapPneu,
+  AJUDA_RECAP,
+  formatarDataBr,
+} from '../services/pneu-recap.js';
+import { montarMensagemAlertaVaga, notificarAlertaPosicaoVaga } from '../services/alerta-posicao-vaga.js';
 
 const router = Router();
 
@@ -32,6 +45,80 @@ function normalizarPlacaTexto(texto) {
     .toUpperCase()
     .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
     .replace(/[^A-Z0-9]/g, '');
+}
+
+/** Placa brasileira antiga (ABC1234) ou Mercosul (ABC1D23). Ignora conversa comum. */
+function extrairPlacaValida(texto) {
+  const compact = normalizarPlacaTexto(texto);
+  if (/^[A-Z]{3}[0-9][A-Z][0-9]{2}$/.test(compact)) return compact;
+  if (/^[A-Z]{3}[0-9]{4}$/.test(compact)) return compact;
+  const raw = String(texto || '').toUpperCase();
+  const mercosul = raw.match(/\b[A-Z]{3}\s*-?\s*[0-9][A-Z][0-9]{2}\b/);
+  if (mercosul) return normalizarPlacaTexto(mercosul[0]);
+  const antiga = raw.match(/\b[A-Z]{3}\s*-?\s*[0-9]{4}\b/);
+  if (antiga) return normalizarPlacaTexto(antiga[0]);
+  return null;
+}
+
+async function listarFrotaMensagem(db, filialId = null) {
+  let sql = `
+    SELECT v.placa, v.apelido, v.tipo, f.nome AS filial_nome
+    FROM veiculos v
+    JOIN filiais f ON f.id = v.filial_id
+    WHERE v.ativo = 1
+  `;
+  const params = [];
+  if (filialId) {
+    sql += ` AND v.filial_id = ?`;
+    params.push(filialId);
+  }
+  sql += ` ORDER BY f.nome, v.placa`;
+  const rows = await db.prepare(sql).all(...params);
+  if (!rows.length) {
+    return '📋 Nenhum veículo ativo cadastrado na frota.';
+  }
+  const linhas = rows.map((v) => {
+    const apelido = v.apelido ? ` — ${v.apelido}` : '';
+    return `• *${v.placa}*${apelido} (${v.tipo})`;
+  });
+  const titulo = filialId
+    ? `📋 *Frota cadastrada* (${rows.length}):`
+    : `📋 *Frota completa* (${rows.length}):`;
+  return `${titulo}\n${linhas.join('\n')}\n\nEnvie a *placa* para abrir a medição.`;
+}
+
+async function buscarVeiculosPorPlaca(db, placaLimpa, filialPreferida = null) {
+  const baseSql = `
+    SELECT v.*, f.nome as filial_nome,
+      REPLACE(REPLACE(UPPER(v.placa), '-', ''), ' ', '') AS placa_norm
+    FROM veiculos v
+    JOIN filiais f ON f.id = v.filial_id
+    WHERE v.ativo = 1
+      AND (
+        REPLACE(REPLACE(UPPER(v.placa), '-', ''), ' ', '') LIKE ?
+        OR REPLACE(REPLACE(UPPER(IFNULL(v.apelido,'')), '-', ''), ' ', '') LIKE ?
+      )
+  `;
+
+  const like = `%${placaLimpa}%`;
+
+  if (filialPreferida) {
+    const locais = await db.prepare(`${baseSql} AND v.filial_id = ? ORDER BY v.placa LIMIT 20`)
+      .all(like, like, filialPreferida);
+    return { veiculos: locais, escopo: 'filial' };
+  }
+
+  const todos = await db.prepare(`${baseSql} ORDER BY v.placa LIMIT 20`).all(like, like);
+  return { veiculos: todos, escopo: 'todas' };
+}
+
+function escolherVeiculoExato(veiculos, placaLimpa) {
+  if (!veiculos?.length) return [];
+  const exatos = veiculos.filter((v) => {
+    const p = String(v.placa_norm || v.placa || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+    return p === placaLimpa;
+  });
+  return exatos.length ? exatos : veiculos;
 }
 
 function validarHmacWebhook(req) {
@@ -95,27 +182,27 @@ function deveIgnorarMensagemPropria(event) {
   const text = String(extrairTextoMensagem(event) || '').trim();
   if (!text) return true;
   // Eco das respostas do sistema
-  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada|relat[oó]rio gerencial|Gerando o \*relat|PneuSistemma — Menu|Confirma /i.test(text)) {
+  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada|relat[oó]rio gerencial|Gerando o \*relat|enviado para recap|recebido da recap|\*Enviar pneu para recap\*|j[aá] est[aá] em recapagem|Posi[cç][aã]o vaga/i.test(text)) {
     return true;
   }
   // Comandos e placa pura → processa mesmo se fromMe
   const cmd = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
-  if (/^(frota|placas|lista|ajuda|help|menu|\?|cancelar|cancela|sair|voltar)$/i.test(cmd)) return false;
+  if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd)) return false;
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) return false;
-  if (/^[0-9]$/.test(cmd)) return false;
-  // Placa BR estrita (7 chars Mercosul/antiga)
-  const placa = normalizarPlacaTexto(text);
-  if (/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)) return false;
+  if (/^(recap|recapagem|receber(\s+recap)?|pneu\s+fogo)\b/i.test(cmd)) return false;
+  const placa = extrairPlacaValida(text);
+  if (placa) return false;
   return true;
 }
 
 function jidsGrupoIguais(a, b) {
+  const idA = idGrupoCanonico(a);
+  const idB = idGrupoCanonico(b);
+  if (idA && idB && idA === idB) return true;
   const na = normalizarDestino(a);
   const nb = normalizarDestino(b);
   if (na?.isGroup && nb?.isGroup && na.logKey === nb.logKey) return true;
-  const da = String(a || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
-  const db = String(b || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
-  return Boolean(da && db && da === db);
+  return false;
 }
 
 export function extrairChatJid(event) {
@@ -133,12 +220,30 @@ export function extrairChatJid(event) {
     root.from,
     event?.from,
   ];
+  const grupos = [];
+  const outros = [];
   for (const c of candidates) {
     if (!c) continue;
     const s = String(c);
-    if (s.includes('@g.us') || s.includes('@s.whatsapp.net') || /\d/.test(s)) {
-      return s;
-    }
+    if (s.includes('@g.us')) grupos.push(s);
+    else if (s.includes('@s.whatsapp.net') || s.includes('@lid') || /\d/.test(s)) outros.push(s);
+  }
+  return grupos[0] || outros[0] || null;
+}
+
+function flagMensagemGrupo(event) {
+  const root = raizPayloadMensagem(event);
+  const info = root.Info || root.info || {};
+  return [info.IsGroup, info.isGroup, info.IsGroupMessage, root.isGroup, event?.isGroup, event?.IsGroup]
+    .some((v) => v === true || v === 'true' || v === 1 || v === '1');
+}
+
+function extrairJidGrupo(event) {
+  const jid = extrairChatJid(event);
+  if (jid && String(jid).includes('@g.us')) return String(jid);
+  if (jid && idGrupoCanonico(jid)) {
+    const id = idGrupoCanonico(jid);
+    return `${id}@g.us`;
   }
   return null;
 }
@@ -196,12 +301,21 @@ export function extrairTextoMensagem(event) {
 }
 
 function ehMensagemDeGrupo(event) {
-  const jid = extrairChatJid(event) || '';
-  return String(jid).includes('@g.us');
+  if (flagMensagemGrupo(event)) return true;
+  const jid = extrairJidGrupo(event) || extrairChatJid(event) || '';
+  return String(jid).includes('@g.us') || Boolean(idGrupoCanonico(jid));
+}
+
+function ehChatDeGrupo(chatJid, isGroupFlag = false) {
+  if (isGroupFlag) return true;
+  const jid = String(chatJid || '');
+  return jid.includes('@g.us') || Boolean(idGrupoCanonico(jid));
 }
 
 /** Resolve canal da unidade a partir do chat (grupo ou número do chatbot) */
-async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
+async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null, isGroup = false) {
+  const chatDeGrupo = ehChatDeGrupo(chatJid, isGroup);
+
   let sql = `
     SELECT id, nome, codigo, whatsapp, whatsapp_grupo, wuzapi_token
     FROM filiais
@@ -222,37 +336,51 @@ async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
   const chatNorm = normalizarDestino(chatJid);
   const phoneNorm = phone ? limparTelefone(phone) : '';
 
-  for (const f of filiais) {
-    if (f.whatsapp_grupo) {
-      if (jidsGrupoIguais(f.whatsapp_grupo, chatJid)) {
-        // Sempre responde no chat da mensagem (JID atual), não no valor antigo salvo
-        const replyTo = chatNorm?.phone
-          || normalizarDestino(chatJid)?.phone
-          || normalizarDestino(f.whatsapp_grupo)?.phone;
-        return { filial: f, replyTo, escopoFilialId: f.id };
-      }
+  // Grupo: só responde se o JID for exatamente o grupo salvo na unidade.
+  // ?filial_id= do webhook NÃO autoriza outros grupos (WuzAPI manda JID sem @g.us).
+  if (chatDeGrupo) {
+    for (const f of filiais) {
+      if (!f.whatsapp_grupo) continue;
+      if (!jidsGrupoIguais(f.whatsapp_grupo, chatJid)) continue;
+      const replyTo = chatNorm?.phone
+        || normalizarDestino(chatJid)?.phone
+        || normalizarDestino(f.whatsapp_grupo)?.phone;
+      return { filial: f, replyTo, escopoFilialId: f.id };
     }
+    return null;
+  }
+
+  for (const f of filiais) {
     if (f.whatsapp && phoneNorm) {
       const n = limparTelefone(f.whatsapp);
-      // Remetente usa o chip do chatbot da filial, ou chat privado com o bot
       if (n && n === phoneNorm) {
         return { filial: f, replyTo: n, escopoFilialId: f.id };
       }
     }
   }
 
-  // Webhook veio com ?filial_id= — escopo forçado mesmo sem match de grupo
+  // Hint ?filial_id= só vale no privado do chip
   if (filialIdHint && filiais[0]) {
     const f = filiais[0];
-    const replyTo = chatNorm?.isGroup
-      ? chatNorm.phone
-      : (phoneNorm || limparTelefone(f.whatsapp) || chatNorm?.phone);
+    const replyTo = phoneNorm || limparTelefone(f.whatsapp) || chatNorm?.phone;
     if (replyTo) {
       return { filial: f, replyTo, escopoFilialId: f.id };
     }
   }
 
   return null;
+}
+
+/** Releitura no banco: mensagem de grupo só segue se for o grupo salvo da unidade. */
+async function mensagemNoGrupoEscolhido(db, filialId, chatJid) {
+  if (!filialId || !chatJid) return false;
+  const f = await db.prepare(`
+    SELECT whatsapp_grupo FROM filiais
+    WHERE id = ? AND ativo = 1
+  `).get(filialId);
+  const salvo = String(f?.whatsapp_grupo || '').trim();
+  if (!salvo) return false;
+  return jidsGrupoIguais(salvo, chatJid);
 }
 
 router.post('/whatsapp', async (req, res) => {
@@ -284,20 +412,12 @@ router.post('/whatsapp', async (req, res) => {
       return res.status(200).json({ ok: true, ignored: 'from_me' });
     }
 
-    const chatJid = extrairChatJid(event);
-    const isGroup = ehMensagemDeGrupo(event) || Boolean(normalizarDestino(chatJid)?.isGroup);
+    const chatJid = extrairJidGrupo(event) || extrairChatJid(event);
+    const isGroup = ehMensagemDeGrupo(event)
+      || Boolean(extrairJidGrupo(event))
+      || Boolean(normalizarDestino(chatJid)?.isGroup);
     const phone = extrairTelefone(event);
     const body = extrairTextoMensagem(event);
-
-    console.log('[webhook] msg', {
-      event: eventName || '(sem nome)',
-      chat: chatJid,
-      isGroup,
-      phone,
-      body: body ? String(body).slice(0, 80) : null,
-      filial_hint: Number(req.query.filial_id) || null,
-      from_me: ehMensagemPropria(event),
-    });
 
     if (!body) {
       return res.status(200).json({ ok: true, ignored: 'sem_texto' });
@@ -305,70 +425,310 @@ router.post('/whatsapp', async (req, res) => {
 
     const db = getDb();
     const filialIdHint = Number(req.query.filial_id) || null;
-    const canal = await resolverCanalFilial(db, chatJid, phone, filialIdHint);
+    const canal = await resolverCanalFilial(db, chatJid, phone, filialIdHint, isGroup);
+    const chatDeGrupo = isGroup || ehChatDeGrupo(chatJid, isGroup);
 
-    // Grupo não cadastrado em nenhuma filial → ignora
-    if (isGroup && !canal) {
-      console.warn('[webhook] grupo sem filial cadastrada:', chatJid, 'hint=', filialIdHint);
-      return res.status(200).json({
-        ok: true,
-        ignored: 'grupo_nao_cadastrado',
-        chat: chatJid,
-        dica: 'Salve o grupo no painel WhatsApp e clique em Conectar / QR para reaplicar o webhook.',
-      });
+    // Toda mensagem de grupo: relê o grupo salvo. Sem match, não responde.
+    if (chatDeGrupo) {
+      const filialId = canal?.escopoFilialId || filialIdHint;
+      const noGrupoEscolhido = await mensagemNoGrupoEscolhido(db, filialId, chatJid);
+      if (!noGrupoEscolhido) {
+        console.info('[webhook] grupo ignorado (não é o selecionado)', {
+          chat: chatJid,
+          filial_id: filialId,
+        });
+        return res.status(200).json({
+          ok: true,
+          ignored: 'grupo_nao_selecionado',
+          chat: chatJid,
+        });
+      }
     }
 
     const replyTo = canal?.replyTo || phone;
     if (!replyTo) {
       return res.status(200).json({ ok: true });
     }
-    // Em grupo, prioriza o JID do chat da mensagem (mais atual que o valor salvo)
-    const destinoEnvio = (isGroup && chatJid) ? chatJid : replyTo;
+    // Responde só no grupo salvo (nunca no JID de outro grupo)
+    const destinoEnvio = chatDeGrupo
+      ? (normalizarDestino(canal?.filial?.whatsapp_grupo)?.phone
+        || canal?.replyTo
+        || chatJid)
+      : replyTo;
 
     // Rate limit por remetente (não pelo grupo — evita bloquear a frota inteira)
     const rateKey = phone || destinoEnvio;
     if (!rateLimitOk(rateKey)) {
-      console.warn(`[webhook] Rate limit: ${rateKey}`);
-      await enviarERegistrar({
-        tipo: 'link_veiculo',
-        destinatario: destinoEnvio,
-        mensagem: '⏳ Muitas consultas em pouco tempo. Aguarde 1 minuto e envie a placa novamente.',
-        filialId: canal?.escopoFilialId || null,
-        fallbackDestinatario: phone,
-      });
       return res.status(200).json({ ok: true, rate_limited: true });
     }
 
     const texto = String(body || '').trim();
+    const cmd = texto.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
 
-    // Menu numerado + fluxos A/B/C (medir, cadastros, troca, recap, descarte, relatório…)
-    res.status(200).json({ ok: true, aceito: true, via: 'menu' });
-    processarMensagemMenu({
-      texto,
-      phone,
-      destino: destinoEnvio,
-      filialId: canal?.escopoFilialId || null,
-      chatJid: chatJid || null,
-    }).then((r) => {
-      if (r?.handled) {
-        console.log('[webhook] menu handled', {
-          phone,
-          filial: canal?.escopoFilialId || null,
-          texto: texto.slice(0, 40),
-        });
-        return;
-      }
-      // Conversa livre no grupo — não responde
-      console.log('[webhook] ignorado (conversa)', { texto: texto.slice(0, 40) });
-    }).catch((err) => {
-      console.error('[webhook] menu falhou:', err.message);
-      enviarERegistrar({
+    // Comandos de frota / ajuda
+    if (/^(frota|placas|lista|ajuda|help|menu|\?)$/i.test(cmd) || /^(frota|placas)\b/i.test(cmd)) {
+      const mensagem = `${await listarFrotaMensagem(db, canal?.escopoFilialId || null)}\n\n_Comandos: frota | relatorio | recap | placa do caminhão_`;
+      await enviarERegistrar({
         tipo: 'link_veiculo',
         destinatario: destinoEnvio,
-        mensagem: `❌ Erro: ${err.message}\n\nDigite *menu*.`,
+        mensagem,
         filialId: canal?.escopoFilialId || null,
         fallbackDestinatario: phone,
-      }).catch(() => {});
+        registrar: false,
+      });
+      return res.status(200).json({ ok: true, comando: 'frota' });
+    }
+
+    // Relatório gerencial PDF (mesmo da unidade)
+    if (/^(relatorio|report|pdf)\b/i.test(cmd)) {
+      const filialId = canal?.escopoFilialId || null;
+      if (!filialId) {
+        await enviarERegistrar({
+          tipo: 'relatorio_semanal',
+          destinatario: destinoEnvio,
+          mensagem: '❌ Não identifiquei a unidade deste chat. Configure o grupo no painel WhatsApp e tente de novo.',
+          filialId: null,
+          fallbackDestinatario: phone,
+          registrar: false,
+        });
+        return res.status(200).json({ ok: true, comando: 'relatorio', erro: 'sem_filial' });
+      }
+
+      res.status(200).json({ ok: true, comando: 'relatorio', aceito: true, filial_id: filialId });
+
+      (async () => {
+        try {
+          const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(filialId, {
+            geradoPor: `WhatsApp · ${phone || destinoEnvio}`,
+          });
+
+          const geradoEm = formatarDataHoraBrasil(dados.gerado_em);
+          const unidade = dados.filial?.nome || 'Unidade';
+          const caption = `Relatório gerencial — ${unidade} · gerado em ${geradoEm}`;
+
+          const envio = await enviarDocumentoERegistrar({
+            tipo: 'relatorio_semanal',
+            destinatario: destinoEnvio,
+            buffer,
+            fileName: filename,
+            mensagem: caption,
+            caption,
+            filialId,
+            fallbackDestinatario: phone,
+          });
+
+          if (!envio?.ok) {
+            await enviarERegistrar({
+              tipo: 'relatorio_semanal',
+              destinatario: destinoEnvio,
+              mensagem: '❌ Não consegui enviar o PDF. Tente de novo em instantes.',
+              filialId,
+              fallbackDestinatario: phone,
+              registrar: false,
+            });
+          } else {
+            console.log('[webhook] relatorio enviado', {
+              filial_id: filialId,
+              arquivo: filename,
+              via: envio.via || 'grupo',
+              bytes: buffer.length,
+            });
+          }
+        } catch (err) {
+          console.error('[webhook] relatorio falhou:', err.message);
+          try {
+            await enviarERegistrar({
+              tipo: 'relatorio_semanal',
+              destinatario: destinoEnvio,
+              mensagem: '❌ Não consegui gerar o PDF. Tente de novo em instantes.',
+              filialId,
+              fallbackDestinatario: phone,
+              registrar: false,
+            });
+          } catch { /* ignore */ }
+        }
+      })();
+
+      return;
+    }
+
+    // Enviar / receber recap pelo fogo
+    const cmdRecap = parseComandoRecap(texto);
+    if (cmdRecap) {
+      const filialId = canal?.escopoFilialId || null;
+      const responder = async (mensagem) => {
+        await enviarERegistrar({
+          tipo: 'link_veiculo',
+          destinatario: destinoEnvio,
+          mensagem,
+          filialId,
+          fallbackDestinatario: phone,
+          registrar: false,
+        });
+      };
+
+      if (!filialId) {
+        await responder('❌ Não identifiquei a unidade deste chat. Configure o grupo no painel WhatsApp e tente de novo.');
+        return res.status(200).json({ ok: true, comando: 'recap', erro: 'sem_filial' });
+      }
+
+      if (cmdRecap.tipo === 'ajuda' || cmdRecap.erro) {
+        await responder(cmdRecap.erro ? `❌ ${cmdRecap.erro}\n\n${AJUDA_RECAP}` : AJUDA_RECAP);
+        return res.status(200).json({ ok: true, comando: 'recap', ajuda: true });
+      }
+
+      try {
+        const pneu = await buscarPneuPorFogo(db, filialId, cmdRecap.fogo);
+        if (!pneu) {
+          await responder(`❌ Pneu fogo *${cmdRecap.fogo}* não encontrado nesta unidade.`);
+          return res.status(200).json({ ok: true, comando: 'recap', erro: 'nao_encontrado' });
+        }
+
+        if (cmdRecap.tipo === 'enviar') {
+          const result = await enviarPneuParaRecap(db, {
+            pneu,
+            filialId,
+            fornecedor: cmdRecap.fornecedor,
+            data: cmdRecap.data,
+            detalhesExtra: `WhatsApp · ${phone || destinoEnvio}`,
+          });
+          const dataBr = formatarDataBr(result.pneu?.recap_enviado_em);
+          let resposta = `✅ *${result.mensagem}*\n\nFogo ${pneu.numero_fogo} · em recapagem${dataBr ? ` · ${dataBr}` : ''}.\nQuando voltar: *receber recap ${pneu.numero_fogo}*`;
+          if (result.vaga) {
+            let alertaMsg = '';
+            try {
+              const alerta = await notificarAlertaPosicaoVaga({
+                vaga: result.vaga,
+                motivo: 'recap',
+                detalhesAcao: result.mensagem,
+                excetoDestino: destinoEnvio,
+                whatsappOrigem: phone || destinoEnvio,
+              });
+              alertaMsg = alerta.mensagem
+                || montarMensagemAlertaVaga({
+                  vaga: result.vaga,
+                  motivo: 'recap',
+                  link: alerta.link,
+                });
+            } catch (errAlerta) {
+              console.warn('[webhook] alerta vaga:', errAlerta.message);
+              alertaMsg = montarMensagemAlertaVaga({ vaga: result.vaga, motivo: 'recap' });
+            }
+            if (alertaMsg) resposta += `\n\n${alertaMsg}`;
+          }
+          await responder(resposta);
+          return res.status(200).json({ ok: true, comando: 'enviar_recap', pneu_id: pneu.id });
+        }
+
+        const result = await receberRecapPneu(db, {
+          pneu,
+          filialId,
+          data: cmdRecap.data,
+          detalhesExtra: `WhatsApp · ${phone || destinoEnvio}`,
+        });
+        await responder(`✅ *${result.mensagem}*\n\nPneu voltou ao estoque, pronto para montar.`);
+        return res.status(200).json({ ok: true, comando: 'receber_recap', pneu_id: pneu.id });
+      } catch (err) {
+        await responder(`❌ ${err.message || 'Não consegui registrar a recap.'}\n\n${AJUDA_RECAP}`);
+        return res.status(200).json({ ok: true, comando: 'recap', erro: err.message });
+      }
+    }
+
+    const placaLimpa = extrairPlacaValida(texto);
+    if (!placaLimpa) {
+      return res.status(200).json({ ok: true, ignored: 'nao_e_placa' });
+    }
+
+    const { veiculos: encontrados } = await buscarVeiculosPorPlaca(
+      db,
+      placaLimpa,
+      canal?.escopoFilialId || null
+    );
+    const veiculos = escolherVeiculoExato(encontrados, placaLimpa);
+
+    if (veiculos.length === 0) {
+      await enviarERegistrar({
+        tipo: 'link_veiculo',
+        destinatario: destinoEnvio,
+        mensagem: `❌ Placa *${placaLimpa}* não encontrada nesta unidade. Envie *frota* para ver as placas.`,
+        filialId: canal?.escopoFilialId || null,
+        fallbackDestinatario: phone,
+        registrar: false,
+      });
+      return res.status(200).json({ ok: true, encontrados: 0 });
+    }
+
+    if (veiculos.length > 1) {
+      const lista = veiculos.map((v) => `• ${v.placa}${v.apelido ? ` — ${v.apelido}` : ''} (${v.tipo})`).join('\n');
+      await enviarERegistrar({
+        tipo: 'link_veiculo',
+        destinatario: destinoEnvio,
+        mensagem: `🔍 Encontrei ${veiculos.length} veículos:\n${lista}\n\nEnvie a placa exata para abrir a medição.`,
+        filialId: canal?.escopoFilialId || null,
+        fallbackDestinatario: phone,
+        registrar: false,
+      });
+      return res.status(200).json({ ok: true, encontrados: veiculos.length });
+    }
+
+    const veiculo = veiculos[0];
+
+    const { link } = await gerarTokenAcessoRapido({
+      veiculoId: veiculo.id,
+      filialId: veiculo.filial_id,
+      whatsappOrigem: phone || destinoEnvio,
+    });
+
+    const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
+
+    let mensagem = `🚛 *${veiculo.placa}* — ${veiculo.tipo}\n`;
+    if (veiculo.apelido) mensagem += `🏷️ ${veiculo.apelido}\n`;
+    mensagem += `📍 Filial: ${veiculo.filial_nome}\n\n`;
+
+    if (ultimaMedicao) {
+      mensagem += `📊 Última medição: ${ultimaMedicao.data_medicao}\n`;
+      mensagem += `Posição ${ultimaMedicao.posicao}${ultimaMedicao.numero_fogo ? ` — Fogo ${ultimaMedicao.numero_fogo}` : ''}\n`;
+      mensagem += `Sulco: ${ultimaMedicao.menor_sulco ?? '-'}mm\n\n`;
+    }
+
+    if (criticos > 0) {
+      mensagem += `🚨 *${criticos} pneu(s) em estado CRÍTICO*\n`;
+    }
+    if (alertas > 0) {
+      mensagem += `⚠️ *${alertas} pneu(s) em ALERTA*\n`;
+    }
+    if (criticos === 0 && alertas === 0) {
+      mensagem += `✅ Todos os pneus estão OK\n`;
+    }
+
+    mensagem += `\n👉 *Abrir medição de sulcos:*\n${link}\n\n`;
+    mensagem += `Meça todas as posições e salve.\n`;
+    mensagem += `_Link válido por 24 horas._`;
+
+    // Responde o WuzAPI na hora e envia a mensagem em paralelo (não bloqueia o webhook)
+    res.status(200).json({
+      ok: true,
+      veiculo_id: veiculo.id,
+      placa: veiculo.placa,
+      canal_filial_id: canal?.escopoFilialId || null,
+      aceito: true,
+    });
+
+    enviarERegistrar({
+      tipo: 'link_veiculo',
+      destinatario: destinoEnvio,
+      mensagem,
+      veiculoId: veiculo.id,
+      linkPreview: false,
+      filialId: canal?.escopoFilialId || veiculo.filial_id,
+      token: canal?.filial?.wuzapi_token,
+      fallbackDestinatario: phone,
+    }).then((envio) => {
+      if (!envio?.ok) {
+        console.error('[webhook] falha ao enviar link', veiculo.placa, envio?.erro || '');
+      }
+    }).catch((err) => {
+      console.error('[webhook] falha ao enviar link', err.message);
     });
     return;
   } catch (err) {

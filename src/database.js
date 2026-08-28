@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS filiais (
   ativo INTEGER DEFAULT 1,
   whatsapp TEXT,
   whatsapp_grupo TEXT,
+  whatsapp_grupo_nome TEXT,
   whatsapp_alerta TEXT,
   wuzapi_token TEXT,
   dia_medicao INTEGER,
@@ -130,7 +131,7 @@ CREATE TABLE IF NOT EXISTS configuracoes (
 
 CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
   id BIGSERIAL PRIMARY KEY,
-  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'alerta_posicao', 'relatorio_semanal')),
   destinatario_whatsapp TEXT NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
   medicao_id BIGINT REFERENCES medicoes(id),
@@ -173,19 +174,23 @@ CREATE INDEX IF NOT EXISTS idx_usuarios_filial ON usuarios(filial_id);
 CREATE INDEX IF NOT EXISTS idx_notif_whatsapp_medicao ON notificacoes_whatsapp(medicao_id);
 CREATE INDEX IF NOT EXISTS idx_tokens_acesso_token ON tokens_acesso_rapido(token);
 
-CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
+CREATE TABLE IF NOT EXISTS alertas_posicao_vaga (
   id BIGSERIAL PRIMARY KEY,
-  chave TEXT NOT NULL UNIQUE,
-  filial_id BIGINT NOT NULL,
-  chat_jid TEXT,
-  telefone TEXT,
-  fluxo TEXT NOT NULL,
-  passo TEXT NOT NULL,
-  dados JSONB DEFAULT '{}'::jsonb,
-  atualizado_em TIMESTAMPTZ DEFAULT NOW(),
-  expira_em TIMESTAMPTZ NOT NULL
+  filial_id BIGINT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
+  veiculo_id BIGINT NOT NULL REFERENCES veiculos(id) ON DELETE CASCADE,
+  posicao TEXT NOT NULL,
+  motivo TEXT NOT NULL DEFAULT 'recap',
+  pneu_id BIGINT REFERENCES pneus(id) ON DELETE SET NULL,
+  numero_fogo TEXT,
+  detalhes TEXT,
+  aberto INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  resolvido_em TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
+CREATE INDEX IF NOT EXISTS idx_alertas_vaga_abertos
+  ON alertas_posicao_vaga(filial_id, aberto);
+CREATE INDEX IF NOT EXISTS idx_alertas_vaga_posicao
+  ON alertas_posicao_vaga(veiculo_id, posicao, aberto);
 `;
 
 async function ensureColumn(table, column, ddl) {
@@ -201,7 +206,7 @@ async function ensureNotificacoesTipoRelatorio() {
     await db.exec(`
       ALTER TABLE notificacoes_whatsapp
         ADD CONSTRAINT notificacoes_whatsapp_tipo_check
-        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal'))
+        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'alerta_posicao', 'relatorio_semanal'))
     `);
   } catch (err) {
     console.warn('[database] constraint tipo notificacoes:', err.message);
@@ -265,7 +270,8 @@ async function seedAuthAndFilial() {
 
   await db.prepare(`UPDATE veiculos SET filial_id = ? WHERE filial_id IS NULL`).run(matriz.id);
 
-  const admin = await db.prepare(`SELECT id FROM usuarios WHERE papel = 'admin' LIMIT 1`).get();
+  const admin = await db.prepare(`SELECT id, login FROM usuarios WHERE papel = 'admin' LIMIT 1`).get();
+  const resetAdmin = String(process.env.ADMIN_RESET_PASSWORD || '').toLowerCase() === 'true';
   if (!admin) {
     const hash = bcrypt.hashSync(config.adminPassword, 10);
     await db.prepare(`
@@ -278,6 +284,20 @@ async function seedAuthAndFilial() {
       UPDATE usuarios SET cargo = COALESCE(NULLIF(cargo, ''), 'admin')
       WHERE id = ? AND (cargo IS NULL OR cargo = '' OR cargo = 'funcionario')
     `).run(admin.id);
+    // A senha do admin só é gravada na 1ª criação. Para redefinir em produção:
+    // ADMIN_RESET_PASSWORD=true + ADMIN_PASSWORD=... e reinicie o serviço.
+    if (resetAdmin && process.env.ADMIN_PASSWORD) {
+      const hash = bcrypt.hashSync(config.adminPassword, 10);
+      await db.prepare(`
+        UPDATE usuarios SET
+          senha_hash = ?,
+          login = COALESCE(NULLIF(?, ''), login),
+          ativo = 1,
+          updated_at = NOW()
+        WHERE id = ?
+      `).run(hash, String(config.adminUser || '').trim() || 'admin', admin.id);
+      console.log(`[seed] Senha do admin redefinida (ADMIN_RESET_PASSWORD) — login: ${config.adminUser}`);
+    }
   }
 
   const userMatriz = await db.prepare(`
@@ -343,34 +363,11 @@ export async function initDatabase() {
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
+  await ensureColumn('pneus', 'recap_fornecedor', 'TEXT');
+  await ensureColumn('pneus', 'recap_enviado_em', 'TEXT');
   await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
+  await ensureColumn('filiais', 'whatsapp_grupo_nome', 'TEXT');
   await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
-
-  // Permite tipos extras do menu WhatsApp (relatorio, menu, cadastros…)
-  try {
-    await db.exec(`
-      ALTER TABLE notificacoes_whatsapp
-        DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check
-    `);
-  } catch (err) {
-    console.warn('[migrate] notificacoes tipo check:', err.message);
-  }
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
-      id BIGSERIAL PRIMARY KEY,
-      chave TEXT NOT NULL UNIQUE,
-      filial_id BIGINT NOT NULL,
-      chat_jid TEXT,
-      telefone TEXT,
-      fluxo TEXT NOT NULL,
-      passo TEXT NOT NULL,
-      dados JSONB DEFAULT '{}'::jsonb,
-      atualizado_em TIMESTAMPTZ DEFAULT NOW(),
-      expira_em TIMESTAMPTZ NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
-  `);
 
   await seedConfigs();
   const matrizId = await seedAuthAndFilial();

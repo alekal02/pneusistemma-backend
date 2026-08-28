@@ -39,8 +39,8 @@ export function normalizarDestino(destino) {
   }
 
   const onlyId = raw.replace(/[^\d-]/g, '');
-  // Grupo clássico: 120363... (18+ dígitos) ou formato antigo com hífen
-  if (/^\d{15,}-?\d*$/.test(onlyId) || (onlyId.includes('-') && onlyId.length >= 15)) {
+  // Grupo clássico WhatsApp: 120363… — não confundir com LID/telefone
+  if (/^120363\d{8,}$/.test(onlyId) || (onlyId.includes('-') && onlyId.length >= 15)) {
     return {
       phone: `${onlyId}@g.us`,
       isGroup: true,
@@ -51,6 +51,21 @@ export function normalizarDestino(destino) {
   const phone = limparTelefone(raw);
   if (!phone || phone.length < 10) return null;
   return { phone, isGroup: false, logKey: phone };
+}
+
+/** Id canônico de grupo (parte antes de @g.us), para comparar JIDs. */
+export function idGrupoCanonico(destino) {
+  const raw = String(destino || '').trim();
+  if (!raw) return '';
+  const gUs = raw.match(/^([^@\s]+)@g\.us$/i);
+  if (gUs) return gUs[1].replace(/:[0-9]+$/, '');
+  if (raw.toLowerCase().includes('@g.us')) {
+    return raw.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  }
+  // Só trata como grupo o padrão WhatsApp 120363… (não LID/telefone)
+  const onlyId = raw.replace(/[^\d-]/g, '');
+  if (/^120363\d{8,}$/.test(onlyId)) return onlyId;
+  return '';
 }
 
 function erroEnvioGrupo(errMsg) {
@@ -143,7 +158,7 @@ function headersUsuarioWuzapi(token) {
 function mensagemErroWuzapi(status, msg) {
   const texto = typeof msg === 'string' ? msg : JSON.stringify(msg);
   if (ehFalhaAuthWuzapi(status, texto)) {
-    return 'Sessão WhatsApp recusada (401). Clique em Gerar token e depois Conectar / QR com o chip da unidade.';
+    return 'Sessão WhatsApp recusada (401). O token é gerado de novo automaticamente — clique em Conectar / QR.';
   }
   return `WuzAPI erro ${status}: ${texto}`;
 }

@@ -31,6 +31,7 @@ import {
   marcarTokenUsado,
   montarDetalheVeiculo,
 } from '../services/acesso-rapido.js';
+import { resolverAlertaPosicaoVaga } from '../services/alerta-posicao-vaga.js';
 
 const router = Router();
 
@@ -179,6 +180,8 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
 
       return created.lastInsertRowid;
     });
+
+    await resolverAlertaPosicaoVaga(getDb(), { veiculoId: veiculo.id, posicao });
 
     const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
     res.status(201).json({
