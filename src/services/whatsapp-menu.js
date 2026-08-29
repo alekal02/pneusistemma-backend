@@ -54,11 +54,37 @@ function normalizarPlaca(texto) {
     .replace(/[^A-Z0-9]/g, '');
 }
 
-/** Placa BR (antiga ABC1234 ou Mercosul ABC1D23) — evita pegar conversa solta */
+/** Placa BR clássica (7 chars) — atalho em conversa livre */
 function parecePlacaBrasil(texto) {
   const p = normalizarPlaca(texto);
   if (p.length !== 7) return false;
   return /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(p);
+}
+
+/**
+ * Aceita placa operacional (ex.: BH123, ABC1D23) quando o fluxo pede placa.
+ * Evita travar unidades com placas curtas / internas.
+ */
+function parecePlacaOperacional(texto) {
+  const p = normalizarPlaca(texto);
+  if (p.length < 3 || p.length > 10) return false;
+  if (!/[A-Z]/.test(p) || !/[0-9]/.test(p)) return false;
+  // Evita confundir opção do menu (só dígito)
+  if (/^[0-9]+$/.test(p)) return false;
+  return true;
+}
+
+async function resolverVeiculoPorTexto(filialId, texto) {
+  const placaLimpa = normalizarPlaca(texto);
+  if (!placaLimpa || placaLimpa.length < 3) return { ok: false, motivo: 'curta' };
+  const veiculos = await ops.buscarVeiculoPorPlaca(filialId, placaLimpa);
+  if (!veiculos.length) return { ok: false, motivo: 'nao_encontrada', placa: placaLimpa };
+  if (veiculos.length > 1) {
+    const exatos = veiculos.filter((v) => normalizarPlaca(v.placa) === placaLimpa);
+    if (exatos.length === 1) return { ok: true, veiculo: exatos[0], placa: placaLimpa };
+    return { ok: false, motivo: 'varias', placa: placaLimpa, veiculos };
+  }
+  return { ok: true, veiculo: veiculos[0], placa: placaLimpa };
 }
 
 /** Candidato a nº de fogo (atalho fora do menu) */
@@ -151,28 +177,34 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio) {
 }
 
 async function fluxoMedirPlaca(ctx, texto) {
-  if (!parecePlacaBrasil(texto)) {
+  if (!parecePlacaOperacional(texto) && !parecePlacaBrasil(texto)) {
     await reply(
       ctx,
-      'Isso não parece uma *placa* (ex.: ABC1D23 ou ABC1234).\nEnvie a placa ou *0* para cancelar.'
+      'Isso não parece uma *placa* (ex.: BH123, ABC1D23).\nEnvie a placa ou *0* para cancelar.'
     );
     return;
   }
-  const placaLimpa = normalizarPlaca(texto);
-  const veiculos = await ops.buscarVeiculoPorPlaca(ctx.filialId, placaLimpa);
-  if (!veiculos.length) {
-    await reply(ctx, `❌ Placa *${placaLimpa}* não encontrada nesta unidade.\n\nDigite *9* para ver a frota ou *menu*.`);
-    await clear(ctx);
-    return;
-  }
-  if (veiculos.length > 1) {
-    const lista = veiculos.map((v) => `• ${v.placa}${v.apelido ? ` — ${v.apelido}` : ''}`).join('\n');
+  const r = await resolverVeiculoPorTexto(ctx.filialId, texto);
+  if (!r.ok && r.motivo === 'varias') {
+    const lista = r.veiculos.map((v) => `• ${v.placa}${v.apelido ? ` — ${v.apelido}` : ''}`).join('\n');
     await reply(ctx, `🔍 Encontrei várias:\n${lista}\n\nEnvie a *placa exata*.`);
     return;
   }
-  const veiculo = veiculos[0];
-  const mensagem = await montarMensagemMedicao(veiculo, ctx.phone, ctx.destino);
-  await reply(ctx, mensagem);
+  if (!r.ok) {
+    await reply(
+      ctx,
+      `❌ Placa *${r.placa || normalizarPlaca(texto)}* não encontrada nesta unidade.\n\nDigite *9* para ver a frota ou *menu*.`
+    );
+    await clear(ctx);
+    return;
+  }
+  const veiculo = r.veiculo;
+  try {
+    const mensagem = await montarMensagemMedicao(veiculo, ctx.phone, ctx.destino);
+    await reply(ctx, mensagem);
+  } catch (err) {
+    await reply(ctx, `❌ Não consegui gerar o link: ${err.message}\n\nDigite *menu*.`);
+  }
   await clear(ctx);
 }
 
@@ -257,11 +289,11 @@ async function iniciarOpcao(ctx, n) {
   switch (n) {
     case '1':
       await setFluxo(ctx, 'medir', 'placa', {});
-      await reply(ctx, '📏 *Medir pneu*\n\nEnvie a *placa* do caminhão.\n_0 = cancelar_');
+      await reply(ctx, '📏 *Medir pneu*\n\nEnvie a *placa* do caminhão (ex.: BH123 ou ABC1D23).\n_0 = cancelar_');
       return;
     case '2':
       await setFluxo(ctx, 'caminhao', 'placa', {});
-      await reply(ctx, '🚛 *Cadastrar caminhão*\n\nEnvie a *placa*.\n_0 = cancelar_');
+      await reply(ctx, '🚛 *Cadastrar caminhão*\n\nEnvie a *placa* (ex.: BH123 ou ABC1D23).\n_0 = cancelar_');
       return;
     case '3':
       await setFluxo(ctx, 'pneu', 'fogo', {});
@@ -299,8 +331,14 @@ async function iniciarOpcao(ctx, n) {
 async function passoCaminhao(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
   if (sessao.passo === 'placa') {
-    if (!parecePlacaBrasil(texto)) {
-      await reply(ctx, 'Placa inválida. Use o formato ABC1D23 ou ABC1234.\n_0 = cancelar_');
+    if (!parecePlacaOperacional(texto) && !parecePlacaBrasil(texto)) {
+      await reply(ctx, 'Placa inválida. Ex.: BH123 ou ABC1D23.\n_0 = cancelar_');
+      return;
+    }
+    const r = await resolverVeiculoPorTexto(ctx.filialId, texto);
+    // Cadastro: só valida formato; se já existir, avisa na confirmação via unique
+    if (r.ok) {
+      await reply(ctx, `⚠️ Placa *${r.placa}* já existe nesta unidade. Envie outra ou *0* para cancelar.`);
       return;
     }
     const placa = normalizarPlaca(texto);
@@ -470,22 +508,21 @@ async function passoPneu(ctx, sessao, texto) {
 async function passoTroca(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
   if (sessao.passo === 'placa') {
-    if (!parecePlacaBrasil(texto)) {
-      await reply(ctx, 'Placa inválida (ex.: ABC1D23). Tente de novo ou *0* para cancelar.');
+    if (!parecePlacaOperacional(texto) && !parecePlacaBrasil(texto)) {
+      await reply(ctx, 'Placa inválida (ex.: BH123, ABC1D23). Tente de novo ou *0* para cancelar.');
       return;
     }
-    const placa = normalizarPlaca(texto);
-    const veiculos = await ops.buscarVeiculoPorPlaca(ctx.filialId, placa);
-    if (!veiculos.length) {
-      await reply(ctx, 'Placa não encontrada. Tente de novo ou *0* para cancelar.');
+    const r = await resolverVeiculoPorTexto(ctx.filialId, texto);
+    if (!r.ok && r.motivo === 'varias') {
+      await reply(ctx, `Várias placas:\n${r.veiculos.map((v) => `• ${v.placa}`).join('\n')}\nEnvie a exata.`);
       return;
     }
-    if (veiculos.length > 1) {
-      await reply(ctx, `Várias placas:\n${veiculos.map((v) => `• ${v.placa}`).join('\n')}\nEnvie a exata.`);
+    if (!r.ok) {
+      await reply(ctx, `Placa *${r.placa || normalizarPlaca(texto)}* não encontrada. Tente de novo ou *0* para cancelar.`);
       return;
     }
-    d.veiculo_id = veiculos[0].id;
-    d.placa = veiculos[0].placa;
+    d.veiculo_id = r.veiculo.id;
+    d.placa = r.veiculo.placa;
     const livres = await ops.posicoesLivres(d.veiculo_id);
     if (!livres.length) {
       await clear(ctx);
@@ -769,24 +806,30 @@ async function passoDescarte(ctx, sessao, texto) {
 }
 
 async function continuarSessao(ctx, sessao, texto) {
-  switch (sessao.fluxo) {
-    case 'medir':
-      return fluxoMedirPlaca(ctx, texto);
-    case 'caminhao':
-      return passoCaminhao(ctx, sessao, texto);
-    case 'pneu':
-      return passoPneu(ctx, sessao, texto);
-    case 'troca':
-      return passoTroca(ctx, sessao, texto);
-    case 'estoque':
-      return passoEstoque(ctx, sessao, texto);
-    case 'recap':
-      return passoRecap(ctx, sessao, texto);
-    case 'descarte':
-      return passoDescarte(ctx, sessao, texto);
-    default:
-      await clear(ctx);
-      await reply(ctx, textoMenu());
+  try {
+    switch (sessao.fluxo) {
+      case 'medir':
+        return await fluxoMedirPlaca(ctx, texto);
+      case 'caminhao':
+        return await passoCaminhao(ctx, sessao, texto);
+      case 'pneu':
+        return await passoPneu(ctx, sessao, texto);
+      case 'troca':
+        return await passoTroca(ctx, sessao, texto);
+      case 'estoque':
+        return await passoEstoque(ctx, sessao, texto);
+      case 'recap':
+        return await passoRecap(ctx, sessao, texto);
+      case 'descarte':
+        return await passoDescarte(ctx, sessao, texto);
+      default:
+        await clear(ctx);
+        await reply(ctx, textoMenu());
+    }
+  } catch (err) {
+    console.error('[whatsapp-menu] fluxo', sessao.fluxo, sessao.passo, err);
+    await clear(ctx);
+    await reply(ctx, `❌ Erro no fluxo: ${err.message}\n\n` + textoMenu());
   }
 }
 
@@ -822,7 +865,12 @@ export async function processarMensagemMenu(ctx) {
       await reply(ctx, textoMenu());
       return { handled: true };
     }
-    await iniciarOpcao(ctx, n);
+    try {
+      await iniciarOpcao(ctx, n);
+    } catch (err) {
+      console.error('[whatsapp-menu] opcao', n, err);
+      await reply(ctx, `❌ ${err.message}\n\n` + textoMenu());
+    }
     return { handled: true };
   }
 
@@ -836,10 +884,13 @@ export async function processarMensagemMenu(ctx) {
     return { handled: true };
   }
 
-  // Placa válida (Mercosul/antiga) → medir
-  if (parecePlacaBrasil(texto)) {
-    await fluxoMedirPlaca(ctx, texto);
-    return { handled: true };
+  // Placa operacional ou BR → medir (mesmo formato curto tipo BH123)
+  if (parecePlacaBrasil(texto) || parecePlacaOperacional(texto)) {
+    const r = await resolverVeiculoPorTexto(filialId, texto);
+    if (r.ok || r.motivo === 'varias' || r.motivo === 'nao_encontrada') {
+      await fluxoMedirPlaca(ctx, texto);
+      return { handled: true };
+    }
   }
 
   // Nº de fogo cadastrado → status + atalhos (só se existir no banco)

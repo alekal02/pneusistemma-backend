@@ -103,9 +103,10 @@ function deveIgnorarMensagemPropria(event) {
   if (/^(frota|placas|lista|ajuda|help|menu|\?|cancelar|cancela|sair|voltar)$/i.test(cmd)) return false;
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) return false;
   if (/^[0-9]$/.test(cmd)) return false;
-  // Placa BR estrita (7 chars Mercosul/antiga)
+  // Placa BR estrita OU placa operacional curta (ex.: BH123)
   const placa = normalizarPlacaTexto(text);
   if (/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)) return false;
+  if (placa.length >= 3 && placa.length <= 10 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) return false;
   return true;
 }
 
