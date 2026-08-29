@@ -143,8 +143,9 @@ CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
 CREATE TABLE IF NOT EXISTS tokens_acesso_rapido (
   id BIGSERIAL PRIMARY KEY,
   token TEXT UNIQUE NOT NULL,
-  veiculo_id BIGINT NOT NULL REFERENCES veiculos(id),
+  veiculo_id BIGINT REFERENCES veiculos(id),
   filial_id BIGINT NOT NULL REFERENCES filiais(id),
+  tipo TEXT NOT NULL DEFAULT 'medir',
   whatsapp_origem TEXT,
   expira_em TIMESTAMPTZ NOT NULL,
   usado_em TIMESTAMPTZ,

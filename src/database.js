@@ -144,8 +144,9 @@ CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
 CREATE TABLE IF NOT EXISTS tokens_acesso_rapido (
   id BIGSERIAL PRIMARY KEY,
   token TEXT UNIQUE NOT NULL,
-  veiculo_id BIGINT NOT NULL REFERENCES veiculos(id),
+  veiculo_id BIGINT REFERENCES veiculos(id),
   filial_id BIGINT NOT NULL REFERENCES filiais(id),
+  tipo TEXT NOT NULL DEFAULT 'medir',
   whatsapp_origem TEXT,
   expira_em TIMESTAMPTZ NOT NULL,
   usado_em TIMESTAMPTZ,
@@ -345,6 +346,17 @@ export async function initDatabase() {
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
   await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
   await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
+  await ensureColumn('tokens_acesso_rapido', 'tipo', "TEXT NOT NULL DEFAULT 'medir'");
+  try {
+    await db.exec(`
+      ALTER TABLE tokens_acesso_rapido ALTER COLUMN veiculo_id DROP NOT NULL
+    `);
+  } catch (err) {
+    // já nullable ou tabela nova
+    if (!/does not exist|already|não existe/i.test(err.message)) {
+      console.warn('[migrate] tokens veiculo_id nullable:', err.message);
+    }
+  }
 
   // Permite tipos extras do menu WhatsApp (relatorio, menu, cadastros…)
   try {

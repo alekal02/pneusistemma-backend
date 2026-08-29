@@ -40,9 +40,12 @@ router.get('/acesso-rapido', async (req, res, next) => {
   if (!token) return res.status(400).json({ erro: 'Token obrigatório' });
 
   try {
-    const tokenRow = await validarTokenAcessoRapido(String(token));
+    const tokenRow = await validarTokenAcessoRapido(String(token), ['medir']);
     if (!tokenRow) {
       return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+    if (!tokenRow.veiculo_id) {
+      return res.status(400).json({ erro: 'Token sem veículo — use o link correto do menu' });
     }
 
     await marcarTokenUsado(tokenRow.id);
