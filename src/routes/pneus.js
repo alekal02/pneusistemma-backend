@@ -891,10 +891,10 @@ router.post('/:id/reposicionar', async (req, res, next) => {
   }
 });
 
-/** Eventos especiais (recap/descarte) — não entram como movimentação operacional */
+/** Eventos especiais (recap/descarte/retorno) — rastreiam ciclo de vida do pneu */
 router.post('/:id/evento', async (req, res, next) => {
   const { tipo, data_evento, km_veiculo, hr_veiculo, detalhes, sulco_mm } = req.body;
-  const tiposOk = ['recap', 'descarte'];
+  const tiposOk = ['recap', 'descarte', 'retorno_recap'];
   if (!tiposOk.includes(tipo)) {
     return res.status(400).json({
       erro: `tipo deve ser: ${tiposOk.join(', ')}. Para movimentar use montar / desmontar / reposicionar.`,
@@ -910,7 +910,44 @@ router.post('/:id/evento', async (req, res, next) => {
     const data = data_evento || new Date().toISOString().split('T')[0];
     const filialId = filialScopeId(req);
 
-    if (tipo === 'recap') {
+    if (tipo === 'retorno_recap') {
+      if (pneu.status_pneu !== 'recapagem') {
+        return res.status(400).json({ erro: 'Pneu não está em recapagem' });
+      }
+      await db.transaction(async () => {
+        await db.prepare(`
+          UPDATE pneus SET
+            status_pneu = 'estoque',
+            condicao = 'recapado',
+            veiculo_id = NULL,
+            posicao = NULL,
+            sulco_inicial_mm = COALESCE(?, sulco_inicial_mm),
+            data_instalacao = NULL,
+            data_alerta_monitorar = NULL
+          WHERE id = ?
+        `).run(
+          sulco_mm != null ? parseFloat(sulco_mm) : limites.sulco_novo_mm,
+          pneu.id
+        );
+        await registrarMovimentacao(db, {
+          pneuId: pneu.id,
+          veiculoId: null,
+          tipo: 'retorno_recap',
+          data,
+          km: null,
+          hr: null,
+          posicao: null,
+          detalhes: detalhes || `Recap concluído · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
+          placa: null,
+        });
+      });
+    } else if (tipo === 'recap') {
+      if (pneu.status_pneu === 'recapagem') {
+        return res.status(400).json({ erro: 'Pneu já está em recapagem' });
+      }
+      if (pneu.status_pneu === 'descarte') {
+        return res.status(400).json({ erro: 'Pneu já está no descarte' });
+      }
       const novaVida = (pneu.vida_recap || 0) + 1;
       if (novaVida > limites.max_recaps) {
         return res.status(400).json({
@@ -918,10 +955,13 @@ router.post('/:id/evento', async (req, res, next) => {
         });
       }
 
+      let placaOrigem = null;
+      const veiculoOrigemId = pneu.veiculo_id || null;
+      const posicaoOrigem = pneu.posicao || null;
       await db.transaction(async () => {
-        // Se estava montado, registra retirada antes
         if (pneu.status_pneu === 'montado' && pneu.veiculo_id) {
           const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
+          placaOrigem = veiculo?.placa || null;
           const km = km_veiculo != null ? parseInt(km_veiculo, 10) : (veiculo?.km_atual ?? null);
           const hr = hr_veiculo != null ? parseFloat(hr_veiculo) : (veiculo?.hr_atual ?? null);
           await registrarMovimentacao(db, {
@@ -933,7 +973,7 @@ router.post('/:id/evento', async (req, res, next) => {
             hr,
             posicao: pneu.posicao,
             detalhes: 'Retirou para iniciar processo de recap',
-            placa: veiculo?.placa || null,
+            placa: placaOrigem,
           });
           await atualizarKmHrVeiculo(db, pneu.veiculo_id, filialId, km, hr);
         }
@@ -941,20 +981,29 @@ router.post('/:id/evento', async (req, res, next) => {
           UPDATE pneus SET
             vida_recap = ?,
             condicao = 'recapado',
-            status_pneu = 'estoque',
+            status_pneu = 'recapagem',
             veiculo_id = NULL,
             posicao = NULL,
-            sulco_inicial_mm = COALESCE(?, sulco_inicial_mm),
             data_instalacao = NULL,
             km_instalacao = COALESCE(?, km_instalacao),
             data_alerta_monitorar = NULL
           WHERE id = ?
         `).run(
           novaVida,
-          sulco_mm != null ? parseFloat(sulco_mm) : limites.sulco_novo_mm,
           km_veiculo != null ? parseInt(km_veiculo, 10) : null,
           pneu.id
         );
+        await registrarMovimentacao(db, {
+          pneuId: pneu.id,
+          veiculoId: veiculoOrigemId,
+          tipo: 'recap',
+          data,
+          km: km_veiculo != null ? parseInt(km_veiculo, 10) : null,
+          hr: hr_veiculo != null ? parseFloat(hr_veiculo) : null,
+          posicao: posicaoOrigem,
+          detalhes: detalhes || `Enviado à recap (${novaVida}ª vida)`,
+          placa: placaOrigem,
+        });
       });
     } else if (tipo === 'descarte') {
       await db.transaction(async () => {
@@ -994,8 +1043,10 @@ router.post('/:id/evento', async (req, res, next) => {
 
     res.status(201).json({
       mensagem: tipo === 'recap'
-        ? 'Recap registrado — pneu no estoque'
-        : 'Pneu enviado ao estoque de descarte — defina o tratamento na aba Pneus',
+        ? 'Pneu enviado à recapagem — acompanhe no KPI Recap / aba Pneus'
+        : tipo === 'retorno_recap'
+          ? 'Recap concluído — pneu voltou ao estoque'
+          : 'Pneu enviado ao estoque de descarte — defina o tratamento na aba Pneus',
       pneu: enriquecerPneu(atualizado, await ultimaMedicaoDoPneu(db, pneu.id)),
     });
   } catch (err) {

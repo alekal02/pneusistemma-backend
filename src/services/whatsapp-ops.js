@@ -293,6 +293,9 @@ export async function registrarRecap({ filialId, pneuId }) {
   if (pneu.status_pneu === 'recapagem') {
     throw Object.assign(new Error('Pneu já está em recapagem'), { status: 400 });
   }
+  if (pneu.status_pneu === 'descarte') {
+    throw Object.assign(new Error('Pneu já está no descarte'), { status: 400 });
+  }
   const novaVida = (pneu.vida_recap || 0) + 1;
   if (novaVida > (limites.max_recaps || 6)) {
     throw Object.assign(new Error(`Limite de recaps atingido (${limites.max_recaps})`), { status: 400 });
@@ -305,13 +308,10 @@ export async function registrarRecap({ filialId, pneuId }) {
   if (estavaMontado) {
     const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
     placa = veiculo?.placa || null;
-    await db.transaction(async () => {
-      await db.prepare(`
-        UPDATE pneus SET
-          veiculo_id = NULL, posicao = NULL, status_pneu = 'recapagem',
-          vida_recap = ?, condicao = 'recapado', data_instalacao = NULL
-        WHERE id = ?
-      `).run(novaVida, pneuId);
+  }
+  await db.transaction(async () => {
+    if (estavaMontado) {
+      const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
       await registrarMovimentacao(db, {
         pneuId,
         veiculoId: pneu.veiculo_id,
@@ -323,13 +323,27 @@ export async function registrarRecap({ filialId, pneuId }) {
         detalhes: 'WhatsApp · retirou para recap',
         placa: veiculo?.placa,
       });
-    });
-  } else {
+    }
     await db.prepare(`
-      UPDATE pneus SET status_pneu = 'recapagem', vida_recap = ?, condicao = 'recapado'
+      UPDATE pneus SET
+        veiculo_id = NULL, posicao = NULL, status_pneu = 'recapagem',
+        vida_recap = ?, condicao = 'recapado', data_instalacao = NULL
       WHERE id = ?
     `).run(novaVida, pneuId);
-  }
+    await registrarMovimentacao(db, {
+      pneuId,
+      veiculoId: estavaMontado ? veiculoId : null,
+      tipo: 'recap',
+      data,
+      km: null,
+      hr: null,
+      posicao: estavaMontado ? posicao : null,
+      detalhes: estavaMontado
+        ? `WhatsApp · enviou à recap (${novaVida}ª vida) · origem ${placa || ''} ${posicao || ''}`.trim()
+        : `WhatsApp · enviou à recap (${novaVida}ª vida) · origem estoque`,
+      placa,
+    });
+  });
   return {
     fogo: pneu.numero_fogo,
     vida: novaVida,
@@ -350,15 +364,29 @@ export async function devolverRecapAoEstoque({ filialId, pneuId }) {
   if (pneu.status_pneu !== 'recapagem') {
     throw Object.assign(new Error('Pneu não está em recapagem'), { status: 400 });
   }
-  await db.prepare(`
-    UPDATE pneus SET
-      status_pneu = 'estoque',
-      condicao = 'recapado',
-      veiculo_id = NULL,
-      posicao = NULL,
-      data_instalacao = NULL
-    WHERE id = ?
-  `).run(pneuId);
+  const data = hojeIso();
+  await db.transaction(async () => {
+    await db.prepare(`
+      UPDATE pneus SET
+        status_pneu = 'estoque',
+        condicao = 'recapado',
+        veiculo_id = NULL,
+        posicao = NULL,
+        data_instalacao = NULL
+      WHERE id = ?
+    `).run(pneuId);
+    await registrarMovimentacao(db, {
+      pneuId,
+      veiculoId: null,
+      tipo: 'retorno_recap',
+      data,
+      km: null,
+      hr: null,
+      posicao: null,
+      detalhes: `WhatsApp · recap concluído · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
+      placa: null,
+    });
+  });
   return {
     fogo: pneu.numero_fogo,
     vida: pneu.vida_recap || 1,
