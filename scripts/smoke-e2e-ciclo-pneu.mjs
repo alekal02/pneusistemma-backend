@@ -7,6 +7,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const BASE = process.env.SMOKE_BASE || 'http://localhost:3000/api';
@@ -360,7 +361,7 @@ if (tokenGerente) {
   assert(pdf.status === 200 && pdf.contentType?.includes('pdf') && pdf.buf?.length > 500,
     'PDF semanal', `bytes=${pdf.buf?.length} ct=${pdf.contentType}`);
   if (pdf.status === 200 && pdf.buf?.length) {
-    const out = join(__dir, `e2e-semanal-${suffix}.pdf`);
+    const out = join(tmpdir(), `e2e-semanal-${suffix}.pdf`);
     writeFileSync(out, pdf.buf);
     ok('PDF salvo', out);
   }
