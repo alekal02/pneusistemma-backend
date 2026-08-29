@@ -397,29 +397,49 @@ export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, op
   }
 
   const b64 = Buffer.from(buffer).toString('base64');
+  // WuzAPI exige data URI como application/octet-stream (não application/pdf)
+  const dataUri = `data:application/octet-stream;base64,${b64}`;
   const payload = {
     Phone: dest.phone,
     FileName: nome,
-    Document: `data:${mime};base64,${b64}`,
+    Document: dataUri,
   };
-  if (opts.caption) payload.Caption = String(opts.caption);
+  // Caption opcional — algumas versões WuzAPI rejeitam; enviamos só se pedida
+  if (opts.caption) payload.Caption = String(opts.caption).slice(0, 900);
 
   let lastErr = null;
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
-    const res = await fetch(`${config.wuzapiBaseUrl}/chat/send/document`, {
+    let res = await fetch(`${config.wuzapiBaseUrl}/chat/send/document`, {
       method: 'POST',
       headers: headersUsuarioWuzapi(token),
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(90_000),
     });
 
-    const raw = await res.text();
+    let raw = await res.text();
     let data;
     try {
       data = raw ? JSON.parse(raw) : {};
     } catch {
       data = { raw };
+    }
+
+    // Retry sem Caption se a API reclamar do campo
+    if (!res.ok && payload.Caption && /caption|unknown|invalid/i.test(JSON.stringify(data))) {
+      const semCaption = { Phone: dest.phone, FileName: nome, Document: dataUri };
+      res = await fetch(`${config.wuzapiBaseUrl}/chat/send/document`, {
+        method: 'POST',
+        headers: headersUsuarioWuzapi(token),
+        body: JSON.stringify(semCaption),
+        signal: AbortSignal.timeout(90_000),
+      });
+      raw = await res.text();
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { raw };
+      }
     }
 
     if (res.ok) {

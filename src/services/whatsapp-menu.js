@@ -317,33 +317,44 @@ async function passoMontarPos(ctx, sessao, texto) {
 }
 
 async function enviarRelatorio(ctx) {
-  await reply(ctx, '📊 Gerando o *relatório gerencial*… aguarde.', 'relatorio_semanal');
+  await reply(ctx, '📊 Gerando o *relatório gerencial*… aguarde alguns segundos.', 'relatorio_semanal');
   try {
     const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(ctx.filialId, {
       geradoPor: `WhatsApp · ${ctx.phone || ctx.destino}`,
     });
+    const resumo = dados?.resumo || {};
     const caption = [
       `📊 *Relatório gerencial* — ${dados.filial?.nome || 'Unidade'}`,
-      dados.filial?.codigo ? `Código: ${dados.filial.codigo}` : null,
-      `_Arquivo: ${filename}_`,
+      dados.periodo?.label ? `Semana: ${dados.periodo.label}` : null,
+      `Montados: ${resumo.pneus_montados ?? 0} · Estoque: ${resumo.pneus_estoque ?? 0} · Em recap: ${resumo.pneus_em_recapagem ?? 0}`,
+      `Críticos: ${resumo.sulco_critico ?? 0} · Monitorar: ${resumo.sulco_monitorar ?? 0} · Mov. na semana: ${resumo.movimentacoes_semana ?? 0}`,
       '',
       '_Digite *menu* para voltar._',
     ].filter(Boolean).join('\n');
-    await reply(ctx, caption, 'relatorio_semanal');
+
+    // Envia o PDF primeiro (mais confiável que texto + doc)
     const envio = await enviarDocumentoERegistrar({
       tipo: 'relatorio_semanal',
       destinatario: ctx.destino,
       buffer,
       fileName: filename,
       mensagem: caption,
+      caption: `📊 Relatório — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
       filialId: ctx.filialId,
       fallbackDestinatario: ctx.phone,
     });
     if (!envio?.ok) {
-      await reply(ctx, `❌ Não consegui enviar o PDF. ${envio?.erro || ''}`, 'relatorio_semanal');
+      await reply(
+        ctx,
+        `❌ Não consegui enviar o PDF (${envio?.erro || 'erro desconhecido'}).\n\nBaixe pelo painel: Filiais → unidade → *Baixar PDF semanal*.\n\n` + textoMenu(),
+        'relatorio_semanal'
+      );
+      return;
     }
+    await reply(ctx, `✅ PDF enviado.\n\n${caption}`, 'relatorio_semanal');
   } catch (err) {
-    await reply(ctx, `❌ Falha ao gerar relatório: ${err.message}`, 'relatorio_semanal');
+    console.error('[whatsapp-menu] relatório:', err);
+    await reply(ctx, `❌ Falha ao gerar/enviar relatório: ${err.message}\n\n` + textoMenu(), 'relatorio_semanal');
   }
 }
 
