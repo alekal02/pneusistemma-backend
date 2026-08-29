@@ -31,6 +31,7 @@ import {
   marcarTokenUsado,
   montarDetalheVeiculo,
 } from '../services/acesso-rapido.js';
+import { resolverAlertaPosicaoVaga } from '../services/alerta-posicao-vaga.js';
 
 const router = Router();
 
@@ -40,12 +41,9 @@ router.get('/acesso-rapido', async (req, res, next) => {
   if (!token) return res.status(400).json({ erro: 'Token obrigatório' });
 
   try {
-    const tokenRow = await validarTokenAcessoRapido(String(token), ['medir']);
+    const tokenRow = await validarTokenAcessoRapido(String(token));
     if (!tokenRow) {
       return res.status(401).json({ erro: 'Token inválido ou expirado' });
-    }
-    if (!tokenRow.veiculo_id) {
-      return res.status(400).json({ erro: 'Token sem veículo — use o link correto do menu' });
     }
 
     await marcarTokenUsado(tokenRow.id);
@@ -182,6 +180,8 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
 
       return created.lastInsertRowid;
     });
+
+    await resolverAlertaPosicaoVaga(getDb(), { veiculoId: veiculo.id, posicao });
 
     const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
     res.status(201).json({

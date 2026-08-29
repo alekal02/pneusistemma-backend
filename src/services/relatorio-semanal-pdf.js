@@ -277,66 +277,16 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     });
   }
 
-  const estoqueRows = await db.prepare(`
-    SELECT
-      p.id, p.numero_fogo, p.marca, p.modelo, p.medida, p.tipo_pneu, p.condicao, p.vida_recap,
-      p.custo, p.nota_fiscal, p.sulco_inicial_mm, p.observacoes, p.status_pneu,
-      m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar, m.data_medicao
-    FROM pneus p
-    LEFT JOIN medicoes m ON m.pneu_id = p.id
-      AND m.id = (
-        SELECT id FROM medicoes WHERE pneu_id = p.id
-        ORDER BY data_medicao DESC, id DESC LIMIT 1
-      )
-    WHERE p.filial_id = ? AND p.ativo = 1 AND p.status_pneu = 'estoque'
-    ORDER BY p.numero_fogo NULLS LAST, p.id DESC
+  const estoque = await db.prepare(`
+    SELECT id, numero_fogo, marca, modelo, medida, tipo_pneu, condicao, vida_recap,
+           custo, nota_fiscal, sulco_inicial_mm, observacoes
+    FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu IN ('estoque', 'recapagem')
+    ORDER BY numero_fogo NULLS LAST, id DESC
   `).all(filialId);
-
-  const emRecapagemRows = await db.prepare(`
-    SELECT
-      p.id, p.numero_fogo, p.marca, p.modelo, p.medida, p.tipo_pneu, p.condicao, p.vida_recap,
-      p.custo, p.nota_fiscal, p.sulco_inicial_mm, p.observacoes, p.status_pneu,
-      m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar, m.data_medicao,
-      (SELECT mv.data_evento FROM movimentacoes mv
-        WHERE mv.pneu_id = p.id AND mv.tipo IN ('recap', 'retirada')
-        ORDER BY mv.id DESC LIMIT 1) as data_envio,
-      (SELECT COALESCE(mv.veiculo_placa, '') FROM movimentacoes mv
-        WHERE mv.pneu_id = p.id AND mv.tipo = 'retirada'
-        ORDER BY mv.id DESC LIMIT 1) as placa_origem
-    FROM pneus p
-    LEFT JOIN medicoes m ON m.pneu_id = p.id
-      AND m.id = (
-        SELECT id FROM medicoes WHERE pneu_id = p.id
-        ORDER BY data_medicao DESC, id DESC LIMIT 1
-      )
-    WHERE p.filial_id = ? AND p.ativo = 1 AND p.status_pneu = 'recapagem'
-    ORDER BY p.numero_fogo NULLS LAST, p.id DESC
-  `).all(filialId);
-
-  const mapInventario = (p) => {
-    const menor = menorSulco(p) ?? (p.sulco_inicial_mm != null ? Number(p.sulco_inicial_mm) : null);
-    return {
-      fogo: p.numero_fogo || `ID ${p.id}`,
-      marca: p.marca,
-      modelo: p.modelo,
-      medida: p.medida,
-      padrao: labelTipoPneu(p.tipo_pneu),
-      vida: p.vida_recap > 0 ? `${p.vida_recap}ª recap` : (p.condicao === 'novo' ? 'Novo' : 'Recapado'),
-      custo: p.custo,
-      nota_fiscal: p.nota_fiscal,
-      status: p.status_pneu,
-      sulco: menor,
-      sulco_inicial: p.sulco_inicial_mm != null ? Number(p.sulco_inicial_mm) : null,
-      data_medicao: p.data_medicao || p.data_envio || null,
-      placa_origem: p.placa_origem || null,
-    };
-  };
-
-  const estoque = estoqueRows.map(mapInventario);
-  const emRecapagem = emRecapagemRows.map(mapInventario);
 
   let custoEstoque = 0;
-  for (const p of [...estoque, ...emRecapagem]) {
+  for (const p of estoque) {
     if (p.custo != null) custoEstoque += Number(p.custo);
   }
 
@@ -361,71 +311,6 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       AND m.data_medicao <= ?
   `).get(filialId, periodo.inicio, periodo.fim)).n);
 
-  const labelsMov = {
-    montagem: 'Montagem',
-    retirada: 'Retirada',
-    desmontagem: 'Desmontagem',
-    mudanca_posicao: 'Rodizio / reposicao',
-    recap: 'Envio a recap',
-    retorno_recap: 'Retorno de recap',
-    descarte: 'Descarte',
-  };
-
-  const movimentacoesSemana = await db.prepare(`
-    SELECT
-      mv.id, mv.tipo, mv.data_evento, mv.posicao, mv.posicao_anterior, mv.detalhes,
-      mv.sulco_mm, mv.veiculo_placa, mv.km_veiculo,
-      p.numero_fogo, p.marca, p.modelo, p.status_pneu
-    FROM movimentacoes mv
-    JOIN pneus p ON p.id = mv.pneu_id
-    WHERE p.filial_id = ?
-      AND mv.data_evento >= ?
-      AND mv.data_evento <= ?
-    ORDER BY mv.data_evento DESC, mv.id DESC
-    LIMIT 120
-  `).all(filialId, periodo.inicio, periodo.fim);
-
-  const historico = movimentacoesSemana.map((m) => ({
-    data: m.data_evento,
-    tipo: m.tipo,
-    tipo_label: labelsMov[m.tipo] || m.tipo,
-    fogo: m.numero_fogo || '—',
-    placa: m.veiculo_placa || '—',
-    posicao: m.posicao || m.posicao_anterior || '—',
-    sulco: m.sulco_mm != null ? Number(m.sulco_mm) : null,
-    detalhes: m.detalhes || '',
-    status_atual: m.status_pneu,
-  }));
-
-  const medicoesDetalheSemana = await db.prepare(`
-    SELECT
-      m.data_medicao, m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
-      m.diagnostico, m.acao_sugerida, m.veiculo_placa, m.responsavel, m.observacoes,
-      p.numero_fogo, p.posicao, p.status_pneu
-    FROM medicoes m
-    JOIN pneus p ON p.id = m.pneu_id
-    WHERE p.filial_id = ?
-      AND m.data_medicao >= ?
-      AND m.data_medicao <= ?
-    ORDER BY m.data_medicao DESC, m.id DESC
-    LIMIT 80
-  `).all(filialId, periodo.inicio, periodo.fim);
-
-  const medicoesLista = medicoesDetalheSemana.map((m) => {
-    const menor = menorSulco(m);
-    return {
-      data: m.data_medicao,
-      fogo: m.numero_fogo || '—',
-      placa: m.veiculo_placa || (m.status_pneu === 'estoque' ? 'Estoque' : m.status_pneu === 'recapagem' ? 'Recap' : '—'),
-      posicao: m.posicao || '—',
-      menor_sulco: menor,
-      status: labelStatusSulco(classificarSulco(menor)),
-      acao: m.acao_sugerida || '—',
-      diag: m.diagnostico || '—',
-      obs: m.observacoes || m.responsavel || '',
-    };
-  });
-
   return {
     titulo: 'Relatório semanal gerencial — Controle de Pneus',
     gerado_em: new Date().toISOString(),
@@ -446,18 +331,16 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       veiculos: veiculos.length,
       pneus_montados: totMontados,
       pneus_estoque: estoque.length,
-      pneus_em_recapagem: emRecapagem.length,
       pneus_descarte: descarte.length,
       sulco_ok: totOk,
       sulco_monitorar: totAlerta,
       sulco_critico: totCritico,
       sem_medicao: totSemDado,
       acao_trocar: totTroca,
-      acao_recap: totRecap + emRecapagem.length,
+      acao_recap: totRecap,
       acao_monitorar: totMonitorar,
       acao_rodizio: totRodizio,
       medicoes_semana: medicoesSemana,
-      movimentacoes_semana: historico.length,
       veiculos_atrasados_medicao: veiculosAtrasados,
       custo_montado: Math.round(custoMontado * 100) / 100,
       custo_estoque: Math.round(custoEstoque * 100) / 100,
@@ -474,13 +357,19 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
         tratamento: labelTratamentoDescarte(p.tratamento_descarte || 'pendente'),
         obs: p.tratamento_descarte_obs,
       })),
-      em_recapagem: emRecapagem,
     },
     frota,
-    estoque,
-    em_recapagem: emRecapagem,
-    historico,
-    medicoes_semana_lista: medicoesLista,
+    estoque: estoque.map((p) => ({
+      fogo: p.numero_fogo || `ID ${p.id}`,
+      marca: p.marca,
+      modelo: p.modelo,
+      medida: p.medida,
+      padrao: labelTipoPneu(p.tipo_pneu),
+      vida: p.vida_recap > 0 ? `${p.vida_recap}ª recap` : (p.condicao === 'novo' ? 'Novo' : 'Recapado'),
+      custo: p.custo,
+      nota_fiscal: p.nota_fiscal,
+      status: p.status_pneu,
+    })),
     descarte: descarte.map((p) => ({
       fogo: p.numero_fogo || `ID ${p.id}`,
       marca: p.marca,
@@ -942,23 +831,22 @@ export function gerarPdfRelatorioSemanal(dados) {
       { label: 'VEICULOS', value: r.veiculos, accent: COLORS.brand, bg: COLORS.brandSoft },
       { label: 'PNEUS MONTADOS', value: r.pneus_montados, accent: COLORS.ink, bg: COLORS.softAlt },
       { label: 'ESTOQUE', value: r.pneus_estoque, accent: COLORS.ink, bg: COLORS.softAlt },
-      { label: 'EM RECAP', value: r.pneus_em_recapagem ?? 0, accent: COLORS.alerta, bg: COLORS.alertaBg },
       { label: 'DESCARTE', value: r.pneus_descarte, accent: COLORS.muted, bg: COLORS.soft },
       { label: 'OK', value: r.sulco_ok, accent: COLORS.ok, bg: COLORS.okBg },
       { label: 'MONITORAR', value: r.sulco_monitorar, accent: COLORS.alerta, bg: COLORS.alertaBg },
       { label: 'CRITICO', value: r.sulco_critico, accent: COLORS.critico, bg: COLORS.criticoBg },
       { label: 'SEM MEDICAO', value: r.sem_medicao, accent: COLORS.muted, bg: COLORS.softAlt },
       { label: 'TROCAR', value: r.acao_trocar, accent: COLORS.critico, bg: COLORS.criticoBg },
+      { label: 'RECAP', value: r.acao_recap, accent: COLORS.alerta, bg: COLORS.alertaBg },
       { label: 'RODIZIO', value: r.acao_rodizio, accent: COLORS.brand, bg: COLORS.brandSoft },
-      { label: 'MEDICOES SEMANA', value: r.medicoes_semana, accent: COLORS.brand, bg: COLORS.brandSoft },
+      { label: 'MEDICOES NA SEMANA', value: r.medicoes_semana, accent: COLORS.brand, bg: COLORS.brandSoft },
     ]);
 
     drawKpiGrid(doc, pager, [
-      { label: 'MOVIMENTACOES SEMANA', value: r.movimentacoes_semana ?? 0, accent: COLORS.brand, bg: COLORS.brandSoft },
       { label: 'ATRASADOS (>=7 DIAS)', value: r.veiculos_atrasados_medicao, accent: COLORS.alerta, bg: COLORS.alertaBg },
       { label: 'DESCARTE PENDENTE', value: r.descarte_aguardando, accent: COLORS.critico, bg: COLORS.criticoBg },
       { label: 'CUSTO MONTADO', value: formatMoney(r.custo_montado), accent: COLORS.ink, bg: COLORS.softAlt },
-      { label: 'CUSTO ESTOQUE+RECAP', value: formatMoney(r.custo_estoque), accent: COLORS.ink, bg: COLORS.softAlt },
+      { label: 'CUSTO ESTOQUE', value: formatMoney(r.custo_estoque), accent: COLORS.ink, bg: COLORS.softAlt },
     ]);
 
     // ── 2. Prioridades ─────────────────────────────────
@@ -988,27 +876,10 @@ export function gerarPdfRelatorioSemanal(dados) {
       emptyText: 'Nenhum pneu critico / troca no momento.',
     });
 
-    subTitle(doc, pager, `Monitorar / recap sugerido (${dados.prioridades.monitorar.length})`, COLORS.alerta);
+    subTitle(doc, pager, `Monitorar / recap (${dados.prioridades.monitorar.length})`, COLORS.alerta);
     drawTable(doc, pager, colsPrio, dados.prioridades.monitorar.map(mapPrio), {
       emptyText: 'Nenhum pneu em monitorar / recap.',
     });
-
-    subTitle(doc, pager, `Em processo de recapagem (${(dados.em_recapagem || []).length})`, COLORS.alerta);
-    drawTable(doc, pager, [
-      { key: 'fogo', label: 'Fogo', w: 0.16 },
-      { key: 'desc', label: 'Marca / modelo', w: 0.28 },
-      { key: 'vida', label: 'Vida', w: 0.12 },
-      { key: 'sulco', label: 'Sulco', w: 0.12, bold: true },
-      { key: 'origem', label: 'Origem', w: 0.16 },
-      { key: 'envio', label: 'Envio', w: 0.16 },
-    ], (dados.em_recapagem || []).map((p) => ({
-      fogo: labelFogoPdf(p.fogo),
-      desc: [p.marca, p.modelo].filter(Boolean).join(' ') || '-',
-      vida: p.vida,
-      sulco: mm(p.sulco),
-      origem: p.placa_origem || '-',
-      envio: formatBr(p.data_medicao),
-    })), { emptyText: 'Nenhum pneu em recapagem no momento.' });
 
     subTitle(doc, pager, `Rodizio (${dados.prioridades.rodizio.length})`, COLORS.brand);
     drawTable(doc, pager, colsPrio, dados.prioridades.rodizio.map(mapPrio), {
@@ -1056,69 +927,25 @@ export function gerarPdfRelatorioSemanal(dados) {
     }
 
     // ── 4. Estoque ─────────────────────────────────────
-    sectionTitle(doc, pager, '4', 'Estoque (pronto para montar)');
+    sectionTitle(doc, pager, '4', 'Estoque');
     drawTable(doc, pager, [
-      { key: 'fogo', label: 'Fogo', w: 0.14 },
-      { key: 'desc', label: 'Marca / modelo / medida', w: 0.28 },
-      { key: 'padrao', label: 'Padrao', w: 0.12 },
-      { key: 'vida', label: 'Vida', w: 0.10 },
-      { key: 'sulco', label: 'Sulco', w: 0.10, bold: true },
-      { key: 'med', label: 'Medicao', w: 0.12 },
+      { key: 'fogo', label: 'Fogo', w: 0.12 },
+      { key: 'desc', label: 'Marca / modelo / medida', w: 0.34 },
+      { key: 'padrao', label: 'Padrao', w: 0.14 },
+      { key: 'vida', label: 'Vida', w: 0.12 },
       { key: 'custo', label: 'Custo', w: 0.14, align: 'right' },
-    ], (dados.estoque || []).map((p) => ({
+      { key: 'nf', label: 'NF', w: 0.14 },
+    ], dados.estoque.map((p) => ({
       fogo: labelFogoPdf(p.fogo),
       desc: [p.marca, p.modelo, p.medida].filter(Boolean).join(' ') || '-',
       padrao: labelPadraoPdf(p.padrao),
       vida: p.vida,
-      sulco: mm(p.sulco),
-      med: formatBr(p.data_medicao),
       custo: formatMoney(p.custo),
+      nf: p.nota_fiscal || '-',
     })), { emptyText: 'Nenhum pneu em estoque.' });
 
-    // ── 5. Historico movimentacoes ─────────────────────
-    sectionTitle(doc, pager, '5', 'Historico da semana - movimentacoes');
-    drawTable(doc, pager, [
-      { key: 'data', label: 'Data', w: 0.10 },
-      { key: 'tipo', label: 'Evento', w: 0.16 },
-      { key: 'fogo', label: 'Fogo', w: 0.14 },
-      { key: 'placa', label: 'Placa', w: 0.12 },
-      { key: 'pos', label: 'Pos.', w: 0.08 },
-      { key: 'sulco', label: 'Sulco', w: 0.10 },
-      { key: 'det', label: 'Detalhes', w: 0.30 },
-    ], (dados.historico || []).map((h) => ({
-      data: formatBr(h.data),
-      tipo: h.tipo_label || h.tipo,
-      fogo: labelFogoPdf(h.fogo),
-      placa: h.placa || '-',
-      pos: h.posicao || '-',
-      sulco: h.sulco != null ? mm(h.sulco) : '-',
-      det: clip(h.detalhes || '-', 42),
-    })), { emptyText: 'Nenhuma movimentacao registrada nesta semana.' });
-
-    // ── 6. Medicoes da semana ──────────────────────────
-    sectionTitle(doc, pager, '6', 'Medicoes registradas na semana');
-    drawTable(doc, pager, [
-      { key: 'data', label: 'Data', w: 0.10 },
-      { key: 'fogo', label: 'Fogo', w: 0.14 },
-      { key: 'placa', label: 'Onde', w: 0.12 },
-      { key: 'pos', label: 'Pos.', w: 0.08 },
-      { key: 'sulco', label: 'Sulco', w: 0.10, bold: true },
-      { key: 'status', label: 'Status', w: 0.12, colorize: true },
-      { key: 'acao', label: 'Acao', w: 0.12 },
-      { key: 'obs', label: 'Obs.', w: 0.22 },
-    ], (dados.medicoes_semana_lista || []).map((m) => ({
-      data: formatBr(m.data),
-      fogo: labelFogoPdf(m.fogo),
-      placa: m.placa || '-',
-      pos: m.posicao || '-',
-      sulco: mm(m.menor_sulco),
-      status: m.status,
-      acao: m.acao,
-      obs: clip(m.obs || '-', 28),
-    })), { emptyText: 'Nenhuma medicao na semana.' });
-
-    // ── 7. Descarte ────────────────────────────────────
-    sectionTitle(doc, pager, '7', 'Descarte');
+    // ── 5. Descarte ────────────────────────────────────
+    sectionTitle(doc, pager, '5', 'Descarte');
     drawTable(doc, pager, [
       { key: 'fogo', label: 'Fogo', w: 0.10 },
       { key: 'desc', label: 'Marca / modelo', w: 0.22 },
@@ -1127,7 +954,7 @@ export function gerarPdfRelatorioSemanal(dados) {
       { key: 'trat', label: 'Tratamento', w: 0.22, colorize: true },
       { key: 'em', label: 'Data', w: 0.10 },
       { key: 'obs', label: 'Obs.', w: 0.14 },
-    ], (dados.descarte || []).map((p) => ({
+    ], dados.descarte.map((p) => ({
       fogo: labelFogoPdf(p.fogo),
       desc: [p.marca, p.modelo].filter(Boolean).join(' ') || '-',
       padrao: labelPadraoPdf(p.padrao),
@@ -1140,10 +967,16 @@ export function gerarPdfRelatorioSemanal(dados) {
     pager.ensureSpace(24);
     const endY = doc.y;
     doc.roundedRect(x0, endY, w, 20, 3).fill(COLORS.softAlt);
-    absText(doc, asciiSafe(
-      'Documento gerado pelo PneuSistemma — frota, estoque, recap, historico e medicoes da semana.',
-    ), x0 + 8, endY + 6, { width: w - 16 });
-    doc.y = endY + 28;
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5)
+      .text(
+        'Documento gerado pelo PneuSistemma para apoio a decisao do gerente da unidade.',
+        x0 + 8,
+        endY + 6,
+        { width: w - 16, lineBreak: false }
+      );
+    doc.page.margins.bottom = savedBottom;
+    doc.y = endY + 22;
 
     stampFooters(doc, dados);
     doc.end();
