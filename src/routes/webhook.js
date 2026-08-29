@@ -89,24 +89,29 @@ function ehMensagemPropria(event) {
   return flags.some((v) => v === true || v === 'true' || v === 1 || v === '1');
 }
 
-/** Ignora eco do bot; permite testar placa/comando pelo próprio chip */
+/** Ignora eco do bot; permite testar placa/fogo/comando pelo próprio chip */
 function deveIgnorarMensagemPropria(event) {
   if (!ehMensagemPropria(event)) return false;
   const text = String(extrairTextoMensagem(event) || '').trim();
   if (!text) return true;
   // Eco das respostas do sistema
-  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada|relat[oó]rio gerencial|Gerando o \*relat|PneuSistemma — Menu|Confirma /i.test(text)) {
+  if (/Abrir medi|Link v[aá]lido|ALERTA DE PNEU|Frota cadastrada|Frota completa|n[aã]o encontrada|relat[oó]rio gerencial|Gerando o \*relat|PneuSistemma — Menu|Confirma |Recap\*|Medir pneu|Trocar \/ montar|Enviar ao estoque|Cadastrar /i.test(text)) {
     return true;
   }
-  // Comandos e placa pura → processa mesmo se fromMe
+  // Comandos e inputs operacionais → processa mesmo se fromMe (teste pelo chip)
   const cmd = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
   if (/^(frota|placas|lista|ajuda|help|menu|\?|cancelar|cancela|sair|voltar)$/i.test(cmd)) return false;
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) return false;
   if (/^[0-9]$/.test(cmd)) return false;
-  // Placa BR estrita OU placa operacional curta (ex.: BH123)
+  // Placa (Mercosul/antiga ou operacional)
   const placa = normalizarPlacaTexto(text);
   if (/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)) return false;
-  if (placa.length >= 3 && placa.length <= 10 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) return false;
+  if (placa.length >= 3 && placa.length <= 12 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) return false;
+  // Nº de fogo (ex.: BH-E01-215249, fogo 123)
+  const fogo = text.replace(/^fogo\s+/i, '').trim();
+  if (fogo.length >= 1 && fogo.length <= 24 && /^[A-Za-z0-9][A-Za-z0-9\-_./]*$/.test(fogo) && !/\s/.test(fogo)) {
+    return false;
+  }
   return true;
 }
 

@@ -473,22 +473,32 @@ async function passoRecap(ctx, sessao, texto) {
     return;
   }
 
-  const r = await ops.registrarRecap({ filialId: ctx.filialId, pneuId: pneu.id });
-  const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
-
-  if (r.estava_montado && r.veiculo_id && r.posicao) {
-    await pedirMontarEstoque(ctx, {
-      veiculoId: r.veiculo_id,
-      posicao: r.posicao,
-      placa: r.placa,
-      acaoLabel: `Fogo *${r.fogo}* enviado à recap (${r.vida}ª vida)`,
-    });
-    // reforça lembrete após pedir montagem — mensagem já enviada; ok
+  if (pneu.status_pneu === 'descarte') {
+    await clear(ctx);
+    await reply(ctx, `❌ Fogo *${pneu.numero_fogo}* já está no descarte.\n\n` + textoMenu());
     return;
   }
 
-  await clear(ctx);
-  await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${lembrete}\n\n` + textoMenu());
+  try {
+    const r = await ops.registrarRecap({ filialId: ctx.filialId, pneuId: pneu.id });
+    const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
+
+    if (r.estava_montado && r.veiculo_id && r.posicao) {
+      await pedirMontarEstoque(ctx, {
+        veiculoId: r.veiculo_id,
+        posicao: r.posicao,
+        placa: r.placa,
+        acaoLabel: `Fogo *${r.fogo}* enviado à recap (${r.vida}ª vida)`,
+      });
+      return;
+    }
+
+    await clear(ctx);
+    await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${lembrete}\n\n` + textoMenu());
+  } catch (err) {
+    await clear(ctx);
+    await reply(ctx, `❌ ${err.message}\n\n` + textoMenu());
+  }
 }
 
 async function passoDescarte(ctx, sessao, texto) {
@@ -659,6 +669,11 @@ export async function processarMensagemMenu(ctx) {
   if (pareceFogoAvulso(texto)) {
     const ok = await atalhoFogo(ctx, texto);
     if (ok) return { handled: true };
+    await reply(
+      ctx,
+      `❌ Nº de fogo *${String(texto).replace(/^fogo\s+/i, '').trim()}* não encontrado nesta unidade.\n\nDigite *menu* ou *3* para cadastrar.`
+    );
+    return { handled: true };
   }
 
   return { handled: false };
