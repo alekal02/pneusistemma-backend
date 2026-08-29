@@ -916,6 +916,12 @@ router.post('/:id/evento', async (req, res, next) => {
       if (pneu.status_pneu !== 'recapagem') {
         return res.status(400).json({ erro: 'Pneu não está em recapagem' });
       }
+      const sulcoInformado = sulco_mm != null && sulco_mm !== '' ? parseFloat(sulco_mm) : NaN;
+      if (!Number.isFinite(sulcoInformado) || sulcoInformado <= 0) {
+        return res.status(400).json({
+          erro: 'Informe o sulco após o recap (sulco_mm em mm) para devolver ao estoque',
+        });
+      }
       await db.transaction(async () => {
         await db.prepare(`
           UPDATE pneus SET
@@ -923,14 +929,11 @@ router.post('/:id/evento', async (req, res, next) => {
             condicao = 'recapado',
             veiculo_id = NULL,
             posicao = NULL,
-            sulco_inicial_mm = COALESCE(?, sulco_inicial_mm),
+            sulco_inicial_mm = ?,
             data_instalacao = NULL,
             data_alerta_monitorar = NULL
           WHERE id = ?
-        `).run(
-          sulco_mm != null ? parseFloat(sulco_mm) : limites.sulco_novo_mm,
-          pneu.id
-        );
+        `).run(sulcoInformado, pneu.id);
         await registrarMovimentacao(db, {
           pneuId: pneu.id,
           veiculoId: null,
@@ -939,7 +942,8 @@ router.post('/:id/evento', async (req, res, next) => {
           km: null,
           hr: null,
           posicao: null,
-          detalhes: detalhes || `Recap concluído · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
+          sulcoMm: sulcoInformado,
+          detalhes: detalhes || `Recap concluído · sulco ${sulcoInformado} mm · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
           placa: null,
         });
       });
