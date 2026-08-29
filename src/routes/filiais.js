@@ -21,6 +21,7 @@ import {
   labelTipoPneu,
 } from '../pneus-layouts.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
+import { garantirTokenExclusivoFilial } from '../services/whatsapp.js';
 
 const router = Router();
 
@@ -759,11 +760,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // Token WuzAPI exclusivo já na criação — status nasce Desconectado até o QR
+    let chatbot = null;
+    try {
+      chatbot = await garantirTokenExclusivoFilial({
+        id: criado.filialId,
+        codigo: salvo.filial_codigo,
+        nome: salvo.filial_nome,
+      });
+    } catch (err) {
+      console.warn('[filiais] token chatbot não provisionado:', err.message);
+    }
+
     res.status(201).json({
       id: criado.filialId,
       login: salvo.login,
       usuario_id: salvo.id,
-      mensagem: `Filial "${nome.trim()}" criada com login ${salvo.login}`,
+      tem_wuzapi_token: Boolean(chatbot?.token),
+      mensagem: chatbot?.token
+        ? `Filial "${nome.trim()}" criada com login ${salvo.login}. Chatbot pronto para Conectar / QR.`
+        : `Filial "${nome.trim()}" criada com login ${salvo.login}`,
     });
   } catch (err) {
     if (ehViolacaoUnique(err)) {

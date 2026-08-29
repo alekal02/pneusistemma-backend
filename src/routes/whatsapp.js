@@ -22,8 +22,8 @@ import {
   tokenWuzapiUtil,
   enviarERegistrar,
   normalizarDestino,
+  garantirTokenExclusivoFilial,
 } from '../services/whatsapp.js';
-import crypto from 'crypto';
 
 const router = Router();
 
@@ -483,7 +483,12 @@ router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) =>
     return res.status(403).json({ erro: 'Filial fora do seu escopo' });
   }
   try {
-    const f = await filialOuErro(req.params.id);
+    let f = await filialOuErro(req.params.id);
+    // Auto: cria token exclusivo ou corrige token herdado de outra unidade
+    const garantia = await garantirTokenExclusivoFilial(f);
+    if (garantia.criado || garantia.regenerado || !tokenWuzapiUtil(f.wuzapi_token)) {
+      f = await filialOuErro(req.params.id);
+    }
     res.json({
       id: f.id,
       nome: f.nome,
@@ -495,6 +500,9 @@ router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) =>
       admin_token_ok: Boolean(tokenWuzapiUtil(config.wuzapiAdminToken)),
       wuzapi_url: config.wuzapiBaseUrl,
       alertas_enabled: Boolean(config.whatsappAlertasEnabled),
+      token_recem_criado: Boolean(garantia.criado || garantia.regenerado),
+      precisa_conectar: Boolean(garantia.precisa_conectar),
+      aviso_token: garantia.regenerado ? garantia.mensagem : null,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });
@@ -503,8 +511,7 @@ router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) =>
 });
 
 /**
- * Cria (ou reutiliza) usuário no WuzAPI exclusivo desta filial.
- * Nunca reaproveita sessão de outra unidade nem o WUZAPI_TOKEN global.
+ * Cria (ou regenera) usuário WuzAPI exclusivo desta filial.
  */
 router.post('/filial/:id/provisionar-token', requireChatbotAcesso, async (req, res) => {
   try {
@@ -512,60 +519,19 @@ router.post('/filial/:id/provisionar-token', requireChatbotAcesso, async (req, r
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
     const f = await filialOuErro(req.params.id);
-    const nomeUser = `Pneu-${(f.codigo || f.nome || f.id).toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24) || f.id}`;
-
-    const lista = await wuzapiAdminFetch('/admin/users');
-    const users = Array.isArray(lista?.data) ? lista.data : (Array.isArray(lista) ? lista : []);
-
-    // Só o usuário com o nome desta filial (ou o token já gravado nela)
-    const tokenAtual = tokenWuzapiUtil(f.wuzapi_token);
-    const existente = users.find((u) => {
-      const n = String(u.name || u.Name || '').trim();
-      if (n === nomeUser || n === `PneuSistemma-${f.id}`) return true;
-      if (tokenAtual && tokenWuzapiUtil(u.token) === tokenAtual) return true;
-      return false;
-    });
-
-    let token = null;
-    let criado = false;
-    let nomeSalvo = nomeUser;
-    let origem = 'criado';
-
-    if (existente && tokenWuzapiUtil(existente.token)) {
-      token = tokenWuzapiUtil(existente.token);
-      nomeSalvo = existente.name || existente.Name || nomeUser;
-      origem = (existente.loggedIn || existente.LoggedIn) ? 'sessao_ativa' : 'existente';
-    }
-
-    if (!token) {
-      token = `pneu_${f.id}_${crypto.randomBytes(8).toString('hex')}`;
-      await wuzapiAdminFetch('/admin/users', {
-        method: 'POST',
-        body: { name: nomeUser, token },
-      });
-      criado = true;
-      origem = 'criado';
-      nomeSalvo = nomeUser;
-    }
-
-    const db = getDb();
-    await db.prepare(`
-      UPDATE filiais SET
-        wuzapi_token = ?,
-        updated_at = NOW()
-      WHERE id = ?
-    `).run(token, f.id);
-
-    const precisaQr = origem === 'criado' || origem === 'existente';
+    const forcarNovo = Boolean(req.body?.forcar_novo);
+    const result = await garantirTokenExclusivoFilial(f, { forcarNovo });
     res.json({
-      mensagem: precisaQr
-        ? `Token exclusivo de ${f.nome} salvo. Clique em Conectar / QR com o chip desta unidade.`
-        : `Token da unidade ${f.nome} vinculado (${nomeSalvo}).`,
-      nome_wuzapi: nomeSalvo,
+      mensagem: result.mensagem
+        || (result.precisa_conectar
+          ? `Token exclusivo de ${f.nome} pronto. Clique em Conectar / QR.`
+          : `Token da unidade ${f.nome} ok.`),
+      nome_wuzapi: result.nome_wuzapi,
       tem_wuzapi_token: true,
-      criado,
-      origem,
-      precisa_conectar: precisaQr,
+      criado: result.criado,
+      regenerado: result.regenerado,
+      origem: result.regenerado ? 'regenerado' : (result.criado ? 'criado' : 'ok'),
+      precisa_conectar: result.precisa_conectar,
     });
   } catch (err) {
     const code = err.status === 401 || err.status === 403 ? 502 : (err.status || 500);
@@ -702,7 +668,24 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = await filialOuErro(req.params.id);
+    let f = await filialOuErro(req.params.id);
+    // Corrige token compartilhado antes de consultar sessão
+    const garantia = await garantirTokenExclusivoFilial(f);
+    if (garantia.regenerado || garantia.criado) {
+      f = await filialOuErro(req.params.id);
+      return res.json({
+        filial_id: f.id,
+        nome: f.nome,
+        configurado: Boolean(tokenWuzapiUtil(f.wuzapi_token)),
+        connected: false,
+        loggedIn: false,
+        tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token)),
+        precisa_conectar: true,
+        mensagem: garantia.mensagem
+          || 'Token exclusivo pronto. Clique em Conectar / QR com o chip desta unidade.',
+      });
+    }
+
     const token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
     if (!wuzapiConfigurado(token)) {
       return res.json({
