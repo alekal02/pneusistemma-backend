@@ -946,6 +946,23 @@ router.post('/:id/evento', async (req, res, next) => {
           detalhes: detalhes || `Recap concluído · sulco ${sulcoInformado} mm · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
           placa: null,
         });
+        // Nova medição de inventário — evita o card exibir sulco antigo da vida anterior
+        await db.prepare(`
+          INSERT INTO medicoes (
+            pneu_id, data_medicao,
+            sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
+            responsavel, observacoes, diagnostico, acao_sugerida
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ok', 'ok')
+        `).run(
+          pneu.id,
+          data,
+          sulcoInformado,
+          sulcoInformado,
+          sulcoInformado,
+          sulcoInformado,
+          'retorno_recap',
+          `Sulco após recap: ${sulcoInformado} mm`
+        );
       });
     } else if (tipo === 'recap') {
       if (pneu.status_pneu === 'recapagem') {

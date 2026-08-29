@@ -277,7 +277,10 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
       );
     }
 
-    if (pneu.sulco_inicial_mm == null && menor != null) {
+    if (pneu.status_pneu === 'estoque' || pneu.status_pneu === 'recapagem') {
+      // Em estoque/recap a medição atualiza o sulco de referência do inventário
+      await db.prepare('UPDATE pneus SET sulco_inicial_mm = ? WHERE id = ?').run(menor, pneu_id);
+    } else if (pneu.sulco_inicial_mm == null && menor != null) {
       await db.prepare('UPDATE pneus SET sulco_inicial_mm = ? WHERE id = ?').run(menor, pneu_id);
     }
 
@@ -326,14 +329,14 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
 
     medicaoId = result.lastInsertRowid;
 
-    if (km_veiculo) {
+    if (km_veiculo && pneu.veiculo_id) {
       await db.prepare(`
         UPDATE veiculos SET km_atual = MAX(km_atual, ?), updated_at = NOW()
         WHERE id = ? AND filial_id = ?
       `).run(km_veiculo, pneu.veiculo_id, filialId);
     }
 
-    if (hr_veiculo != null) {
+    if (hr_veiculo != null && pneu.veiculo_id) {
       await db.prepare(`
         UPDATE veiculos SET hr_atual = MAX(COALESCE(hr_atual, 0), ?), updated_at = NOW()
         WHERE id = ? AND filial_id = ?
