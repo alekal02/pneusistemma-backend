@@ -2,7 +2,8 @@
  * Cliente WuzAPI — envio de mensagens WhatsApp
  * Spec: POST /chat/send/text com header `token` e body { Phone, Body, LinkPreview? }
  * Phone = número (DDI…) ou JID de grupo (…@g.us)
- * Token = por filial (wuzapi_token) ou fallback .env
+ * Token = exclusivamente o wuzapi_token da filial (cada unidade tem sua sessão).
+ * O WUZAPI_TOKEN do .env só serve para admin / legado de envio sem filial.
  */
 import { config } from '../config.js';
 import { getDb } from '../database.js';
@@ -39,8 +40,8 @@ export function normalizarDestino(destino) {
   }
 
   const onlyId = raw.replace(/[^\d-]/g, '');
-  // Grupo clássico WhatsApp: 120363… — não confundir com LID/telefone
-  if (/^120363\d{8,}$/.test(onlyId) || (onlyId.includes('-') && onlyId.length >= 15)) {
+  // Grupo clássico: 120363... (18+ dígitos) ou formato antigo com hífen
+  if (/^\d{15,}-?\d*$/.test(onlyId) || (onlyId.includes('-') && onlyId.length >= 15)) {
     return {
       phone: `${onlyId}@g.us`,
       isGroup: true,
@@ -51,21 +52,6 @@ export function normalizarDestino(destino) {
   const phone = limparTelefone(raw);
   if (!phone || phone.length < 10) return null;
   return { phone, isGroup: false, logKey: phone };
-}
-
-/** Id canônico de grupo (parte antes de @g.us), para comparar JIDs. */
-export function idGrupoCanonico(destino) {
-  const raw = String(destino || '').trim();
-  if (!raw) return '';
-  const gUs = raw.match(/^([^@\s]+)@g\.us$/i);
-  if (gUs) return gUs[1].replace(/:[0-9]+$/, '');
-  if (raw.toLowerCase().includes('@g.us')) {
-    return raw.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
-  }
-  // Só trata como grupo o padrão WhatsApp 120363… (não LID/telefone)
-  const onlyId = raw.replace(/[^\d-]/g, '');
-  if (/^120363\d{8,}$/.test(onlyId)) return onlyId;
-  return '';
 }
 
 function erroEnvioGrupo(errMsg) {
@@ -82,8 +68,11 @@ export function tokenWuzapiUtil(token) {
   return t;
 }
 
-export function wuzapiConfigurado(token = null) {
-  const t = tokenWuzapiUtil(token || config.wuzapiToken);
+export function wuzapiConfigurado(token = undefined) {
+  // Sem argumento: checa .env. Com argumento (mesmo ''): só esse token.
+  const t = token === undefined
+    ? tokenWuzapiUtil(config.wuzapiToken)
+    : tokenWuzapiUtil(token);
   return Boolean(config.wuzapiBaseUrl && t);
 }
 
@@ -95,36 +84,10 @@ function tokenNaoEAdmin(token) {
   return t;
 }
 
-async function fetchAdminUsers() {
-  const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
-  if (!admin || !config.wuzapiBaseUrl) return [];
-  try {
-    const res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
-      headers: { Authorization: admin },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
-  } catch {
-    return [];
-  }
-}
-
-async function gravarTokenFilial(filialId, token) {
-  const t = tokenNaoEAdmin(token);
-  if (!filialId || !t) return;
-  try {
-    const db = getDb();
-    await db.prepare(`
-      UPDATE filiais SET wuzapi_token = ?, updated_at = NOW() WHERE id = ? AND ativo = 1
-    `).run(t, filialId);
-  } catch (err) {
-    console.warn('[whatsapp] não gravou token ativo:', err.message);
-  }
-}
-
-/** Tokens para envio: filial → sessão logada no WuzAPI → .env */
+/**
+ * Tokens para envio desta filial — nunca usa sessão de outra unidade.
+ * Ordem: token explícito → token gravado na filial → .env só se a filial não tiver token.
+ */
 async function listarTokensEnvio(filialId, explicitToken) {
   const tokens = [];
   const add = (t) => {
@@ -132,13 +95,10 @@ async function listarTokensEnvio(filialId, explicitToken) {
     if (u && !tokens.includes(u)) tokens.push(u);
   };
   add(explicitToken);
-  add(await tokenWuzapiFilial(filialId));
-
-  const users = await fetchAdminUsers();
-  for (const u of users) {
-    if (u.loggedIn || u.LoggedIn) add(u.token);
-  }
-  add(config.wuzapiToken);
+  const proprio = await tokenWuzapiFilial(filialId, { permitirEnv: false });
+  add(proprio);
+  // Legado: só cai no .env se esta filial ainda não tem token próprio
+  if (!proprio) add(config.wuzapiToken);
   return tokens;
 }
 
@@ -158,13 +118,19 @@ function headersUsuarioWuzapi(token) {
 function mensagemErroWuzapi(status, msg) {
   const texto = typeof msg === 'string' ? msg : JSON.stringify(msg);
   if (ehFalhaAuthWuzapi(status, texto)) {
-    return 'Sessão WhatsApp recusada (401). O token é gerado de novo automaticamente — clique em Conectar / QR.';
+    return 'Sessão WhatsApp recusada (401). Clique em Gerar token e depois Conectar / QR com o chip da unidade.';
   }
   return `WuzAPI erro ${status}: ${texto}`;
 }
 
-/** Token WuzAPI da filial, com fallback no .env */
-export async function tokenWuzapiFilial(filialId) {
+/**
+ * Token WuzAPI da filial.
+ * @param {number|string|null} filialId
+ * @param {{ permitirEnv?: boolean }} [opts] — permitirEnv=false: só o token da filial
+ *   (status/QR/conectar). Default true só para compatibilidade de envio legado.
+ */
+export async function tokenWuzapiFilial(filialId, opts = {}) {
+  const permitirEnv = opts.permitirEnv !== false;
   if (filialId) {
     const db = getDb();
     const row = await db.prepare(`
@@ -173,6 +139,7 @@ export async function tokenWuzapiFilial(filialId) {
     const local = tokenNaoEAdmin(row?.wuzapi_token);
     if (local) return local;
   }
+  if (!permitirEnv) return '';
   return tokenNaoEAdmin(config.wuzapiToken);
 }
 
@@ -224,7 +191,8 @@ export async function enviarMensagemWhatsApp(phoneOrGroup, text, opts = {}) {
     }
 
     if (res.ok) {
-      if (i > 0) await gravarTokenFilial(opts.filialId, token);
+      // Nunca grava token “emprestado” (.env / outra sessão) na filial —
+      // cada unidade mantém só o token que ela provisionou.
       if (performance.now() - tSend > 1500) {
         console.warn('[whatsapp] envio lento', Math.round(performance.now() - tSend), 'ms');
       }
@@ -300,7 +268,6 @@ export async function enviarDocumentoWhatsApp(phoneOrGroup, buffer, fileName, op
     }
 
     if (res.ok) {
-      if (i > 0) await gravarTokenFilial(opts.filialId, token);
       return data;
     }
 

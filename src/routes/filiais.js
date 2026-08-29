@@ -318,7 +318,6 @@ router.get('/:id', async (req, res, next) => {
       ...f,
       whatsapp: limparTextoFilial(f.whatsapp),
       whatsapp_grupo: limparTextoFilial(f.whatsapp_grupo),
-      whatsapp_grupo_nome: limparTextoFilial(f.whatsapp_grupo_nome),
       whatsapp_alerta: limparTextoFilial(f.whatsapp_alerta),
       wuzapi_token: undefined,
       tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
