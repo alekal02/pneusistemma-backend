@@ -433,6 +433,17 @@ export async function registrarDescarte({ filialId, pneuId, motivo = null }) {
         data_instalacao = NULL
       WHERE id = ?
     `).run(motivo?.trim() || null, data, pneuId);
+    await registrarMovimentacao(db, {
+      pneuId,
+      veiculoId: estavaMontado ? veiculoId : null,
+      tipo: 'descarte',
+      data,
+      km: pneu.km_atual,
+      hr: pneu.hr_atual,
+      posicao: estavaMontado ? posicao : null,
+      detalhes: motivo?.trim() || 'WhatsApp · enviou ao descarte',
+      placa: pneu.placa || null,
+    });
   });
   return {
     fogo: pneu.numero_fogo,

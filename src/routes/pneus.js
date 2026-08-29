@@ -493,7 +493,7 @@ router.post('/', async (req, res, next) => {
 
 router.get('/:id', async (req, res, next) => {
   try {
-    const pneu = await assertPneuDaFilial(req.params.id, filialScopeId(req));
+    const pneu = await assertPneuDaFilial(req.params.id, filialScopeId(req), { incluirInativos: true });
     if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
 
     const db = getDb();
@@ -529,9 +529,8 @@ router.get('/:id', async (req, res, next) => {
     FROM movimentacoes m
     LEFT JOIN veiculos v ON v.id = m.veiculo_id
     WHERE m.pneu_id = ?
-      AND m.tipo IN ('montagem', 'retirada', 'mudanca_posicao', 'desmontagem')
     ORDER BY m.data_evento DESC, m.id DESC
-    LIMIT 50
+    LIMIT 80
   `).all(req.params.id);
 
     const ultima = medicoes[0] || null;
@@ -560,7 +559,10 @@ router.get('/:id', async (req, res, next) => {
       montagem: 'Colocou no caminhão',
       retirada: 'Retirou do caminhão',
       desmontagem: 'Retirou do caminhão',
-      mudanca_posicao: 'Mudou de posição',
+      mudanca_posicao: 'Mudou de posição (rodízio)',
+      recap: 'Enviou à recapagem',
+      retorno_recap: 'Recap concluído · voltou ao estoque',
+      descarte: 'Enviou ao descarte',
     };
 
     res.json({
@@ -1036,6 +1038,17 @@ router.post('/:id/evento', async (req, res, next) => {
             observacoes = COALESCE(observacoes || ' | ', '') || ?
           WHERE id = ?
         `).run(data, `descarte em ${data}${detalhes ? ` — ${detalhes}` : ''}`, pneu.id);
+        await registrarMovimentacao(db, {
+          pneuId: pneu.id,
+          veiculoId: pneu.veiculo_id || null,
+          tipo: 'descarte',
+          data,
+          km: km_veiculo != null ? parseInt(km_veiculo, 10) : null,
+          hr: hr_veiculo != null ? parseFloat(hr_veiculo) : null,
+          posicao: pneu.posicao || null,
+          detalhes: detalhes || 'Enviado ao estoque de descarte',
+          placa: null,
+        });
       });
     }
 
@@ -1063,7 +1076,7 @@ router.put('/:id/tratamento-descarte', async (req, res, next) => {
     });
   }
   try {
-    const pneu = await assertPneuDaFilial(req.params.id, filialScopeId(req));
+    const pneu = await assertPneuDaFilial(req.params.id, filialScopeId(req), { incluirInativos: true });
     if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
     if (pneu.status_pneu !== 'descarte') {
       return res.status(400).json({ erro: 'Só pneus no estoque de descarte recebem tratamento' });
