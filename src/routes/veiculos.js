@@ -24,6 +24,7 @@ import {
   VEICULO_TEMPLATE_HEADERS,
   VEICULO_TEMPLATE_ROWS,
   mapLayoutId,
+  parseNumeroBr,
 } from '../csv-utils.js';
 import {
   gerarTokenAcessoRapido,
@@ -302,16 +303,16 @@ router.post('/import', async (req, res, next) => {
           continue;
         }
 
-        const tipo = normalizarTipoVeiculo(raw.tipo) || 'Truck / Tração';
+        const tipo = normalizarTipoVeiculo(raw.tipo_veiculo || raw.tipo) || 'Truck / Tração';
         const layoutId = mapLayoutId(raw.layout_pneus || raw.layout, tipo);
         if (!LAYOUTS_PNEU[layoutId]) {
           erros.push({ linha, placa, erro: `Layout inválido: ${raw.layout_pneus || raw.layout}` });
           continue;
         }
 
-        const ano = raw.ano ? parseInt(raw.ano, 10) : null;
-        const km = raw.km_atual != null && raw.km_atual !== '' ? parseInt(raw.km_atual, 10) : 0;
-        const hr = raw.hr_atual != null && raw.hr_atual !== '' ? parseFloat(raw.hr_atual) : 0;
+        const ano = parseNumeroBr(raw.ano);
+        const km = parseNumeroBr(raw.km_atual);
+        const hr = parseNumeroBr(raw.hr_atual);
 
         try {
           const { result, posicoes } = await comSavepoint(db, async () => {
@@ -321,8 +322,8 @@ router.post('/import', async (req, res, next) => {
               tipo,
               String(raw.marca || '').trim() || null,
               String(raw.modelo || '').trim() || null,
-              Number.isFinite(ano) ? ano : null,
-              Number.isFinite(km) ? km : 0,
+              Number.isFinite(ano) ? Math.round(ano) : null,
+              Number.isFinite(km) ? Math.round(km) : 0,
               Number.isFinite(hr) ? hr : 0,
               String(raw.observacoes || '').trim() || null,
               layoutId,

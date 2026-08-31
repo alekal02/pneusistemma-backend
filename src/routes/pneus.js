@@ -34,6 +34,7 @@ import {
   PNEU_TEMPLATE_ROWS,
   mapTipoPneu,
   mapCondicao,
+  parseNumeroBr,
 } from '../csv-utils.js';
 import { registrarMovimentacao, atualizarKmHrVeiculo } from '../services/pneu-movimentacao.js';
 import { enviarPneuParaRecap, receberRecapPneu } from '../services/pneu-recap.js';
@@ -224,12 +225,8 @@ router.post('/import', async (req, res, next) => {
         if (!Number.isFinite(vida) || vida < 0) vida = 0;
         if (cond === 'novo') vida = 0;
 
-        const sulco = raw.sulco_inicial_mm != null && raw.sulco_inicial_mm !== ''
-          ? parseFloat(String(raw.sulco_inicial_mm).replace(',', '.'))
-          : null;
-        const custo = raw.custo != null && raw.custo !== ''
-          ? parseFloat(String(raw.custo).replace(',', '.'))
-          : null;
+        const sulco = parseNumeroBr(raw.sulco_inicial_mm);
+        const custo = parseNumeroBr(raw.custo);
 
         try {
           const result = await comSavepoint(db, () => insert.run(

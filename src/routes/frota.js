@@ -23,6 +23,7 @@ import {
   mapTipoPneu,
   mapCondicao,
   mapStatusPneu,
+  parseNumeroBr,
 } from '../csv-utils.js';
 
 const router = Router();
@@ -65,14 +66,16 @@ router.post('/import', async (req, res, next) => {
   const insertPneuEstoque = db.prepare(`
     INSERT INTO pneus (
       veiculo_id, posicao, filial_id, marca, modelo, medida, dot, numero_fogo,
-      tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo, observacoes
-    ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1, ?)
+      tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo, observacoes,
+      custo, nota_fiscal
+    ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1, ?, ?, ?)
   `);
   const insertPneuMontado = db.prepare(`
     INSERT INTO pneus (
       veiculo_id, posicao, filial_id, marca, modelo, medida, dot, numero_fogo,
-      tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, data_instalacao, km_instalacao, ativo, observacoes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'montado', date('now', 'localtime'), ?, 1, ?)
+      tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, data_instalacao, km_instalacao, ativo, observacoes,
+      custo, nota_fiscal
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'montado', date('now', 'localtime'), ?, 1, ?, ?, ?)
   `);
   const insertMov = db.prepare(`
     INSERT INTO movimentacoes (pneu_id, veiculo_id, tipo, data_evento, km_veiculo, posicao, detalhes)
@@ -103,8 +106,8 @@ router.post('/import', async (req, res, next) => {
       return null;
     }
 
-    const km = raw.km_atual !== '' && raw.km_atual != null ? parseInt(raw.km_atual, 10) : 0;
-    const hr = raw.hr_atual !== '' && raw.hr_atual != null ? parseFloat(raw.hr_atual) : 0;
+    const km = parseNumeroBr(raw.km_atual);
+    const hr = parseNumeroBr(raw.hr_atual);
 
     try {
       const info = await comSavepoint(db, async () => {
@@ -115,7 +118,7 @@ router.post('/import', async (req, res, next) => {
           null,
           null,
           null,
-          Number.isFinite(km) ? km : 0,
+          Number.isFinite(km) ? Math.round(km) : 0,
           Number.isFinite(hr) ? hr : 0,
           String(raw.observacoes_veiculo || '').trim() || null,
           layoutId,
@@ -167,13 +170,14 @@ router.post('/import', async (req, res, next) => {
           : (condicao === 'recapado' ? 1 : 0);
         if (!Number.isFinite(vida) || vida < 0) vida = 0;
         if (condicao === 'novo') vida = 0;
-        const sulco = raw.sulco_inicial_mm !== '' && raw.sulco_inicial_mm != null
-          ? parseFloat(String(raw.sulco_inicial_mm).replace(',', '.'))
-          : null;
+        const sulco = parseNumeroBr(raw.sulco_inicial_mm);
         const marca = String(raw.marca || '').trim() || null;
+        const modelo = String(raw.modelo || '').trim() || null;
         const medida = String(raw.medida || '').trim() || null;
         const dot = String(raw.dot || '').trim() || null;
         const obs = String(raw.observacoes || '').trim() || null;
+        const custo = parseNumeroBr(raw.custo);
+        const notaFiscal = String(raw.nota_fiscal || raw.nota || '').trim() || null;
 
         if (status === 'montado') {
           if (!placa || !posicao) {
@@ -219,9 +223,7 @@ router.post('/import', async (req, res, next) => {
             avisos.push({ linha, numero_fogo: fogo, aviso: validacao.erros.join(' ') });
           }
 
-          const kmInst = raw.km_atual !== '' && raw.km_atual != null
-            ? parseInt(raw.km_atual, 10)
-            : 0;
+          const kmInst = parseNumeroBr(raw.km_atual);
 
           try {
             const criado = await comSavepoint(db, async () => {
@@ -230,7 +232,7 @@ router.post('/import', async (req, res, next) => {
                 posicao,
                 filialId,
                 marca,
-                null,
+                modelo,
                 medida,
                 dot,
                 fogo,
@@ -238,13 +240,15 @@ router.post('/import', async (req, res, next) => {
                 condicao,
                 vida,
                 Number.isFinite(sulco) ? sulco : null,
-                Number.isFinite(kmInst) ? kmInst : 0,
-                obs
+                Number.isFinite(kmInst) ? Math.round(kmInst) : 0,
+                obs,
+                Number.isFinite(custo) ? custo : null,
+                notaFiscal
               );
               await insertMov.run(
                 result.lastInsertRowid,
                 veiculo.id,
-                Number.isFinite(kmInst) ? kmInst : 0,
+                Number.isFinite(kmInst) ? Math.round(kmInst) : 0,
                 posicao,
                 'Carga inicial da frota — pneu já em uso'
               );
@@ -266,7 +270,7 @@ router.post('/import', async (req, res, next) => {
           const result = await comSavepoint(db, () => insertPneuEstoque.run(
             filialId,
             marca,
-            null,
+            modelo,
             medida,
             dot,
             fogo,
@@ -274,7 +278,9 @@ router.post('/import', async (req, res, next) => {
             condicao,
             vida,
             Number.isFinite(sulco) ? sulco : null,
-            obs
+            obs,
+            Number.isFinite(custo) ? custo : null,
+            notaFiscal
           ));
           pneusEstoque.push({ id: result.lastInsertRowid, numero_fogo: fogo });
         } catch (err) {

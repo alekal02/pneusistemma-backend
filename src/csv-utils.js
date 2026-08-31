@@ -2,78 +2,111 @@
  * Utilitários CSV (separador ; ou ,) para importação de frota.
  */
 
-export function parseCsv(text) {
-  const raw = String(text || '').replace(/^\uFEFF/, '').trim();
-  if (!raw) return { headers: [], rows: [] };
+const HEADER_ALIASES = {
+  n_de_fogo: 'numero_fogo',
+  n_fogo: 'numero_fogo',
+  nr_fogo: 'numero_fogo',
+  no_de_fogo: 'numero_fogo',
+  no_fogo: 'numero_fogo',
+  fogo: 'numero_fogo',
+  padrao: 'tipo_pneu',
+  tipo_do_pneu: 'tipo_pneu',
+  tipo_do_veiculo: 'tipo_veiculo',
+};
 
-  const firstLine = raw.split(/\r?\n/).find((l) => l.trim() && !l.trim().startsWith('#')) || '';
-  const sep = firstLine.includes(';') && !firstLine.split(';')[0].includes(',')
-    ? ';'
-    : (firstLine.includes(';') && firstLine.indexOf(';') < (firstLine.indexOf(',') === -1 ? 999 : firstLine.indexOf(','))
-      ? ';'
-      : ',');
-
-  const lines = [];
-  let current = '';
+function detectSeparator(text) {
+  let commas = 0;
+  let semis = 0;
   let inQuotes = false;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    const next = raw[i + 1];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
     if (ch === '"') {
-      if (inQuotes && next === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
+      if (inQuotes && text[i + 1] === '"') {
+        i += 1;
+        continue;
       }
+      inQuotes = !inQuotes;
       continue;
     }
-    if ((ch === '\n' || (ch === '\r' && next === '\n')) && !inQuotes) {
-      if (ch === '\r') i++;
-      lines.push(current);
-      current = '';
-      continue;
-    }
-    if (ch === '\r' && !inQuotes) {
-      lines.push(current);
-      current = '';
-      continue;
-    }
-    current += ch;
+    if (inQuotes) continue;
+    if (ch === '\n' || ch === '\r') break;
+    if (ch === ',') commas += 1;
+    if (ch === ';') semis += 1;
   }
-  if (current.length) lines.push(current);
+  return semis >= commas ? ';' : ',';
+}
 
-  const splitLine = (line) => {
-    const cells = [];
-    let cell = '';
-    let q = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      const next = line[i + 1];
-      if (ch === '"') {
-        if (q && next === '"') {
-          cell += '"';
-          i++;
-        } else q = !q;
-        continue;
-      }
-      if (ch === sep && !q) {
-        cells.push(cell.trim());
-        cell = '';
-        continue;
-      }
-      cell += ch;
-    }
-    cells.push(cell.trim());
-    return cells;
+function parseCsvRows(text, sep) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+
+  const pushCell = () => {
+    row.push(cell.trim());
+    cell = '';
+  };
+  const pushRow = () => {
+    if (row.some((c) => String(c || '').trim())) rows.push(row);
+    row = [];
   };
 
-  const usable = lines.filter((l) => l.trim() && !l.trim().startsWith('#'));
-  if (!usable.length) return { headers: [], rows: [], separator: sep };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (next === '"') {
+          cell += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cell += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (ch === sep) {
+      pushCell();
+      continue;
+    }
+    if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && next === '\n') i += 1;
+      pushCell();
+      pushRow();
+      continue;
+    }
+    cell += ch;
+  }
+  if (cell.length || row.length) {
+    pushCell();
+    pushRow();
+  }
+  return rows;
+}
 
-  const headers = splitLine(usable[0]).map((h) => normalizeHeader(h));
-  const rows = usable.slice(1).map((line, idx) => {
-    const cells = splitLine(line);
+export function parseCsv(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '');
+  if (!raw.trim()) return { headers: [], rows: [] };
+
+  const start = raw.split(/\r?\n/).find((l) => l.trim() && !l.trim().startsWith('#')) || '';
+  const sep = detectSeparator(start);
+  const table = parseCsvRows(raw, sep).filter((r) => {
+    const first = String(r[0] || '').trim();
+    return first && !first.startsWith('#');
+  });
+  if (!table.length) return { headers: [], rows: [], separator: sep };
+
+  const headers = table[0].map((h) => {
+    const key = normalizeHeader(h);
+    return HEADER_ALIASES[key] || key;
+  });
+  const rows = table.slice(1).map((cells, idx) => {
     const obj = { __linha: idx + 2 };
     headers.forEach((h, i) => {
       if (!h) return;
@@ -93,6 +126,20 @@ function normalizeHeader(h) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_|_$/g, '');
+}
+
+/** Aceita 16,5 · 1.850,00 · 1850.00 */
+export function parseNumeroBr(raw) {
+  if (raw == null || raw === '') return null;
+  let s = String(raw).trim();
+  if (!s) return null;
+  if (s.includes(',') && s.includes('.')) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else if (s.includes(',')) {
+    s = s.replace(',', '.');
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
 }
 
 export function toCsv(headers, rows, { separator = ';' } = {}) {
@@ -229,6 +276,12 @@ export function mapLayoutId(raw, tipo) {
     toco: 'toco_6',
     mini: 'toco_6',
     '6': 'toco_6',
+    truck_6x2: 'truck_8',
+    '6x2': 'truck_8',
+    truck6x2: 'truck_8',
+    truck_6x4: 'truck_10',
+    '6x4': 'truck_10',
+    truck6x4: 'truck_10',
   };
   if (v && aliases[v]) return aliases[v];
   if (v && aliases[v.replace(/\s+/g, '')]) return aliases[v.replace(/\s+/g, '')];
@@ -270,6 +323,7 @@ export const FROTA_TEMPLATE_HEADERS = [
   'condicao',
   'vida_recap',
   'marca',
+  'modelo',
   'medida',
   'dot',
   'sulco_inicial_mm',
@@ -291,6 +345,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'novo',
     vida_recap: '0',
     marca: 'Michelin',
+    modelo: 'X Multi D',
     medida: '275/80R22.5',
     dot: '1224',
     sulco_inicial_mm: '16',
@@ -310,6 +365,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'novo',
     vida_recap: '0',
     marca: 'Michelin',
+    modelo: 'X Multi D',
     medida: '275/80R22.5',
     dot: '1224',
     sulco_inicial_mm: '15',
@@ -329,6 +385,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'recapado',
     vida_recap: '1',
     marca: 'Goodyear',
+    modelo: 'KMax',
     medida: '275/80R22.5',
     dot: '',
     sulco_inicial_mm: '14',
@@ -348,6 +405,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'novo',
     vida_recap: '0',
     marca: 'Pirelli',
+    modelo: 'FG01',
     medida: '275/80R22.5',
     dot: '0325',
     sulco_inicial_mm: '17',
