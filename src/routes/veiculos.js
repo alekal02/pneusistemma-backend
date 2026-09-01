@@ -15,6 +15,7 @@ import {
   aplicarLayoutPneus,
   validarMontagem,
   getLayout,
+  sincronizarLayoutComTipo,
 } from '../pneus-layouts.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
@@ -524,7 +525,7 @@ router.put('/:id', async (req, res, next) => {
     const db = getDb();
     const filialId = filialScopeId(req);
     const atual = await db.prepare(`
-      SELECT id, dia_medicao FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
+      SELECT id, dia_medicao, tipo, layout_pneus FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
     `).get(req.params.id, filialId);
     if (!atual) return res.status(404).json({ erro: 'Veículo não encontrado' });
 
@@ -562,7 +563,21 @@ router.put('/:id', async (req, res, next) => {
     );
 
     if (result.changes === 0) return res.status(404).json({ erro: 'Veículo não encontrado' });
-    res.json({ mensagem: 'Veículo atualizado' });
+
+    const tipoFinal = tipo != null ? (normalizarTipoVeiculo(tipo) || atual.tipo) : atual.tipo;
+    const sync = await sincronizarLayoutComTipo(db, {
+      ...atual,
+      id: Number(req.params.id),
+      tipo: tipoFinal,
+    });
+    const layoutInfo = getLayout(sync.veiculo.layout_pneus || LAYOUT_PADRAO);
+    res.json({
+      mensagem: sync.alterou
+        ? `Veículo atualizado — desenho alterado para ${layoutInfo?.nome || 'o tipo escolhido'}`
+        : 'Veículo atualizado',
+      layout_alterado: sync.alterou,
+      layout_pneus: layoutInfo?.id || sync.veiculo.layout_pneus,
+    });
   } catch (err) {
     next(err);
   }

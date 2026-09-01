@@ -16,6 +16,7 @@ import {
   sqlOrderPosicao,
   getLayout,
   labelTipoPneu,
+  sincronizarLayoutComTipo,
 } from '../pneus-layouts.js';
 
 export async function gerarTokenAcessoRapido({ veiculoId, filialId, whatsappOrigem = null }) {
@@ -72,6 +73,9 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
   }
   if (!veiculo) return null;
 
+  const sync = await sincronizarLayoutComTipo(db, veiculo);
+  veiculo = sync.veiculo;
+
   const orderSql = sqlOrderPosicao('p.posicao');
   const pneus = await db.prepare(`
     SELECT p.*,
@@ -81,7 +85,8 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
       (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux,
       (SELECT diagnostico FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_diagnostico,
       (SELECT acao_sugerida FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_acao,
-      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
+      (SELECT pressao_psi FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_pressao
     FROM pneus p
     WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     ORDER BY ${orderSql}
@@ -124,6 +129,7 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
           sulco_central: p.ult_sulco_cent,
           sulco_interno: p.ult_sulco_int,
           sulco_auxiliar: p.ult_sulco_aux,
+          pressao_psi: p.ult_pressao ?? null,
           menor_sulco: menor,
         }
         : null,

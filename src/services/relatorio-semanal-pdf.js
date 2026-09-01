@@ -10,6 +10,7 @@ import {
   labelTipoPneu,
   labelTratamentoDescarte,
   sqlOrderPosicao,
+  papelPosicao,
 } from '../pneus-layouts.js';
 
 function pad2(n) {
@@ -91,6 +92,33 @@ function labelStatusSulco(s) {
 
 function mm(v) {
   return v == null ? '—' : `${Number(v)} mm`;
+}
+
+/** Ação que o gerente deve tomar — texto do relatório, sem abreviação. */
+function textoOQueFazer(item, acao, limites) {
+  const critico = limites.sulco_critico_mm;
+  const prazo = limites.prazo_recap_dias ?? 15;
+  const sulco = item.menor_sulco != null ? `${item.menor_sulco} mm` : 'sem medição';
+  const codigo = acao?.codigo;
+  const motivo = String(acao?.motivo || '').trim();
+  const rodizio = acao?.rodizio_sugestao;
+
+  if (codigo === 'troca' || item.status_sulco === 'critico') {
+    const base = `Trocar agora: retirar o pneu do caminhão (sulco ${sulco} ≤ ${critico} mm) e montar outro na posição.`;
+    return motivo && !/crítico|critico|retirar e trocar/i.test(motivo) ? `${base} ${motivo}` : (motivo || base);
+  }
+  if (codigo === 'recap') {
+    return motivo || 'Enviar para recapagem: desmonte, registre a recap e coloque outro pneu (estoque) na posição.';
+  }
+  if (codigo === 'monitorar' || item.status_sulco === 'alerta') {
+    const base = `Programar substituição: iniciar recap/compra em até ${prazo} dias e acompanhar o sulco nas próximas medições (${sulco}).`;
+    return motivo || base;
+  }
+  if (codigo === 'rodizio') {
+    if (rodizio?.motivo) return rodizio.motivo;
+    return motivo || 'Fazer rodízio para o lado oposto do eixo para equalizar o desgaste.';
+  }
+  return motivo || 'Nenhuma ação urgente — manter medição periódica.';
 }
 
 /**
@@ -189,6 +217,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       const diag = diagnosticarPerfil(pontos, limites.diagnostico_tolerancia_mm, {
         limites,
         posicao: p.posicao,
+        papel: papelPosicao(p.posicao),
       });
       const acao = sugerirAcao(menor, limites, p.vida_recap || 0, {
         pontos,
@@ -229,9 +258,15 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
         status_sulco: status,
         status_label: labelStatusSulco(status),
         diagnostico: diag.label || '—',
+        diagnostico_codigo: diag.codigo || null,
+        diagnostico_desc: diag.descricao || null,
         acao: acao.label || acao.codigo,
         acao_codigo: acao.codigo,
         motivo: acao.motivo || null,
+        o_que_fazer: textoOQueFazer({ menor_sulco: menor, status_sulco: status }, acao, limites),
+        rodizio_sugestao: acao.rodizio_sugestao
+          ? (acao.rodizio_sugestao.label || acao.rodizio_sugestao.posicao_label || null)
+          : null,
         data_medicao: p.data_medicao,
         custo: p.custo,
         nota_fiscal: p.nota_fiscal,
@@ -276,6 +311,11 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       pneus: pneusDetalhe,
     });
   }
+
+  const porSulco = (a, b) => (Number(a.menor_sulco) ?? 99) - (Number(b.menor_sulco) ?? 99);
+  prioridadesTroca.sort(porSulco);
+  prioridadesMonitorar.sort(porSulco);
+  prioridadesRodizio.sort(porSulco);
 
   const estoque = await db.prepare(`
     SELECT id, numero_fogo, marca, modelo, medida, tipo_pneu, condicao, vida_recap,
@@ -438,17 +478,6 @@ function labelPadraoPdf(padrao) {
   if (/misto/i.test(s)) return 'Misto';
   if (/direcional/i.test(s)) return 'Direcional';
   if (/borrachudo/i.test(s)) return 'Borrachudo';
-  return s;
-}
-
-function labelDiagPdf(diag) {
-  const s = asciiSafe(diag).trim();
-  if (!s || s === '-') return '-';
-  if (/desgaste progressivo/i.test(s)) return 'Prog. Ext->Int';
-  if (/desgaste irregular/i.test(s)) return 'Irregular';
-  if (/sem dados/i.test(s)) return 'Sem dados';
-  if (/^ok$/i.test(s)) return 'OK';
-  if (/cr[ií]tico/i.test(s)) return 'Critico';
   return s;
 }
 
@@ -698,6 +727,134 @@ function drawTable(doc, pager, columns, rows, { emptyText = 'Sem registros.' } =
   softGap(doc, 6);
 }
 
+function measureWrap(doc, text, width, fontSize = 8, bold = false) {
+  const raw = asciiSafe(text || '');
+  if (!raw) return 0;
+  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(fontSize);
+  return doc.heightOfString(raw, { width, lineGap: 1.2 });
+}
+
+function paintWrap(doc, text, x, y, width, fontSize, color, bold = false) {
+  const raw = asciiSafe(text || '');
+  if (!raw) return 0;
+  const savedBottom = doc.page.margins.bottom;
+  const savedY = doc.y;
+  doc.page.margins.bottom = 0;
+  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(fontSize).fillColor(color);
+  const h = doc.heightOfString(raw, { width, lineGap: 1.2 });
+  doc.text(raw, x, y, { width, lineGap: 1.2 });
+  doc.page.margins.bottom = savedBottom;
+  doc.y = savedY;
+  return h;
+}
+
+/** Bloco padrão do relatório: título + nome do diagnóstico + texto completo. */
+function partesDiagnostico(item) {
+  return {
+    titulo: 'Diagnóstico',
+    nome: item?.diagnostico || '—',
+    desc: item?.diagnostico_desc || '',
+  };
+}
+
+function measureDiagnosticoBloco(doc, item, width) {
+  const { titulo, nome, desc } = partesDiagnostico(item);
+  let h = measureWrap(doc, titulo, width, 7.5, true);
+  h += 1 + measureWrap(doc, nome, width, 8.5, true);
+  if (desc) h += 1.5 + measureWrap(doc, desc, width, 8);
+  return h;
+}
+
+function paintDiagnosticoBloco(doc, item, x, y, width, accent) {
+  const { titulo, nome, desc } = partesDiagnostico(item);
+  let cy = y;
+  cy += paintWrap(doc, titulo, x, cy, width, 7.5, accent || COLORS.ink, true);
+  cy += 1;
+  cy += paintWrap(doc, nome, x, cy, width, 8.5, COLORS.ink, true);
+  if (desc) {
+    cy += 1.5;
+    cy += paintWrap(doc, desc, x, cy, width, 8, COLORS.ink);
+  }
+  return cy - y;
+}
+
+/**
+ * Cartão de prioridade: diagnóstico completo + o que o gerente deve fazer.
+ */
+function drawPriorityCards(doc, pager, items, { emptyText, accent }) {
+  if (!items.length) {
+    mutedLine(doc, pager, emptyText);
+    return;
+  }
+
+  const x0 = doc.page.margins.left;
+  const w = contentWidth(doc);
+  const pad = 8;
+  const innerW = w - pad * 2 - 4;
+  const savedBottom = doc.page.margins.bottom;
+
+  for (const item of items) {
+    const sulcos = `${item.sulcos?.ext ?? '-'} / ${item.sulcos?.cent ?? '-'} / ${item.sulcos?.int ?? '-'} / ${item.sulcos?.aux ?? '-'}`;
+    const header = [
+      item.placa || item.apelido || '-',
+      item.posicao_label || item.posicao,
+      `Fogo ${labelFogoPdf(item.fogo)}`,
+      mm(item.menor_sulco),
+    ].join('  |  ');
+    const meta = [
+      item.marca,
+      item.modelo,
+      item.padrao,
+      item.vida,
+      `4 pontos: ${sulcos}`,
+      item.data_medicao ? `medido ${formatBr(item.data_medicao)}` : null,
+    ].filter(Boolean).join('  ·  ');
+    const fazer = item.o_que_fazer || item.motivo || '';
+
+    const hMeta = measureWrap(doc, meta, innerW, 6.5);
+    const hDiag = measureDiagnosticoBloco(doc, item, innerW);
+    const hFazerLabel = measureWrap(doc, 'O que fazer', innerW, 7.5, true);
+    const hFazer = measureWrap(doc, fazer, innerW, 8);
+    const h = 8 + 16 + hMeta + 4 + hDiag + 4 + hFazerLabel + 1 + hFazer + 8;
+
+    pager.ensureSpace(h + 8);
+    const y0 = doc.y;
+    const st = statusColor(item.status_label || item.acao);
+
+    doc.roundedRect(x0, y0, w, h, 3).fill(COLORS.white);
+    doc.save();
+    doc.lineWidth(0.7).strokeColor(COLORS.line).roundedRect(x0, y0, w, h, 3).stroke();
+    doc.restore();
+    doc.rect(x0, y0, 4, h).fill(accent || st.fg);
+
+    doc.page.margins.bottom = 0;
+    doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(8.5)
+      .text(fitWidth(doc, header, innerW * 0.62, 8.5, true), x0 + pad + 4, y0 + 6, {
+        width: innerW * 0.62,
+        lineBreak: false,
+      });
+    const badge = `${item.status_label || '-'}  ·  ${item.acao || '-'}`;
+    doc.fillColor(st.fg).font('Helvetica-Bold').fontSize(7.5)
+      .text(fitWidth(doc, badge, innerW * 0.36, 7.5, true), x0 + pad + 4, y0 + 6, {
+        width: innerW,
+        align: 'right',
+        lineBreak: false,
+      });
+    doc.page.margins.bottom = savedBottom;
+
+    let y = y0 + 20;
+    y += paintWrap(doc, meta, x0 + pad + 4, y, innerW, 6.5, COLORS.muted);
+    y += 4;
+    y += paintDiagnosticoBloco(doc, item, x0 + pad + 4, y, innerW, accent || st.fg);
+    y += 4;
+    y += paintWrap(doc, 'O que fazer', x0 + pad + 4, y, innerW, 7.5, accent || st.fg, true);
+    y += 1;
+    y += paintWrap(doc, fazer, x0 + pad + 4, y, innerW, 8, COLORS.ink);
+
+    doc.y = Math.max(y, y0 + h) + 6;
+  }
+}
+
 function drawVehicleBlock(doc, pager, v) {
   const tableNeed = 15 + Math.max(1, v.pneus.length) * 14 + 8;
   pager.ensureSpace(36 + Math.min(tableNeed, 80));
@@ -743,15 +900,14 @@ function drawVehicleBlock(doc, pager, v) {
   doc.y = y0 + headH + 3;
 
   drawTable(doc, pager, [
-    { key: 'pos', label: 'Pos.', w: 0.07 },
-    { key: 'fogo', label: 'Fogo', w: 0.12 },
-    { key: 'padrao', label: 'Padrao', w: 0.11 },
-    { key: 'vida', label: 'Vida', w: 0.09 },
-    { key: 'sulcos', label: 'Ext/Cent/Int/Aux', w: 0.22 },
-    { key: 'menor', label: 'Menor', w: 0.08, bold: true },
-    { key: 'status', label: 'Status', w: 0.11, colorize: true },
-    { key: 'acao', label: 'Acao', w: 0.10, colorize: true },
-    { key: 'diag', label: 'Diagnostico', w: 0.10 },
+    { key: 'pos', label: 'Pos.', w: 0.08 },
+    { key: 'fogo', label: 'Fogo', w: 0.13 },
+    { key: 'padrao', label: 'Padrao', w: 0.13 },
+    { key: 'vida', label: 'Vida', w: 0.10 },
+    { key: 'sulcos', label: 'Ext/Cent/Int/Aux', w: 0.24 },
+    { key: 'menor', label: 'Menor', w: 0.09, bold: true },
+    { key: 'status', label: 'Status', w: 0.12, colorize: true },
+    { key: 'acao', label: 'Acao', w: 0.11, colorize: true },
   ], v.pneus.map((p) => ({
     pos: p.posicao,
     fogo: labelFogoPdf(p.fogo),
@@ -761,8 +917,46 @@ function drawVehicleBlock(doc, pager, v) {
     menor: p.menor_sulco != null ? `${p.menor_sulco}` : '-',
     status: p.status_label,
     acao: p.acao,
-    diag: labelDiagPdf(p.diagnostico),
   })));
+
+  drawPneuDiagnosticos(doc, pager, v.pneus);
+}
+
+function drawPneuDiagnosticos(doc, pager, pneus) {
+  if (!pneus?.length) return;
+
+  const x0 = doc.page.margins.left;
+  const w = contentWidth(doc);
+  const pad = 7;
+  const innerW = w - pad * 2 - 4;
+
+  for (const p of pneus) {
+    const ident = [
+      p.posicao_label || p.posicao,
+      `Fogo ${labelFogoPdf(p.fogo)}`,
+      mm(p.menor_sulco),
+    ].join('  |  ');
+    const hIdent = measureWrap(doc, ident, innerW, 8, true);
+    const hDiag = measureDiagnosticoBloco(doc, p, innerW);
+    const h = pad + hIdent + 4 + hDiag + pad;
+
+    pager.ensureSpace(h + 4);
+    const y0 = doc.y;
+    const st = statusColor(p.status_label);
+
+    doc.roundedRect(x0, y0, w, h, 2).fill(COLORS.white);
+    doc.save();
+    doc.lineWidth(0.5).strokeColor(COLORS.line).roundedRect(x0, y0, w, h, 2).stroke();
+    doc.restore();
+    doc.rect(x0, y0, 3.5, h).fill(st.fg);
+
+    let y = y0 + pad;
+    y += paintWrap(doc, ident, x0 + pad + 4, y, innerW, 8, COLORS.ink, true);
+    y += 4;
+    y += paintDiagnosticoBloco(doc, p, x0 + pad + 4, y, innerW, st.fg);
+    doc.y = Math.max(y, y0 + h) + 4;
+  }
+  softGap(doc, 4);
 }
 
 /**
@@ -850,40 +1044,29 @@ export function gerarPdfRelatorioSemanal(dados) {
     ]);
 
     // ── 2. Prioridades ─────────────────────────────────
-    sectionTitle(doc, pager, '2', 'Prioridades da semana - decisao');
-
-    const colsPrio = [
-      { key: 'veiculo', label: 'Veiculo', w: 0.14 },
-      { key: 'pos', label: 'Pos.', w: 0.08 },
-      { key: 'fogo', label: 'Fogo', w: 0.12 },
-      { key: 'menor', label: 'Sulco', w: 0.10, bold: true },
-      { key: 'status', label: 'Status', w: 0.12, colorize: true },
-      { key: 'acao', label: 'Acao', w: 0.12, colorize: true },
-      { key: 'diag', label: 'Diagnostico', w: 0.32 },
-    ];
-    const mapPrio = (i) => ({
-      veiculo: i.placa || i.apelido || '-',
-      pos: i.posicao,
-      fogo: labelFogoPdf(i.fogo),
-      menor: mm(i.menor_sulco),
-      status: i.status_label,
-      acao: i.acao,
-      diag: labelDiagPdf(i.diagnostico),
-    });
+    sectionTitle(doc, pager, '2', 'Prioridades da semana - diagnostico e o que fazer');
+    mutedLine(
+      doc,
+      pager,
+      'Pneus criticos e em monitoramento: diagnostico do perfil (4 pontos) e a acao que o gerente deve tomar.'
+    );
 
     subTitle(doc, pager, `Trocar / critico (${dados.prioridades.troca.length})`, COLORS.critico);
-    drawTable(doc, pager, colsPrio, dados.prioridades.troca.map(mapPrio), {
+    drawPriorityCards(doc, pager, dados.prioridades.troca, {
       emptyText: 'Nenhum pneu critico / troca no momento.',
+      accent: COLORS.critico,
     });
 
     subTitle(doc, pager, `Monitorar / recap (${dados.prioridades.monitorar.length})`, COLORS.alerta);
-    drawTable(doc, pager, colsPrio, dados.prioridades.monitorar.map(mapPrio), {
+    drawPriorityCards(doc, pager, dados.prioridades.monitorar, {
       emptyText: 'Nenhum pneu em monitorar / recap.',
+      accent: COLORS.alerta,
     });
 
     subTitle(doc, pager, `Rodizio (${dados.prioridades.rodizio.length})`, COLORS.brand);
-    drawTable(doc, pager, colsPrio, dados.prioridades.rodizio.map(mapPrio), {
+    drawPriorityCards(doc, pager, dados.prioridades.rodizio, {
       emptyText: 'Nenhum rodizio sugerido.',
+      accent: COLORS.brand,
     });
 
     subTitle(doc, pager, `Descarte aguardando destino (${dados.prioridades.descarte_pendente.length})`, COLORS.critico);

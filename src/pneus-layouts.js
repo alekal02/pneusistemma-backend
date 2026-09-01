@@ -143,6 +143,52 @@ export const LAYOUTS_PNEU = {
 
 export const LAYOUT_PADRAO = 'truck_10';
 
+const LAYOUTS_FAMILIA_TRUCK = new Set(['truck_10', 'truck_8', 'truck_8_b', 'truck_10_estepe']);
+const LAYOUTS_FAMILIA_TOCO = new Set(['toco_6']);
+
+/** Layout padrão do desenho conforme o tipo (truck 10 / toco 6). */
+export function layoutPadraoDoTipo(tipo, layoutAtual = null) {
+  const t = String(tipo || '').toLowerCase();
+  if (t.includes('toco') || t.includes('mini')) return 'toco_6';
+  if (t.includes('truck')) {
+    if (layoutAtual && LAYOUTS_FAMILIA_TRUCK.has(layoutAtual)) return layoutAtual;
+    return 'truck_10';
+  }
+  return layoutAtual || LAYOUT_PADRAO;
+}
+
+export function layoutCompativelComTipo(tipo, layoutId) {
+  const t = String(tipo || '').toLowerCase();
+  const id = layoutId || LAYOUT_PADRAO;
+  if (t.includes('toco') || t.includes('mini')) return LAYOUTS_FAMILIA_TOCO.has(id);
+  if (t.includes('truck')) return LAYOUTS_FAMILIA_TRUCK.has(id);
+  return true;
+}
+
+/**
+ * Se o tipo (Truck/Toco) não bate com o desenho, aplica o layout certo.
+ * Pneus fora das novas posições voltam ao estoque.
+ */
+export async function sincronizarLayoutComTipo(db, veiculo) {
+  if (!veiculo?.id) return { veiculo, alterou: false, pneusDesmontados: 0 };
+  const layoutAtual = veiculo.layout_pneus || LAYOUT_PADRAO;
+  if (!veiculo.tipo || layoutCompativelComTipo(veiculo.tipo, layoutAtual)) {
+    return { veiculo, alterou: false, pneusDesmontados: 0 };
+  }
+  const alvo = layoutPadraoDoTipo(veiculo.tipo, layoutAtual);
+  const montados = await db.prepare(`
+    SELECT posicao FROM pneus
+    WHERE veiculo_id = ? AND ativo = 1 AND status_pneu = 'montado'
+  `).all(veiculo.id);
+  const posicoes = await aplicarLayoutPneus(db, veiculo.id, alvo);
+  const pneusDesmontados = montados.filter((p) => !posicoes.includes(p.posicao)).length;
+  return {
+    veiculo: { ...veiculo, layout_pneus: alvo },
+    alterou: true,
+    pneusDesmontados,
+  };
+}
+
 export const TIPOS_PNEU = ['direcional', 'misto', 'borrachudo'];
 export const CONDICOES_PNEU = ['novo', 'recapado'];
 export const STATUS_PNEU = ['montado', 'estoque', 'recapagem', 'descarte'];

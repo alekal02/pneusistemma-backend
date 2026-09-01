@@ -281,6 +281,11 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
       await db.prepare('UPDATE pneus SET sulco_inicial_mm = ? WHERE id = ?').run(menor, pneu_id);
     }
 
+    const pressaoVal = pressao_psi === '' || pressao_psi == null
+      ? null
+      : parseFloat(pressao_psi);
+    const pressaoSalva = Number.isFinite(pressaoVal) ? pressaoVal : null;
+
     const data = data_medicao || new Date().toISOString().split('T')[0];
     const responsavelFinal = responsavel?.trim()
       || (req.acessoRapido ? `WhatsApp ${req.acessoRapido.whatsapp_origem || 'acesso-rapido'}` : null);
@@ -314,7 +319,7 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
       sulco_central ?? null,
       sulco_interno ?? null,
       sulco_auxiliar ?? null,
-      pressao_psi ?? null,
+      pressaoSalva,
       responsavelFinal,
       observacoes?.trim() || null,
       marcacao_json ? JSON.stringify(marcacao_json) : null,

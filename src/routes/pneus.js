@@ -144,6 +144,7 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
         sulco_central: ultimaMedicao.sulco_central ?? ultimaMedicao.ult_sulco_cent ?? null,
         sulco_interno: ultimaMedicao.sulco_interno ?? ultimaMedicao.ult_sulco_int ?? null,
         sulco_auxiliar: ultimaMedicao.sulco_auxiliar ?? ultimaMedicao.ult_sulco_aux ?? null,
+        pressao_psi: ultimaMedicao.pressao_psi ?? ultimaMedicao.ult_pressao ?? null,
         menor_sulco: menor,
       }
       : null,
@@ -325,7 +326,8 @@ router.get('/', async (req, res, next) => {
       (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
       (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
       (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux,
-      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
+      (SELECT pressao_psi FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_pressao
     FROM pneus p
     LEFT JOIN veiculos v ON v.id = p.veiculo_id
     WHERE ${where}
@@ -350,6 +352,7 @@ router.get('/', async (req, res, next) => {
           sulco_central: p.ult_sulco_cent,
           sulco_interno: p.ult_sulco_int,
           sulco_auxiliar: p.ult_sulco_aux,
+          pressao_psi: p.ult_pressao ?? null,
         }
         : null;
       return enriquecerPneu(p, ultima);
@@ -519,7 +522,7 @@ router.get('/:id', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   const {
     marca, modelo, medida, dot, numero_fogo,
-    vida_recap, sulco_inicial_mm,
+    tipo_pneu, condicao, vida_recap, sulco_inicial_mm,
     data_instalacao, km_instalacao, observacoes,
     custo, nota_fiscal,
   } = req.body;
@@ -533,11 +536,24 @@ router.put('/:id', async (req, res, next) => {
   }
   if (!atual) return res.status(404).json({ erro: 'Pneu não encontrado' });
 
-  if (req.body.tipo_pneu != null && req.body.tipo_pneu !== atual.tipo_pneu) {
-    return res.status(400).json({ erro: 'Padrão do pneu não pode ser alterado após o cadastro' });
+  const tipoNovo = tipo_pneu != null ? String(tipo_pneu).trim() : atual.tipo_pneu;
+  const condNova = condicao != null ? String(condicao).trim() : atual.condicao;
+  if (tipo_pneu != null && !TIPOS_PNEU.includes(tipoNovo)) {
+    return res.status(400).json({ erro: `Padrão inválido. Use: ${TIPOS_PNEU.join(', ')}` });
   }
-  if (req.body.condicao != null && req.body.condicao !== atual.condicao) {
-    return res.status(400).json({ erro: 'Condição do pneu não pode ser alterada (use Registrar recap)' });
+  if (condicao != null && !CONDICOES_PNEU.includes(condNova)) {
+    return res.status(400).json({ erro: `Condição inválida. Use: ${CONDICOES_PNEU.join(', ')}` });
+  }
+
+  if (atual.status_pneu === 'montado' && atual.posicao) {
+    const validacao = validarMontagem({
+      condicao: condNova,
+      tipo_pneu: tipoNovo,
+      posicao: atual.posicao,
+    });
+    if (!validacao.ok) {
+      return res.status(400).json({ erro: validacao.erros.join(' ') });
+    }
   }
 
   const fogo = numero_fogo != null ? String(numero_fogo).trim() : atual.numero_fogo;
@@ -550,6 +566,15 @@ router.put('/:id', async (req, res, next) => {
     ? parseFloat(String(custo).replace(',', '.'))
     : atual.custo;
 
+  let vida = vida_recap != null && vida_recap !== ''
+    ? parseInt(vida_recap, 10)
+    : atual.vida_recap;
+  if (condNova === 'novo' && atual.condicao !== 'novo') {
+    vida = 0;
+  } else if (condNova === 'recapado' && atual.condicao === 'novo' && (!Number.isFinite(vida) || vida < 1)) {
+    vida = 1;
+  }
+
   try {
     await db.prepare(`
       UPDATE pneus SET
@@ -558,6 +583,8 @@ router.put('/:id', async (req, res, next) => {
         medida = ?,
         dot = ?,
         numero_fogo = ?,
+        tipo_pneu = ?,
+        condicao = ?,
         vida_recap = COALESCE(?, vida_recap),
         sulco_inicial_mm = COALESCE(?, sulco_inicial_mm),
         data_instalacao = COALESCE(?, data_instalacao),
@@ -572,7 +599,9 @@ router.put('/:id', async (req, res, next) => {
       medida?.trim() || null,
       dot?.trim() || null,
       fogo || null,
-      vida_recap != null ? parseInt(vida_recap, 10) : null,
+      tipoNovo,
+      condNova,
+      Number.isFinite(vida) ? vida : null,
       sulco_inicial_mm != null ? parseFloat(sulco_inicial_mm) : null,
       data_instalacao || null,
       km_instalacao != null ? parseInt(km_instalacao, 10) : null,

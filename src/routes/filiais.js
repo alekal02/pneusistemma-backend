@@ -19,7 +19,9 @@ import {
   LAYOUT_PADRAO,
   POSICOES_PNEU,
   labelTipoPneu,
+  sincronizarLayoutComTipo,
 } from '../pneus-layouts.js';
+import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
 import { limparFrotaFilial } from '../services/limpar-filial.js';
 
@@ -368,6 +370,9 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
     `).get(req.params.veiculoId, filial.id);
     if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado nesta filial' });
 
+    const sync = await sincronizarLayoutComTipo(db, veiculo);
+    veiculo = sync.veiculo;
+
     const orderSql = sqlOrderPosicao('p.posicao');
     const pneus = await db.prepare(`
     SELECT p.*,
@@ -378,7 +383,8 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       (SELECT diagnostico FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_diagnostico,
       (SELECT acao_sugerida FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_acao,
       (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
-      (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao_id
+      (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao_id,
+      (SELECT pressao_psi FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_pressao
     FROM pneus p
     WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     ORDER BY ${orderSql}
@@ -423,6 +429,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
             sulco_central: p.ult_sulco_cent,
             sulco_interno: p.ult_sulco_int,
             sulco_auxiliar: p.ult_sulco_aux,
+            pressao_psi: p.ult_pressao ?? null,
             menor_sulco: menor,
           }
           : null,
@@ -501,6 +508,8 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
       return res.status(400).json({ erro: 'Placa não pode ficar vazia' });
     }
 
+    const tipoFinal = tipo != null ? (normalizarTipoVeiculo(String(tipo).trim()) || veiculo.tipo) : veiculo.tipo;
+
     await db.prepare(`
       UPDATE veiculos SET
         placa = ?,
@@ -518,7 +527,7 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
     `).run(
       placa != null ? String(placa).trim().toUpperCase() : veiculo.placa,
       apelido !== undefined ? (String(apelido).trim() || null) : veiculo.apelido,
-      tipo != null ? String(tipo).trim() : veiculo.tipo,
+      tipoFinal || veiculo.tipo,
       marca !== undefined ? (String(marca).trim() || null) : veiculo.marca,
       modelo !== undefined ? (String(modelo).trim() || null) : veiculo.modelo,
       ano !== undefined && ano !== '' ? parseInt(ano, 10) : veiculo.ano,
@@ -532,8 +541,26 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
       req.params.id
     );
 
+    let layoutAlterado = false;
+    let pneusDesmontados = 0;
+    const sync = await sincronizarLayoutComTipo(db, { ...veiculo, tipo: tipoFinal });
+    if (sync.alterou) {
+      layoutAlterado = true;
+      pneusDesmontados = sync.pneusDesmontados;
+    }
+
     const atualizado = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(veiculo.id);
-    res.json({ mensagem: 'Veículo atualizado', veiculo: atualizado });
+    const layoutInfo = getLayout(atualizado.layout_pneus || LAYOUT_PADRAO);
+    res.json({
+      mensagem: layoutAlterado
+        ? `Veículo atualizado — desenho alterado para ${layoutInfo?.nome || atualizado.layout_pneus}`
+        : 'Veículo atualizado',
+      veiculo: atualizado,
+      layout_alterado: layoutAlterado,
+      layout_pneus: atualizado.layout_pneus,
+      layout_nome: layoutInfo?.nome || null,
+      pneus_desmontados: pneusDesmontados,
+    });
   } catch (err) {
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Já existe um veículo com esta placa' });
