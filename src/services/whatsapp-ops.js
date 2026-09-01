@@ -33,6 +33,15 @@ async function registrarMovimentacao(db, {
   );
 }
 
+function placaSoAlnum(p) {
+  return String(p || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+}
+
+/** I/1 e O/0 — digitação comum (ex.: JGZ4I28 enviado como JGZ4128) */
+function placaChaveFlex(p) {
+  return placaSoAlnum(p).replace(/I/g, '1').replace(/O/g, '0');
+}
+
 export async function buscarVeiculoPorPlaca(filialId, placaLimpa) {
   const db = getDb();
   const rows = await db.prepare(`
@@ -46,11 +55,23 @@ export async function buscarVeiculoPorPlaca(filialId, placaLimpa) {
     LIMIT 15
   `).all(filialId, `%${placaLimpa}%`);
 
-  const exatos = rows.filter((v) => {
-    const p = String(v.placa_norm || '').replace(/[^A-Z0-9]/gi, '');
-    return p === placaLimpa;
-  });
-  return exatos.length ? exatos : rows;
+  const exatos = rows.filter((v) => placaSoAlnum(v.placa_norm) === placaLimpa);
+  if (exatos.length) return exatos;
+
+  const flexAlvo = placaChaveFlex(placaLimpa);
+  const visuais = rows.filter((v) => placaChaveFlex(v.placa_norm) === flexAlvo);
+  if (visuais.length) return visuais;
+  if (rows.length) return rows;
+
+  const frota = await db.prepare(`
+    SELECT v.*, f.nome as filial_nome,
+      REPLACE(REPLACE(UPPER(v.placa), '-', ''), ' ', '') AS placa_norm
+    FROM veiculos v
+    JOIN filiais f ON f.id = v.filial_id
+    WHERE v.ativo = 1 AND v.filial_id = ?
+    ORDER BY v.placa
+  `).all(filialId);
+  return frota.filter((v) => placaChaveFlex(v.placa_norm) === flexAlvo);
 }
 
 export async function listarFrota(filialId) {

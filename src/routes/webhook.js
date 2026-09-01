@@ -61,17 +61,37 @@ function validarHmacWebhook(req) {
   }
 }
 
+/**
+ * WuzAPI default (WEBHOOK_FORMAT=form) manda { jsonData: "<json>", token }.
+ * Sem isso o texto some e o bot ignora menu/placa em silêncio.
+ */
+export function desempacotarPayloadWuzapi(payload) {
+  if (!payload || typeof payload !== 'object') return payload || {};
+  const packed = payload.jsonData ?? payload.json;
+  if (typeof packed === 'string' && packed.trim()) {
+    try {
+      const parsed = JSON.parse(packed);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // payload inválido — segue o original
+    }
+  }
+  if (packed && typeof packed === 'object') return packed;
+  return payload;
+}
+
 /** Raiz do payload (WuzAPI real: `event`; legado/testes: `data`) */
 export function raizPayloadMensagem(payload) {
-  if (!payload || typeof payload !== 'object') return {};
-  const d = payload.data;
+  const p = desempacotarPayloadWuzapi(payload);
+  if (!p || typeof p !== 'object') return {};
+  const d = p.data;
   if (d && typeof d === 'object' && (d.Info || d.info || d.Message || d.message)) return d;
-  const e = payload.event;
+  const e = p.event;
   if (e && typeof e === 'object' && !Array.isArray(e)
     && (e.Info || e.info || e.Message || e.message || e.Conversation || e.conversation)) {
     return e;
   }
-  return payload;
+  return p;
 }
 
 function ehMensagemPropria(event) {
@@ -122,13 +142,20 @@ function jidsGrupoIguais(a, b) {
 export function extrairChatJid(event) {
   const root = raizPayloadMensagem(event);
   const info = root.Info || root.info || {};
+  const src = info.MessageSource || info.messageSource || {};
   const candidates = [
     info.Chat,
     info.chat,
     info.RemoteJid,
     info.remoteJid,
-    info.MessageSource?.Chat,
-    info.MessageSource?.chat,
+    info.RecipientAlt,
+    info.recipientAlt,
+    info.ChatAlt,
+    info.chatAlt,
+    src.Chat,
+    src.chat,
+    src.RecipientAlt,
+    src.recipientAlt,
     root.chat,
     root.Chat,
     root.from,
@@ -305,7 +332,7 @@ router.post('/whatsapp', async (req, res) => {
       return res.status(401).json({ erro: 'Assinatura HMAC inválida' });
     }
 
-    const event = req.body || {};
+    const event = desempacotarPayloadWuzapi(req.body || {});
     // WuzAPI envia type:"Message" e event:<objeto>; não usar event.event como nome
     const eventName = event.type || event.Event
       || (typeof event.event === 'string' ? event.event : '')
@@ -346,6 +373,11 @@ router.post('/whatsapp', async (req, res) => {
     });
 
     if (!body) {
+      console.warn('[webhook] sem_texto', {
+        keys: Object.keys(req.body || {}),
+        tem_jsonData: Boolean(req.body?.jsonData || req.body?.json),
+        chat: chatJid,
+      });
       return res.status(200).json({ ok: true, ignored: 'sem_texto' });
     }
 
