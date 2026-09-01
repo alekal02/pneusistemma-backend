@@ -163,7 +163,7 @@ export async function assertVeiculoDaFilial(veiculoId, filialId) {
   return v || null;
 }
 
-export async function assertPneuDaFilial(pneuId, filialId) {
+export async function assertPneuDaFilial(pneuId, filialId, { incluirInativos = false } = {}) {
   const db = getDb();
   const row = await db.prepare(`
     SELECT p.*,
@@ -171,7 +171,8 @@ export async function assertPneuDaFilial(pneuId, filialId) {
       v.placa, v.apelido, v.km_atual, v.hr_atual
     FROM pneus p
     LEFT JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1
-    WHERE p.id = ? AND p.ativo = 1
+    WHERE p.id = ?
+      ${incluirInativos ? '' : 'AND p.ativo = 1'}
       AND COALESCE(p.filial_id, v.filial_id) = ?
   `).get(pneuId, filialId);
   return row || null;

@@ -21,18 +21,59 @@ function parseDados(raw) {
   }
 }
 
-export async function obterSessao(filialId, telefone, chatJid = '') {
-  const db = getDb();
-  const chave = chaveSessao(filialId, telefone, chatJid);
-  await db.prepare(`DELETE FROM whatsapp_sessoes WHERE expira_em < NOW()`).run();
-  const row = await db.prepare(`
-    SELECT * FROM whatsapp_sessoes WHERE chave = ?
-  `).get(chave);
+function mapRow(row) {
   if (!row) return null;
   return {
     ...row,
     dados: parseDados(row.dados),
   };
+}
+
+export async function obterSessao(filialId, telefone, chatJid = '') {
+  const db = getDb();
+  await db.prepare(`DELETE FROM whatsapp_sessoes WHERE expira_em < NOW()`).run();
+
+  const chave = chaveSessao(filialId, telefone, chatJid);
+  let row = await db.prepare(`
+    SELECT * FROM whatsapp_sessoes WHERE chave = ?
+  `).get(chave);
+  if (row) return mapRow(row);
+
+  // Fallback: mesmo telefone na filial (chat_jid pode variar entre eventos do WuzAPI)
+  const tel = String(telefone || '').replace(/\D/g, '');
+  if (tel) {
+    row = await db.prepare(`
+      SELECT * FROM whatsapp_sessoes
+      WHERE filial_id = ? AND telefone = ? AND expira_em >= NOW()
+      ORDER BY atualizado_em DESC
+      LIMIT 1
+    `).get(filialId, telefone);
+    if (!row) {
+      row = await db.prepare(`
+        SELECT * FROM whatsapp_sessoes
+        WHERE filial_id = ?
+          AND regexp_replace(COALESCE(telefone, ''), '[^0-9]', '', 'g') = ?
+          AND expira_em >= NOW()
+        ORDER BY atualizado_em DESC
+        LIMIT 1
+      `).get(filialId, tel);
+    }
+    if (row) return mapRow(row);
+  }
+
+  // Fallback: mesmo grupo na filial (telefone às vezes vem vazio)
+  const jid = String(chatJid || '').trim();
+  if (jid) {
+    row = await db.prepare(`
+      SELECT * FROM whatsapp_sessoes
+      WHERE filial_id = ? AND chat_jid = ? AND expira_em >= NOW()
+      ORDER BY atualizado_em DESC
+      LIMIT 1
+    `).get(filialId, jid);
+    if (row) return mapRow(row);
+  }
+
+  return null;
 }
 
 export async function salvarSessao({
@@ -76,6 +117,23 @@ export async function limparSessao(filialId, telefone, chatJid = '') {
   const db = getDb();
   const chave = chaveSessao(filialId, telefone, chatJid);
   await db.prepare(`DELETE FROM whatsapp_sessoes WHERE chave = ?`).run(chave);
+
+  // Limpa também sessões “órfãs” do mesmo telefone/grupo (fallbacks)
+  const tel = String(telefone || '').replace(/\D/g, '');
+  if (tel) {
+    await db.prepare(`
+      DELETE FROM whatsapp_sessoes
+      WHERE filial_id = ?
+        AND regexp_replace(COALESCE(telefone, ''), '[^0-9]', '', 'g') = ?
+    `).run(filialId, tel);
+  }
+  const jid = String(chatJid || '').trim();
+  if (jid) {
+    await db.prepare(`
+      DELETE FROM whatsapp_sessoes
+      WHERE filial_id = ? AND chat_jid = ?
+    `).run(filialId, jid);
+  }
 }
 
 export async function atualizarDadosSessao(sessao, patch, { passo, fluxo } = {}) {

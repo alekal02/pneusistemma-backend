@@ -15,7 +15,6 @@ import {
   aplicarLayoutPneus,
   validarMontagem,
   getLayout,
-  sincronizarLayoutComTipo,
 } from '../pneus-layouts.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
@@ -25,7 +24,6 @@ import {
   VEICULO_TEMPLATE_HEADERS,
   VEICULO_TEMPLATE_ROWS,
   mapLayoutId,
-  parseNumeroBr,
 } from '../csv-utils.js';
 import {
   gerarTokenAcessoRapido,
@@ -33,7 +31,6 @@ import {
   marcarTokenUsado,
   montarDetalheVeiculo,
 } from '../services/acesso-rapido.js';
-import { resolverAlertaPosicaoVaga } from '../services/alerta-posicao-vaga.js';
 
 const router = Router();
 
@@ -43,9 +40,12 @@ router.get('/acesso-rapido', async (req, res, next) => {
   if (!token) return res.status(400).json({ erro: 'Token obrigatório' });
 
   try {
-    const tokenRow = await validarTokenAcessoRapido(String(token));
+    const tokenRow = await validarTokenAcessoRapido(String(token), ['medir']);
     if (!tokenRow) {
       return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+    if (!tokenRow.veiculo_id) {
+      return res.status(400).json({ erro: 'Token sem veículo — use o link correto do menu' });
     }
 
     await marcarTokenUsado(tokenRow.id);
@@ -183,8 +183,6 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
       return created.lastInsertRowid;
     });
 
-    await resolverAlertaPosicaoVaga(getDb(), { veiculoId: veiculo.id, posicao });
-
     const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
     res.status(201).json({
       mensagem: `Pneu ${fogo} montado em ${labelPosicao(posicao)}`,
@@ -304,16 +302,16 @@ router.post('/import', async (req, res, next) => {
           continue;
         }
 
-        const tipo = normalizarTipoVeiculo(raw.tipo_veiculo || raw.tipo) || 'Truck / Tração';
+        const tipo = normalizarTipoVeiculo(raw.tipo) || 'Truck / Tração';
         const layoutId = mapLayoutId(raw.layout_pneus || raw.layout, tipo);
         if (!LAYOUTS_PNEU[layoutId]) {
           erros.push({ linha, placa, erro: `Layout inválido: ${raw.layout_pneus || raw.layout}` });
           continue;
         }
 
-        const ano = parseNumeroBr(raw.ano);
-        const km = parseNumeroBr(raw.km_atual);
-        const hr = parseNumeroBr(raw.hr_atual);
+        const ano = raw.ano ? parseInt(raw.ano, 10) : null;
+        const km = raw.km_atual != null && raw.km_atual !== '' ? parseInt(raw.km_atual, 10) : 0;
+        const hr = raw.hr_atual != null && raw.hr_atual !== '' ? parseFloat(raw.hr_atual) : 0;
 
         try {
           const { result, posicoes } = await comSavepoint(db, async () => {
@@ -323,8 +321,8 @@ router.post('/import', async (req, res, next) => {
               tipo,
               String(raw.marca || '').trim() || null,
               String(raw.modelo || '').trim() || null,
-              Number.isFinite(ano) ? Math.round(ano) : null,
-              Number.isFinite(km) ? Math.round(km) : 0,
+              Number.isFinite(ano) ? ano : null,
+              Number.isFinite(km) ? km : 0,
               Number.isFinite(hr) ? hr : 0,
               String(raw.observacoes || '').trim() || null,
               layoutId,
@@ -525,7 +523,7 @@ router.put('/:id', async (req, res, next) => {
     const db = getDb();
     const filialId = filialScopeId(req);
     const atual = await db.prepare(`
-      SELECT id, dia_medicao, tipo, layout_pneus FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
+      SELECT id, dia_medicao FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
     `).get(req.params.id, filialId);
     if (!atual) return res.status(404).json({ erro: 'Veículo não encontrado' });
 
@@ -563,21 +561,7 @@ router.put('/:id', async (req, res, next) => {
     );
 
     if (result.changes === 0) return res.status(404).json({ erro: 'Veículo não encontrado' });
-
-    const tipoFinal = tipo != null ? (normalizarTipoVeiculo(tipo) || atual.tipo) : atual.tipo;
-    const sync = await sincronizarLayoutComTipo(db, {
-      ...atual,
-      id: Number(req.params.id),
-      tipo: tipoFinal,
-    });
-    const layoutInfo = getLayout(sync.veiculo.layout_pneus || LAYOUT_PADRAO);
-    res.json({
-      mensagem: sync.alterou
-        ? `Veículo atualizado — desenho alterado para ${layoutInfo?.nome || 'o tipo escolhido'}`
-        : 'Veículo atualizado',
-      layout_alterado: sync.alterou,
-      layout_pneus: layoutInfo?.id || sync.veiculo.layout_pneus,
-    });
+    res.json({ mensagem: 'Veículo atualizado' });
   } catch (err) {
     next(err);
   }

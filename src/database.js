@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS filiais (
   ativo INTEGER DEFAULT 1,
   whatsapp TEXT,
   whatsapp_grupo TEXT,
-  whatsapp_grupo_nome TEXT,
   whatsapp_alerta TEXT,
   wuzapi_token TEXT,
   dia_medicao INTEGER,
@@ -131,7 +130,7 @@ CREATE TABLE IF NOT EXISTS configuracoes (
 
 CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
   id BIGSERIAL PRIMARY KEY,
-  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'alerta_posicao', 'relatorio_semanal')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal')),
   destinatario_whatsapp TEXT NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
   medicao_id BIGINT REFERENCES medicoes(id),
@@ -145,8 +144,9 @@ CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
 CREATE TABLE IF NOT EXISTS tokens_acesso_rapido (
   id BIGSERIAL PRIMARY KEY,
   token TEXT UNIQUE NOT NULL,
-  veiculo_id BIGINT NOT NULL REFERENCES veiculos(id),
+  veiculo_id BIGINT REFERENCES veiculos(id),
   filial_id BIGINT NOT NULL REFERENCES filiais(id),
+  tipo TEXT NOT NULL DEFAULT 'medir',
   whatsapp_origem TEXT,
   expira_em TIMESTAMPTZ NOT NULL,
   usado_em TIMESTAMPTZ,
@@ -187,24 +187,6 @@ CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
   expira_em TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
-
-CREATE TABLE IF NOT EXISTS alertas_posicao_vaga (
-  id BIGSERIAL PRIMARY KEY,
-  filial_id BIGINT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-  veiculo_id BIGINT NOT NULL REFERENCES veiculos(id) ON DELETE CASCADE,
-  posicao TEXT NOT NULL,
-  motivo TEXT NOT NULL DEFAULT 'recap',
-  pneu_id BIGINT REFERENCES pneus(id) ON DELETE SET NULL,
-  numero_fogo TEXT,
-  detalhes TEXT,
-  aberto INTEGER NOT NULL DEFAULT 1,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  resolvido_em TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_alertas_vaga_abertos
-  ON alertas_posicao_vaga(filial_id, aberto);
-CREATE INDEX IF NOT EXISTS idx_alertas_vaga_posicao
-  ON alertas_posicao_vaga(veiculo_id, posicao, aberto);
 `;
 
 async function ensureColumn(table, column, ddl) {
@@ -220,44 +202,11 @@ async function ensureNotificacoesTipoRelatorio() {
     await db.exec(`
       ALTER TABLE notificacoes_whatsapp
         ADD CONSTRAINT notificacoes_whatsapp_tipo_check
-        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'alerta_posicao', 'relatorio_semanal'))
+        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal'))
     `);
   } catch (err) {
     console.warn('[database] constraint tipo notificacoes:', err.message);
   }
-}
-
-/** Uma vez: zera caminhões/pneus/histórico só da filial Belo Horizonte. Mantém login e WhatsApp. */
-async function limpezaUnicaFrotaBeloHorizonte(db) {
-  const chave = 'limpeza_frota_bh_20260829';
-  const ja = await db.prepare('SELECT valor FROM configuracoes WHERE chave = ?').get(chave);
-  if (String(ja?.valor || '') === 'ok') return;
-
-  const hits = await db.prepare(`
-    SELECT id, nome, codigo FROM filiais
-    WHERE LOWER(nome) LIKE '%belo horizonte%'
-       OR UPPER(REPLACE(codigo, ' ', '')) IN ('BH', 'BHZ', 'BELHORIZONTE', 'BELOHORIZONTE')
-  `).all();
-
-  if (hits.length !== 1) {
-    console.warn(
-      '[database] limpeza BH ignorada — filiais encontradas:',
-      hits.map((h) => `${h.id}:${h.codigo}`).join(', ') || 'nenhuma'
-    );
-    return;
-  }
-
-  const { limparFrotaFilial } = await import('./services/limpar-filial.js');
-  const r = await limparFrotaFilial(db, hits[0].id);
-  try {
-    await db.prepare(`INSERT INTO configuracoes (chave, valor) VALUES (?, ?)`).run(chave, 'ok');
-  } catch {
-    await db.prepare(`UPDATE configuracoes SET valor = 'ok', updated_at = NOW() WHERE chave = ?`).run(chave);
-  }
-  console.log(
-    `[database] frota BH limpa: ${r.filial.nome} (${r.filial.codigo})`,
-    r.antes
-  );
 }
 
 async function seedConfigs() {
@@ -317,8 +266,7 @@ async function seedAuthAndFilial() {
 
   await db.prepare(`UPDATE veiculos SET filial_id = ? WHERE filial_id IS NULL`).run(matriz.id);
 
-  const admin = await db.prepare(`SELECT id, login FROM usuarios WHERE papel = 'admin' LIMIT 1`).get();
-  const resetAdmin = String(process.env.ADMIN_RESET_PASSWORD || '').toLowerCase() === 'true';
+  const admin = await db.prepare(`SELECT id FROM usuarios WHERE papel = 'admin' LIMIT 1`).get();
   if (!admin) {
     const hash = bcrypt.hashSync(config.adminPassword, 10);
     await db.prepare(`
@@ -331,20 +279,6 @@ async function seedAuthAndFilial() {
       UPDATE usuarios SET cargo = COALESCE(NULLIF(cargo, ''), 'admin')
       WHERE id = ? AND (cargo IS NULL OR cargo = '' OR cargo = 'funcionario')
     `).run(admin.id);
-    // A senha do admin só é gravada na 1ª criação. Para redefinir em produção:
-    // ADMIN_RESET_PASSWORD=true + ADMIN_PASSWORD=... e reinicie o serviço.
-    if (resetAdmin && process.env.ADMIN_PASSWORD) {
-      const hash = bcrypt.hashSync(config.adminPassword, 10);
-      await db.prepare(`
-        UPDATE usuarios SET
-          senha_hash = ?,
-          login = COALESCE(NULLIF(?, ''), login),
-          ativo = 1,
-          updated_at = NOW()
-        WHERE id = ?
-      `).run(hash, String(config.adminUser || '').trim() || 'admin', admin.id);
-      console.log(`[seed] Senha do admin redefinida (ADMIN_RESET_PASSWORD) — login: ${config.adminUser}`);
-    }
   }
 
   const userMatriz = await db.prepare(`
@@ -410,11 +344,19 @@ export async function initDatabase() {
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
-  await ensureColumn('pneus', 'recap_fornecedor', 'TEXT');
-  await ensureColumn('pneus', 'recap_enviado_em', 'TEXT');
   await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
-  await ensureColumn('filiais', 'whatsapp_grupo_nome', 'TEXT');
   await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
+  await ensureColumn('tokens_acesso_rapido', 'tipo', "TEXT NOT NULL DEFAULT 'medir'");
+  try {
+    await db.exec(`
+      ALTER TABLE tokens_acesso_rapido ALTER COLUMN veiculo_id DROP NOT NULL
+    `);
+  } catch (err) {
+    // já nullable ou tabela nova
+    if (!/does not exist|already|não existe/i.test(err.message)) {
+      console.warn('[migrate] tokens veiculo_id nullable:', err.message);
+    }
+  }
 
   // Permite tipos extras do menu WhatsApp (relatorio, menu, cadastros…)
   try {
@@ -457,12 +399,6 @@ export async function initDatabase() {
     await corrigirEncodingBanco(db);
   } catch (err) {
     console.warn('[database] encoding:', err.message);
-  }
-
-  try {
-    await limpezaUnicaFrotaBeloHorizonte(db);
-  } catch (err) {
-    console.warn('[database] limpeza BH:', err.message);
   }
 
   ready = true;

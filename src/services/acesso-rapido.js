@@ -1,5 +1,6 @@
 /**
  * Tokens de acesso rápido (links WhatsApp sem JWT)
+ * tipos: medir | cadastrar_veiculo | cadastrar_pneu | troca
  */
 import { randomBytes } from 'crypto';
 import { getDb, classificarSulco } from '../database.js';
@@ -16,35 +17,67 @@ import {
   sqlOrderPosicao,
   getLayout,
   labelTipoPneu,
-  sincronizarLayoutComTipo,
 } from '../pneus-layouts.js';
 
-export async function gerarTokenAcessoRapido({ veiculoId, filialId, whatsappOrigem = null }) {
+export const TIPOS_TOKEN_ACESSO = ['medir', 'cadastrar_veiculo', 'cadastrar_pneu', 'troca'];
+
+const PATH_POR_TIPO = {
+  medir: '/veiculo-acesso-rapido',
+  cadastrar_veiculo: '/acesso-rapido/veiculo',
+  cadastrar_pneu: '/acesso-rapido/pneu',
+  troca: '/acesso-rapido/troca',
+};
+
+export function linkAcessoRapido(tipo, token) {
+  const path = PATH_POR_TIPO[tipo] || PATH_POR_TIPO.medir;
+  return `${config.frontendUrl.replace(/\/$/, '')}${path}?token=${token}`;
+}
+
+/**
+ * @param {{ tipo?: string, veiculoId?: number|null, filialId: number, whatsappOrigem?: string|null }} opts
+ */
+export async function gerarTokenAcessoRapido({
+  tipo = 'medir',
+  veiculoId = null,
+  filialId,
+  whatsappOrigem = null,
+}) {
+  const tipoOk = TIPOS_TOKEN_ACESSO.includes(tipo) ? tipo : 'medir';
+  if ((tipoOk === 'medir' || tipoOk === 'troca') && !veiculoId) {
+    throw new Error('veiculoId é obrigatório para este tipo de link');
+  }
+  if (!filialId) throw new Error('filialId é obrigatório');
+
   const db = getDb();
   const token = randomBytes(32).toString('hex');
   await db.prepare(`
-    INSERT INTO tokens_acesso_rapido (token, veiculo_id, filial_id, whatsapp_origem, expira_em)
-    VALUES (?, ?, ?, ?, datetime('now', 'localtime', '+24 hours'))
-  `).run(token, veiculoId, filialId, whatsappOrigem);
+    INSERT INTO tokens_acesso_rapido (token, veiculo_id, filial_id, tipo, whatsapp_origem, expira_em)
+    VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime', '+24 hours'))
+  `).run(token, veiculoId || null, filialId, tipoOk, whatsappOrigem);
 
-  const link = `${config.frontendUrl.replace(/\/$/, '')}/veiculo-acesso-rapido?token=${token}`;
+  const link = linkAcessoRapido(tipoOk, token);
   if (/localhost|127\.0\.0\.1/i.test(link)) {
     console.warn(
       '[acesso-rapido] FRONTEND_URL aponta para localhost — o link não abre no celular. '
       + 'Defina o IP da rede em backend/.env (ex.: http://10.0.0.231:5173).'
     );
   }
-  return { token, link };
+  return { token, link, tipo: tipoOk };
 }
 
-export async function validarTokenAcessoRapido(token) {
+export async function validarTokenAcessoRapido(token, tiposPermitidos = null) {
   if (!token) return null;
   const db = getDb();
   const row = await db.prepare(`
     SELECT * FROM tokens_acesso_rapido
     WHERE token = ? AND expira_em > datetime('now', 'localtime')
   `).get(token);
-  return row || null;
+  if (!row) return null;
+  const tipo = row.tipo || 'medir';
+  if (Array.isArray(tiposPermitidos) && tiposPermitidos.length && !tiposPermitidos.includes(tipo)) {
+    return null;
+  }
+  return { ...row, tipo };
 }
 
 export async function marcarTokenUsado(tokenId) {
@@ -54,6 +87,17 @@ export async function marcarTokenUsado(tokenId) {
     SET usado_em = COALESCE(usado_em, datetime('now', 'localtime'))
     WHERE id = ?
   `).run(tokenId);
+}
+
+export async function listarEstoqueFilial(filialId, limite = 40) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT id, numero_fogo, marca, modelo, tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu
+    FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+    ORDER BY LOWER(COALESCE(numero_fogo, '')), id
+    LIMIT ?
+  `).all(filialId, limite);
 }
 
 /** Mesmo payload de GET /veiculos/:id */
@@ -73,9 +117,6 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
   }
   if (!veiculo) return null;
 
-  const sync = await sincronizarLayoutComTipo(db, veiculo);
-  veiculo = sync.veiculo;
-
   const orderSql = sqlOrderPosicao('p.posicao');
   const pneus = await db.prepare(`
     SELECT p.*,
@@ -85,8 +126,7 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
       (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux,
       (SELECT diagnostico FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_diagnostico,
       (SELECT acao_sugerida FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_acao,
-      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
-      (SELECT pressao_psi FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_pressao
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao
     FROM pneus p
     WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     ORDER BY ${orderSql}
@@ -129,7 +169,6 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
           sulco_central: p.ult_sulco_cent,
           sulco_interno: p.ult_sulco_int,
           sulco_auxiliar: p.ult_sulco_aux,
-          pressao_psi: p.ult_pressao ?? null,
           menor_sulco: menor,
         }
         : null,

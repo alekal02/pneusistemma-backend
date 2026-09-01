@@ -19,11 +19,9 @@ import {
   LAYOUT_PADRAO,
   POSICOES_PNEU,
   labelTipoPneu,
-  sincronizarLayoutComTipo,
 } from '../pneus-layouts.js';
-import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
-import { limparFrotaFilial } from '../services/limpar-filial.js';
+import { garantirTokenExclusivoFilial } from '../services/whatsapp.js';
 
 const router = Router();
 
@@ -41,6 +39,21 @@ async function resumoFilial(db, filialId, limites) {
     SELECT COUNT(*) as total FROM veiculos WHERE filial_id = ? AND ativo = 1
   `).get(filialId)).total);
 
+  const emRecapagem = Number((await db.prepare(`
+    SELECT COUNT(*) as total FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'recapagem'
+  `).get(filialId)).total);
+
+  const emDescarte = Number((await db.prepare(`
+    SELECT COUNT(*) as total FROM pneus
+    WHERE filial_id = ? AND status_pneu = 'descarte'
+  `).get(filialId)).total);
+
+  const emEstoque = Number((await db.prepare(`
+    SELECT COUNT(*) as total FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+  `).get(filialId)).total);
+
   const pneus = await db.prepare(`
     SELECT
       p.id, p.vida_recap,
@@ -55,7 +68,7 @@ async function resumoFilial(db, filialId, limites) {
   `).all(filialId);
 
   let ok = 0, alerta = 0, critico = 0, semDado = 0;
-  let troca = 0, recap = 0, monitorar = 0;
+  let troca = 0, recapSugestao = 0, monitorar = 0;
   let ultimaMedicao = null;
 
   for (const p of pneus) {
@@ -68,7 +81,7 @@ async function resumoFilial(db, filialId, limites) {
 
     const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
     if (acao.codigo === 'troca') troca++;
-    else if (acao.codigo === 'recap') recap++;
+    else if (acao.codigo === 'recap') recapSugestao++;
     else if (acao.codigo === 'monitorar') monitorar++;
 
     if (p.data_medicao && (!ultimaMedicao || p.data_medicao > ultimaMedicao)) {
@@ -89,16 +102,85 @@ async function resumoFilial(db, filialId, limites) {
     pneus_alerta: alerta,
     pneus_critico: critico,
     pneus_sem_dado: semDado,
-    acoes: { troca, recap, monitorar },
+    pneus_em_recapagem: emRecapagem,
+    pneus_em_descarte: emDescarte,
+    pneus_em_estoque: emEstoque,
+    acoes: { troca, recap: emRecapagem, monitorar, recap_sugerido: recapSugestao },
     compras: {
       pneus_para_comprar: troca,
-      pneus_para_recap: recap,
+      // KPI “Recap” = pneus já enviados ao processo (status recapagem)
+      pneus_para_recap: emRecapagem,
       pneus_monitorar: monitorar,
     },
     ultima_medicao: ultimaMedicao,
     dias_sem_medicao: diasSemMedicao,
     precisa_medir_semana: diasSemMedicao == null ? veiculos > 0 : diasSemMedicao >= 7,
   };
+}
+
+/** Pneus já enviados ao processo de recap (status operacional) */
+async function listarEmRecapagem(db, filialId) {
+  const rows = await db.prepare(`
+    SELECT
+      p.id as pneu_id, p.numero_fogo, p.marca as pneu_marca,
+      p.tipo_pneu, p.condicao, p.vida_recap, p.sulco_inicial_mm,
+      (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
+      (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
+      (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
+      (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_auxiliar,
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as data_medicao,
+      (SELECT m.data_evento FROM movimentacoes m
+        WHERE m.pneu_id = p.id AND m.tipo IN ('recap', 'retirada')
+        ORDER BY m.id DESC LIMIT 1) as data_envio,
+      (SELECT COALESCE(m.veiculo_placa, '') FROM movimentacoes m
+        WHERE m.pneu_id = p.id AND m.tipo = 'retirada'
+        ORDER BY m.id DESC LIMIT 1) as placa_origem,
+      (SELECT m.posicao FROM movimentacoes m
+        WHERE m.pneu_id = p.id AND m.tipo = 'retirada'
+        ORDER BY m.id DESC LIMIT 1) as posicao_origem
+    FROM pneus p
+    WHERE p.filial_id = ? AND p.ativo = 1 AND p.status_pneu = 'recapagem'
+    ORDER BY COALESCE(
+      (SELECT m.data_evento FROM movimentacoes m
+        WHERE m.pneu_id = p.id AND m.tipo IN ('recap', 'retirada')
+        ORDER BY m.id DESC LIMIT 1),
+      '1970-01-01'
+    ) DESC, p.numero_fogo
+  `).all(filialId);
+
+  return rows.map((p) => {
+    const menor = menorSulco(p);
+    return {
+      pneu_id: p.pneu_id,
+      veiculo_id: null,
+      placa: p.placa_origem || '—',
+      apelido: 'Em recapagem',
+      veiculo_tipo: null,
+      km_atual: null,
+      posicao: p.posicao_origem || null,
+      posicao_label: p.posicao_origem ? labelPosicao(p.posicao_origem) : '—',
+      numero_fogo: p.numero_fogo,
+      pneu_marca: p.pneu_marca,
+      tipo_pneu: p.tipo_pneu,
+      condicao: p.condicao,
+      vida_recap: p.vida_recap,
+      menor_sulco: menor,
+      status_sulco: classificarSulco(menor),
+      sulcos: {
+        m1: p.sulco_externo,
+        m2: p.sulco_central,
+        m3: p.sulco_interno,
+        m4: p.sulco_auxiliar,
+      },
+      data_medicao: p.data_envio || p.data_medicao,
+      diagnostico: 'recapagem',
+      diagnostico_label: 'Em processo',
+      acao_sugerida: 'recap',
+      acao_label: 'Em recapagem',
+      acao_motivo: `Enviado à recap (${p.vida_recap || 1}ª vida). Quando voltar, devolva ao estoque (WhatsApp *6* ou aba Pneus).`,
+      em_recapagem: true,
+    };
+  });
 }
 
 /** Lista pneus com ação pendente (troca/recap/monitorar) — base para compras */
@@ -155,19 +237,26 @@ async function pendenciasFilial(db, filialId, limites) {
     };
   });
 
-  const pendentes = itens
-    .filter((i) => i.acao_sugerida !== 'ok')
+  const pendentesMontados = itens
+    .filter((i) => i.acao_sugerida !== 'ok' && i.acao_sugerida !== 'recap')
     .sort((a, b) => {
-      const ordem = { troca: 0, recap: 1, monitorar: 2 };
+      const ordem = { troca: 0, monitorar: 1, rodizio: 2 };
       return (ordem[a.acao_sugerida] ?? 9) - (ordem[b.acao_sugerida] ?? 9)
         || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99);
     });
 
+  const emRecapagem = await listarEmRecapagem(db, filialId);
+  const troca = pendentesMontados.filter((i) => i.acao_sugerida === 'troca');
+  const monitorar = pendentesMontados.filter((i) =>
+    i.acao_sugerida === 'monitorar' || i.acao_sugerida === 'rodizio'
+  );
+  const todos = [...troca, ...emRecapagem, ...monitorar];
+
   return {
-    troca: pendentes.filter((i) => i.acao_sugerida === 'troca'),
-    recap: pendentes.filter((i) => i.acao_sugerida === 'recap'),
-    monitorar: pendentes.filter((i) => i.acao_sugerida === 'monitorar'),
-    todos: pendentes,
+    troca,
+    recap: emRecapagem,
+    monitorar,
+    todos,
   };
 }
 
@@ -321,7 +410,6 @@ router.get('/:id', async (req, res, next) => {
       ...f,
       whatsapp: limparTextoFilial(f.whatsapp),
       whatsapp_grupo: limparTextoFilial(f.whatsapp_grupo),
-      whatsapp_grupo_nome: limparTextoFilial(f.whatsapp_grupo_nome),
       whatsapp_alerta: limparTextoFilial(f.whatsapp_alerta),
       wuzapi_token: undefined,
       tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
@@ -370,9 +458,6 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
     `).get(req.params.veiculoId, filial.id);
     if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado nesta filial' });
 
-    const sync = await sincronizarLayoutComTipo(db, veiculo);
-    veiculo = sync.veiculo;
-
     const orderSql = sqlOrderPosicao('p.posicao');
     const pneus = await db.prepare(`
     SELECT p.*,
@@ -383,8 +468,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       (SELECT diagnostico FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_diagnostico,
       (SELECT acao_sugerida FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_acao,
       (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
-      (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao_id,
-      (SELECT pressao_psi FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_pressao
+      (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao_id
     FROM pneus p
     WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     ORDER BY ${orderSql}
@@ -429,7 +513,6 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
             sulco_central: p.ult_sulco_cent,
             sulco_interno: p.ult_sulco_int,
             sulco_auxiliar: p.ult_sulco_aux,
-            pressao_psi: p.ult_pressao ?? null,
             menor_sulco: menor,
           }
           : null,
@@ -508,8 +591,6 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
       return res.status(400).json({ erro: 'Placa não pode ficar vazia' });
     }
 
-    const tipoFinal = tipo != null ? (normalizarTipoVeiculo(String(tipo).trim()) || veiculo.tipo) : veiculo.tipo;
-
     await db.prepare(`
       UPDATE veiculos SET
         placa = ?,
@@ -527,7 +608,7 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
     `).run(
       placa != null ? String(placa).trim().toUpperCase() : veiculo.placa,
       apelido !== undefined ? (String(apelido).trim() || null) : veiculo.apelido,
-      tipoFinal || veiculo.tipo,
+      tipo != null ? String(tipo).trim() : veiculo.tipo,
       marca !== undefined ? (String(marca).trim() || null) : veiculo.marca,
       modelo !== undefined ? (String(modelo).trim() || null) : veiculo.modelo,
       ano !== undefined && ano !== '' ? parseInt(ano, 10) : veiculo.ano,
@@ -541,26 +622,8 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
       req.params.id
     );
 
-    let layoutAlterado = false;
-    let pneusDesmontados = 0;
-    const sync = await sincronizarLayoutComTipo(db, { ...veiculo, tipo: tipoFinal });
-    if (sync.alterou) {
-      layoutAlterado = true;
-      pneusDesmontados = sync.pneusDesmontados;
-    }
-
     const atualizado = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(veiculo.id);
-    const layoutInfo = getLayout(atualizado.layout_pneus || LAYOUT_PADRAO);
-    res.json({
-      mensagem: layoutAlterado
-        ? `Veículo atualizado — desenho alterado para ${layoutInfo?.nome || atualizado.layout_pneus}`
-        : 'Veículo atualizado',
-      veiculo: atualizado,
-      layout_alterado: layoutAlterado,
-      layout_pneus: atualizado.layout_pneus,
-      layout_nome: layoutInfo?.nome || null,
-      pneus_desmontados: pneusDesmontados,
-    });
+    res.json({ mensagem: 'Veículo atualizado', veiculo: atualizado });
   } catch (err) {
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Já existe um veículo com esta placa' });
@@ -788,11 +851,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // Token WuzAPI exclusivo já na criação — status nasce Desconectado até o QR
+    let chatbot = null;
+    try {
+      chatbot = await garantirTokenExclusivoFilial({
+        id: criado.filialId,
+        codigo: salvo.filial_codigo,
+        nome: salvo.filial_nome,
+      });
+    } catch (err) {
+      console.warn('[filiais] token chatbot não provisionado:', err.message);
+    }
+
     res.status(201).json({
       id: criado.filialId,
       login: salvo.login,
       usuario_id: salvo.id,
-      mensagem: `Filial "${nome.trim()}" criada com login ${salvo.login}`,
+      tem_wuzapi_token: Boolean(chatbot?.token),
+      mensagem: chatbot?.token
+        ? `Filial "${nome.trim()}" criada com login ${salvo.login}. Chatbot pronto para Conectar / QR.`
+        : `Filial "${nome.trim()}" criada com login ${salvo.login}`,
     });
   } catch (err) {
     if (ehViolacaoUnique(err)) {
@@ -934,20 +1012,6 @@ router.post('/:id/reset-senha', async (req, res, next) => {
 
     res.json({ mensagem: 'Senha da filial atualizada' });
   } catch (err) {
-    next(err);
-  }
-});
-
-router.post('/:id/limpar-frota', requireAdmin, async (req, res, next) => {
-  try {
-    const db = getDb();
-    const resultado = await limparFrotaFilial(db, req.params.id);
-    res.json({
-      mensagem: `Frota de ${resultado.filial.nome} (${resultado.filial.codigo}) limpa. Login e WhatsApp da unidade foram mantidos.`,
-      ...resultado,
-    });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });

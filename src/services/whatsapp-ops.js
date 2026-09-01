@@ -33,15 +33,6 @@ async function registrarMovimentacao(db, {
   );
 }
 
-function placaSoAlnum(p) {
-  return String(p || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
-}
-
-/** I/1 e O/0 — digitação comum (ex.: JGZ4I28 enviado como JGZ4128) */
-function placaChaveFlex(p) {
-  return placaSoAlnum(p).replace(/I/g, '1').replace(/O/g, '0');
-}
-
 export async function buscarVeiculoPorPlaca(filialId, placaLimpa) {
   const db = getDb();
   const rows = await db.prepare(`
@@ -55,29 +46,18 @@ export async function buscarVeiculoPorPlaca(filialId, placaLimpa) {
     LIMIT 15
   `).all(filialId, `%${placaLimpa}%`);
 
-  const exatos = rows.filter((v) => placaSoAlnum(v.placa_norm) === placaLimpa);
-  if (exatos.length) return exatos;
-
-  const flexAlvo = placaChaveFlex(placaLimpa);
-  const visuais = rows.filter((v) => placaChaveFlex(v.placa_norm) === flexAlvo);
-  if (visuais.length) return visuais;
-  if (rows.length) return rows;
-
-  const frota = await db.prepare(`
-    SELECT v.*, f.nome as filial_nome,
-      REPLACE(REPLACE(UPPER(v.placa), '-', ''), ' ', '') AS placa_norm
-    FROM veiculos v
-    JOIN filiais f ON f.id = v.filial_id
-    WHERE v.ativo = 1 AND v.filial_id = ?
-    ORDER BY v.placa
-  `).all(filialId);
-  return frota.filter((v) => placaChaveFlex(v.placa_norm) === flexAlvo);
+  const exatos = rows.filter((v) => {
+    const p = String(v.placa_norm || '').replace(/[^A-Z0-9]/gi, '');
+    return p === placaLimpa;
+  });
+  return exatos.length ? exatos : rows;
 }
 
 export async function listarFrota(filialId) {
   const db = getDb();
   return db.prepare(`
-    SELECT placa, apelido, tipo FROM veiculos
+    SELECT id, placa, apelido, tipo, layout_pneus
+    FROM veiculos
     WHERE ativo = 1 AND filial_id = ?
     ORDER BY placa
   `).all(filialId);
@@ -295,7 +275,13 @@ export async function desmontarPneu({ filialId, pneuId }) {
       placa: pneu.placa,
     });
   });
-  return { fogo: pneu.numero_fogo, placa: pneu.placa, posicao };
+  return {
+    fogo: pneu.numero_fogo,
+    placa: pneu.placa,
+    posicao,
+    veiculo_id: veiculoId,
+    estava_montado: true,
+  };
 }
 
 export async function registrarRecap({ filialId, pneuId }) {
@@ -305,20 +291,28 @@ export async function registrarRecap({ filialId, pneuId }) {
     SELECT * FROM pneus WHERE id = ? AND filial_id = ? AND ativo = 1
   `).get(pneuId, filialId);
   if (!pneu) throw Object.assign(new Error('Pneu não encontrado'), { status: 404 });
+  if (pneu.status_pneu === 'recapagem') {
+    throw Object.assign(new Error('Pneu já está em recapagem'), { status: 400 });
+  }
+  if (pneu.status_pneu === 'descarte') {
+    throw Object.assign(new Error('Pneu já está no descarte'), { status: 400 });
+  }
   const novaVida = (pneu.vida_recap || 0) + 1;
   if (novaVida > (limites.max_recaps || 6)) {
     throw Object.assign(new Error(`Limite de recaps atingido (${limites.max_recaps})`), { status: 400 });
   }
   const data = hojeIso();
-  if (pneu.status_pneu === 'montado' && pneu.veiculo_id) {
+  const estavaMontado = pneu.status_pneu === 'montado' && pneu.veiculo_id;
+  const veiculoId = pneu.veiculo_id || null;
+  const posicao = pneu.posicao || null;
+  let placa = null;
+  if (estavaMontado) {
     const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
-    await db.transaction(async () => {
-      await db.prepare(`
-        UPDATE pneus SET
-          veiculo_id = NULL, posicao = NULL, status_pneu = 'recapagem',
-          vida_recap = ?, condicao = 'recapado', data_instalacao = NULL
-        WHERE id = ?
-      `).run(novaVida, pneuId);
+    placa = veiculo?.placa || null;
+  }
+  await db.transaction(async () => {
+    if (estavaMontado) {
+      const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
       await registrarMovimentacao(db, {
         pneuId,
         veiculoId: pneu.veiculo_id,
@@ -330,14 +324,278 @@ export async function registrarRecap({ filialId, pneuId }) {
         detalhes: 'WhatsApp · retirou para recap',
         placa: veiculo?.placa,
       });
-    });
-  } else {
+    }
     await db.prepare(`
-      UPDATE pneus SET status_pneu = 'recapagem', vida_recap = ?, condicao = 'recapado'
+      UPDATE pneus SET
+        veiculo_id = NULL, posicao = NULL, status_pneu = 'recapagem',
+        vida_recap = ?, condicao = 'recapado', data_instalacao = NULL
       WHERE id = ?
     `).run(novaVida, pneuId);
+    await registrarMovimentacao(db, {
+      pneuId,
+      veiculoId: estavaMontado ? veiculoId : null,
+      tipo: 'recap',
+      data,
+      km: null,
+      hr: null,
+      posicao: estavaMontado ? posicao : null,
+      detalhes: estavaMontado
+        ? `WhatsApp · enviou à recap (${novaVida}ª vida) · origem ${placa || ''} ${posicao || ''}`.trim()
+        : `WhatsApp · enviou à recap (${novaVida}ª vida) · origem estoque`,
+      placa,
+    });
+  });
+  return {
+    fogo: pneu.numero_fogo,
+    vida: novaVida,
+    estava_montado: Boolean(estavaMontado),
+    veiculo_id: veiculoId,
+    posicao,
+    placa,
+  };
+}
+
+/** Recap concluído: pneu volta ao estoque para reuso */
+export async function devolverRecapAoEstoque({ filialId, pneuId }) {
+  const db = getDb();
+  const pneu = await db.prepare(`
+    SELECT * FROM pneus WHERE id = ? AND filial_id = ? AND ativo = 1
+  `).get(pneuId, filialId);
+  if (!pneu) throw Object.assign(new Error('Pneu não encontrado'), { status: 404 });
+  if (pneu.status_pneu !== 'recapagem') {
+    throw Object.assign(new Error('Pneu não está em recapagem'), { status: 400 });
   }
-  return { fogo: pneu.numero_fogo, vida: novaVida };
+  const data = hojeIso();
+  await db.transaction(async () => {
+    await db.prepare(`
+      UPDATE pneus SET
+        status_pneu = 'estoque',
+        condicao = 'recapado',
+        veiculo_id = NULL,
+        posicao = NULL,
+        data_instalacao = NULL
+      WHERE id = ?
+    `).run(pneuId);
+    await registrarMovimentacao(db, {
+      pneuId,
+      veiculoId: null,
+      tipo: 'retorno_recap',
+      data,
+      km: null,
+      hr: null,
+      posicao: null,
+      detalhes: `WhatsApp · recap concluído · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
+      placa: null,
+    });
+  });
+  return {
+    fogo: pneu.numero_fogo,
+    vida: pneu.vida_recap || 1,
+    mensagem: `Fogo ${pneu.numero_fogo} voltou ao estoque (recapado)`,
+  };
+}
+
+/**
+ * Troca o pneu montado por outro do estoque na mesma posição.
+ */
+export async function trocarPorEstoque({ filialId, pneuMontadoId, pneuEstoqueId }) {
+  const montado = await getDb().prepare(`
+    SELECT * FROM pneus
+    WHERE id = ? AND filial_id = ? AND ativo = 1 AND status_pneu = 'montado'
+  `).get(pneuMontadoId, filialId);
+  if (!montado) throw Object.assign(new Error('Pneu montado não encontrado'), { status: 404 });
+
+  const estoque = await getDb().prepare(`
+    SELECT * FROM pneus
+    WHERE id = ? AND filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+  `).get(pneuEstoqueId, filialId);
+  if (!estoque) throw Object.assign(new Error('Pneu do estoque não encontrado'), { status: 404 });
+
+  const posicao = montado.posicao;
+  const veiculoId = montado.veiculo_id;
+  const retirado = await desmontarPneu({ filialId, pneuId: montado.id });
+  const montagem = await montarPneu({
+    filialId,
+    pneuId: estoque.id,
+    veiculoId,
+    posicao,
+  });
+  return {
+    mensagem: `Trocou fogo ${retirado.fogo} → ${montagem.fogo} em ${montagem.label}`,
+    retirado,
+    montado: montagem,
+  };
+}
+
+/**
+ * Move o pneu para outro veículo/posição da frota.
+ * Se a posição destino estiver ocupada, troca os dois pneus (swap).
+ */
+export async function moverOuTrocarNaFrota({
+  filialId,
+  pneuId,
+  veiculoDestinoId,
+  posicaoDestino,
+  detalhes = null,
+}) {
+  const db = getDb();
+  const posDest = String(posicaoDestino || '').trim().toUpperCase();
+  if (!posDest) {
+    throw Object.assign(new Error('Informe a posição de destino'), { status: 400 });
+  }
+
+  const origem = await db.prepare(`
+    SELECT p.*, v.placa as placa_origem, v.km_atual as km_origem, v.hr_atual as hr_origem
+    FROM pneus p
+    JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1
+    WHERE p.id = ? AND p.filial_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
+  `).get(pneuId, filialId);
+  if (!origem) {
+    throw Object.assign(new Error('Pneu montado não encontrado'), { status: 404 });
+  }
+
+  const veiculoDest = await db.prepare(`
+    SELECT * FROM veiculos WHERE id = ? AND filial_id = ? AND ativo = 1
+  `).get(veiculoDestinoId, filialId);
+  if (!veiculoDest) {
+    throw Object.assign(new Error('Veículo de destino não encontrado'), { status: 404 });
+  }
+
+  const layoutDest = getLayout(veiculoDest.layout_pneus || LAYOUT_PADRAO);
+  if (!layoutDest.posicoes.includes(posDest)) {
+    throw Object.assign(new Error(`Posição ${posDest} inválida no veículo ${veiculoDest.placa}`), { status: 400 });
+  }
+
+  if (Number(origem.veiculo_id) === Number(veiculoDest.id) && origem.posicao === posDest) {
+    throw Object.assign(new Error('Pneu já está nesta posição'), { status: 400 });
+  }
+
+  const valOrigem = validarMontagem({
+    condicao: origem.condicao,
+    tipo_pneu: origem.tipo_pneu,
+    posicao: posDest,
+  });
+  if (!valOrigem.ok) {
+    throw Object.assign(new Error(valOrigem.erros.join(' ')), { status: 400 });
+  }
+
+  const ocupante = await db.prepare(`
+    SELECT p.*, v.placa as placa_ocupante
+    FROM pneus p
+    JOIN veiculos v ON v.id = p.veiculo_id
+    WHERE p.veiculo_id = ? AND p.posicao = ? AND p.ativo = 1 AND p.status_pneu = 'montado' AND p.id != ?
+  `).get(veiculoDest.id, posDest, origem.id);
+
+  const data = hojeIso();
+  const posOrigem = origem.posicao;
+  const veiculoOrigemId = origem.veiculo_id;
+  const placaOrigem = origem.placa_origem;
+
+  if (ocupante) {
+    const valOcupante = validarMontagem({
+      condicao: ocupante.condicao,
+      tipo_pneu: ocupante.tipo_pneu,
+      posicao: posOrigem,
+    });
+    if (!valOcupante.ok) {
+      throw Object.assign(
+        new Error(`Não dá para trocar: pneu fogo ${ocupante.numero_fogo} não serve em ${labelPosicao(posOrigem)}. ${valOcupante.erros.join(' ')}`),
+        { status: 400 }
+      );
+    }
+
+    await db.transaction(async () => {
+      // Libera destino temporariamente (evita unique parcial)
+      await db.prepare(`
+        UPDATE pneus SET posicao = NULL WHERE id = ?
+      `).run(ocupante.id);
+
+      await db.prepare(`
+        UPDATE pneus SET veiculo_id = ?, posicao = ?, data_instalacao = COALESCE(data_instalacao, ?)
+        WHERE id = ?
+      `).run(veiculoDest.id, posDest, data, origem.id);
+
+      await db.prepare(`
+        UPDATE pneus SET veiculo_id = ?, posicao = ?, data_instalacao = COALESCE(data_instalacao, ?)
+        WHERE id = ?
+      `).run(veiculoOrigemId, posOrigem, data, ocupante.id);
+
+      const detBase = detalhes?.trim()
+        || `Troca na frota · ${placaOrigem} ${labelPosicao(posOrigem)} ↔ ${veiculoDest.placa} ${labelPosicao(posDest)}`;
+
+      await registrarMovimentacao(db, {
+        pneuId: origem.id,
+        veiculoId: veiculoDest.id,
+        tipo: 'mudanca_posicao',
+        data,
+        km: veiculoDest.km_atual,
+        hr: veiculoDest.hr_atual,
+        posicao: posDest,
+        detalhes: `${detBase} · fogo ${origem.numero_fogo}`,
+        placa: veiculoDest.placa,
+      });
+      await registrarMovimentacao(db, {
+        pneuId: ocupante.id,
+        veiculoId: veiculoOrigemId,
+        tipo: 'mudanca_posicao',
+        data,
+        km: origem.km_origem,
+        hr: origem.hr_origem,
+        posicao: posOrigem,
+        detalhes: `${detBase} · fogo ${ocupante.numero_fogo}`,
+        placa: placaOrigem,
+      });
+    });
+
+    return {
+      modo: 'troca',
+      mensagem: `Trocou fogo ${origem.numero_fogo} (${placaOrigem} ${labelPosicao(posOrigem)}) ↔ fogo ${ocupante.numero_fogo} (${veiculoDest.placa} ${labelPosicao(posDest)})`,
+      origem: {
+        id: origem.id,
+        fogo: origem.numero_fogo,
+        de: { veiculo_id: veiculoOrigemId, placa: placaOrigem, posicao: posOrigem },
+        para: { veiculo_id: veiculoDest.id, placa: veiculoDest.placa, posicao: posDest },
+      },
+      destino: {
+        id: ocupante.id,
+        fogo: ocupante.numero_fogo,
+        de: { veiculo_id: veiculoDest.id, placa: veiculoDest.placa, posicao: posDest },
+        para: { veiculo_id: veiculoOrigemId, placa: placaOrigem, posicao: posOrigem },
+      },
+    };
+  }
+
+  // Posição livre: só move
+  await db.transaction(async () => {
+    await db.prepare(`
+      UPDATE pneus SET veiculo_id = ?, posicao = ?, data_instalacao = COALESCE(data_instalacao, ?)
+      WHERE id = ?
+    `).run(veiculoDest.id, posDest, data, origem.id);
+
+    await registrarMovimentacao(db, {
+      pneuId: origem.id,
+      veiculoId: veiculoDest.id,
+      tipo: 'mudanca_posicao',
+      data,
+      km: veiculoDest.km_atual,
+      hr: veiculoDest.hr_atual,
+      posicao: posDest,
+      detalhes: detalhes?.trim()
+        || `Moveu na frota · ${placaOrigem} ${labelPosicao(posOrigem)} → ${veiculoDest.placa} ${labelPosicao(posDest)}`,
+      placa: veiculoDest.placa,
+    });
+  });
+
+  return {
+    modo: 'mover',
+    mensagem: `Moveu fogo ${origem.numero_fogo}: ${placaOrigem} ${labelPosicao(posOrigem)} → ${veiculoDest.placa} ${labelPosicao(posDest)}`,
+    origem: {
+      id: origem.id,
+      fogo: origem.numero_fogo,
+      de: { veiculo_id: veiculoOrigemId, placa: placaOrigem, posicao: posOrigem },
+      para: { veiculo_id: veiculoDest.id, placa: veiculoDest.placa, posicao: posDest },
+    },
+  };
 }
 
 export async function registrarDescarte({ filialId, pneuId, motivo = null }) {
@@ -353,8 +611,11 @@ export async function registrarDescarte({ filialId, pneuId, motivo = null }) {
     throw Object.assign(new Error('Pneu já está no descarte'), { status: 400 });
   }
   const data = hojeIso();
+  const estavaMontado = pneu.status_pneu === 'montado' && pneu.veiculo_id;
+  const veiculoId = pneu.veiculo_id || null;
+  const posicao = pneu.posicao || null;
   await db.transaction(async () => {
-    if (pneu.status_pneu === 'montado' && pneu.veiculo_id) {
+    if (estavaMontado) {
       await registrarMovimentacao(db, {
         pneuId,
         veiculoId: pneu.veiculo_id,
@@ -376,8 +637,25 @@ export async function registrarDescarte({ filialId, pneuId, motivo = null }) {
         data_instalacao = NULL
       WHERE id = ?
     `).run(motivo?.trim() || null, data, pneuId);
+    await registrarMovimentacao(db, {
+      pneuId,
+      veiculoId: estavaMontado ? veiculoId : null,
+      tipo: 'descarte',
+      data,
+      km: pneu.km_atual,
+      hr: pneu.hr_atual,
+      posicao: estavaMontado ? posicao : null,
+      detalhes: motivo?.trim() || 'WhatsApp · enviou ao descarte',
+      placa: pneu.placa || null,
+    });
   });
-  return { fogo: pneu.numero_fogo };
+  return {
+    fogo: pneu.numero_fogo,
+    estava_montado: Boolean(estavaMontado),
+    veiculo_id: veiculoId,
+    posicao,
+    placa: pneu.placa || null,
+  };
 }
 
 export { labelPosicao, TIPOS_PNEU, CONDICOES_PNEU };
