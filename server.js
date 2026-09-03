@@ -56,6 +56,10 @@ async function main() {
       req.rawBody = buf.toString('utf8');
     },
   }));
+  app.use(express.urlencoded({
+    extended: true,
+    limit: '2mb',
+  }));
 
   app.use('/api/auth', authRouter);
   app.use('/api/filiais', filiaisRouter);

@@ -1,6 +1,6 @@
 /**
  * Webhook WuzAPI — placa → link de medição
- * Aceita chat privado ou grupo cadastrado na filial.
+ * Só responde no grupo selecionado no painel (passo 2). Privado e outros grupos são ignorados.
  */
 import { Router } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -62,16 +62,32 @@ function validarHmacWebhook(req) {
 }
 
 /** Raiz do payload (WuzAPI real: `event`; legado/testes: `data`) */
+export function desempacotarPayloadWuzapi(payload) {
+  if (!payload || typeof payload !== 'object') return payload || {};
+  const packed = payload.jsonData ?? payload.json;
+  if (typeof packed === 'string' && packed.trim()) {
+    try {
+      const parsed = JSON.parse(packed);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // ignora JSON inválido
+    }
+  }
+  if (packed && typeof packed === 'object') return packed;
+  return payload;
+}
+
 export function raizPayloadMensagem(payload) {
-  if (!payload || typeof payload !== 'object') return {};
-  const d = payload.data;
+  const p = desempacotarPayloadWuzapi(payload);
+  if (!p || typeof p !== 'object') return {};
+  const d = p.data;
   if (d && typeof d === 'object' && (d.Info || d.info || d.Message || d.message)) return d;
-  const e = payload.event;
+  const e = p.event;
   if (e && typeof e === 'object' && !Array.isArray(e)
     && (e.Info || e.info || e.Message || e.message || e.Conversation || e.conversation)) {
     return e;
   }
-  return payload;
+  return p;
 }
 
 function ehMensagemPropria(event) {
@@ -139,14 +155,15 @@ export function extrairChatJid(event) {
     root.from,
     event?.from,
   ];
+  const grupos = [];
+  const outros = [];
   for (const c of candidates) {
     if (!c) continue;
     const s = String(c);
-    if (s.includes('@g.us') || s.includes('@s.whatsapp.net') || /\d/.test(s)) {
-      return s;
-    }
+    if (s.includes('@g.us')) grupos.push(s);
+    else if (s.includes('@s.whatsapp.net') || s.includes('@lid') || /\d/.test(s)) outros.push(s);
   }
-  return null;
+  return grupos[0] || outros[0] || null;
 }
 
 export function extrairTelefone(event) {
@@ -202,12 +219,17 @@ export function extrairTextoMensagem(event) {
 }
 
 function ehMensagemDeGrupo(event) {
+  const root = raizPayloadMensagem(event);
+  const info = root.Info || root.info || {};
+  const flag = [info.IsGroup, info.isGroup, info.IsGroupMessage, root.isGroup, event?.isGroup]
+    .some((v) => v === true || v === 'true' || v === 1 || v === '1');
+  if (flag) return true;
   const jid = extrairChatJid(event) || '';
   return String(jid).includes('@g.us');
 }
 
-/** Resolve canal da unidade a partir do chat (grupo ou número do chatbot) */
-async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
+/** Resolve canal: só o grupo salvo no painel. Sem grupo = não responde. */
+async function resolverCanalFilial(db, chatJid, filialIdHint = null) {
   let sql = `
     SELECT id, nome, codigo, whatsapp, whatsapp_grupo, wuzapi_token
     FROM filiais
@@ -218,46 +240,17 @@ async function resolverCanalFilial(db, chatJid, phone, filialIdHint = null) {
     sql += ` AND id = ?`;
     params.push(filialIdHint);
   } else {
-    sql += ` AND (
-      (whatsapp IS NOT NULL AND TRIM(whatsapp) != '')
-      OR (whatsapp_grupo IS NOT NULL AND TRIM(whatsapp_grupo) != '')
-    )`;
+    sql += ` AND (whatsapp_grupo IS NOT NULL AND TRIM(whatsapp_grupo) != '')`;
   }
   const filiais = await db.prepare(sql).all(...params);
 
-  const chatNorm = normalizarDestino(chatJid);
-  const phoneNorm = phone ? limparTelefone(phone) : '';
-
   for (const f of filiais) {
-    if (f.whatsapp_grupo) {
-      if (jidsGrupoIguais(f.whatsapp_grupo, chatJid)) {
-        // Sempre responde no chat da mensagem (JID atual), não no valor antigo salvo
-        const replyTo = chatNorm?.phone
-          || normalizarDestino(chatJid)?.phone
-          || normalizarDestino(f.whatsapp_grupo)?.phone;
-        return { filial: f, replyTo, escopoFilialId: f.id };
-      }
-    }
-    if (f.whatsapp && phoneNorm) {
-      const n = limparTelefone(f.whatsapp);
-      // Remetente usa o chip do chatbot da filial, ou chat privado com o bot
-      if (n && n === phoneNorm) {
-        return { filial: f, replyTo: n, escopoFilialId: f.id };
-      }
-    }
+    if (!f.whatsapp_grupo) continue;
+    if (!jidsGrupoIguais(f.whatsapp_grupo, chatJid)) continue;
+    const replyTo = normalizarDestino(f.whatsapp_grupo)?.phone
+      || String(f.whatsapp_grupo).trim();
+    return { filial: f, replyTo, escopoFilialId: f.id };
   }
-
-  // Webhook veio com ?filial_id= — escopo forçado mesmo sem match de grupo
-  if (filialIdHint && filiais[0]) {
-    const f = filiais[0];
-    const replyTo = chatNorm?.isGroup
-      ? chatNorm.phone
-      : (phoneNorm || limparTelefone(f.whatsapp) || chatNorm?.phone);
-    if (replyTo) {
-      return { filial: f, replyTo, escopoFilialId: f.id };
-    }
-  }
-
   return null;
 }
 
@@ -267,7 +260,7 @@ router.post('/whatsapp', async (req, res) => {
       return res.status(401).json({ erro: 'Assinatura HMAC inválida' });
     }
 
-    const event = req.body || {};
+    const event = desempacotarPayloadWuzapi(req.body || {});
     // WuzAPI envia type:"Message" e event:<objeto>; não usar event.event como nome
     const eventName = event.type || event.Event
       || (typeof event.event === 'string' ? event.event : '')
@@ -311,25 +304,25 @@ router.post('/whatsapp', async (req, res) => {
 
     const db = getDb();
     const filialIdHint = Number(req.query.filial_id) || null;
-    const canal = await resolverCanalFilial(db, chatJid, phone, filialIdHint);
+    const canal = await resolverCanalFilial(db, chatJid, filialIdHint);
 
-    // Grupo não cadastrado em nenhuma filial → ignora
-    if (isGroup && !canal) {
-      console.warn('[webhook] grupo sem filial cadastrada:', chatJid, 'hint=', filialIdHint);
+    if (!canal) {
+      console.info('[webhook] ignorado (fora do grupo selecionado)', {
+        chat: chatJid,
+        isGroup,
+        filial_hint: filialIdHint,
+      });
       return res.status(200).json({
         ok: true,
-        ignored: 'grupo_nao_cadastrado',
+        ignored: isGroup ? 'grupo_nao_selecionado' : 'somente_grupo_selecionado',
         chat: chatJid,
-        dica: 'Salve o grupo no painel WhatsApp e clique em Conectar / QR para reaplicar o webhook.',
       });
     }
 
-    const replyTo = canal?.replyTo || phone;
-    if (!replyTo) {
-      return res.status(200).json({ ok: true });
+    const destinoEnvio = canal.replyTo;
+    if (!destinoEnvio) {
+      return res.status(200).json({ ok: true, ignored: 'sem_destino' });
     }
-    // Em grupo, prioriza o JID do chat da mensagem (mais atual que o valor salvo)
-    const destinoEnvio = (isGroup && chatJid) ? chatJid : replyTo;
 
     // Rate limit por remetente (não pelo grupo — evita bloquear a frota inteira)
     const rateKey = phone || destinoEnvio;
@@ -340,7 +333,7 @@ router.post('/whatsapp', async (req, res) => {
         destinatario: destinoEnvio,
         mensagem: '⏳ Muitas consultas em pouco tempo. Aguarde 1 minuto e envie a placa novamente.',
         filialId: canal?.escopoFilialId || null,
-        fallbackDestinatario: phone,
+        fallbackDestinatario: null,
       });
       return res.status(200).json({ ok: true, rate_limited: true });
     }
@@ -373,7 +366,7 @@ router.post('/whatsapp', async (req, res) => {
         destinatario: destinoEnvio,
         mensagem: `❌ Erro: ${err.message}\n\nDigite *menu*.`,
         filialId: canal?.escopoFilialId || null,
-        fallbackDestinatario: phone,
+        fallbackDestinatario: null,
       }).catch(() => {});
     });
     return;

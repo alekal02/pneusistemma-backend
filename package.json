@@ -10,7 +10,6 @@
     "init-db": "node src/database.js",
     "fix-encoding": "node src/fix-encoding.js",
     "smoke": "node scripts/smoke-api.mjs",
-    "smoke:e2e": "node scripts/smoke-e2e-ciclo-pneu.mjs",
     "smoke:filial": "node scripts/smoke-filial-login.mjs",
     "test:diagnostico": "node scripts/test-diagnostico-fotos.mjs"
   },
