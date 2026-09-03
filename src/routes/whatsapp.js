@@ -337,6 +337,28 @@ function limparCampoTexto(v) {
   return s;
 }
 
+function jidsGrupoIguais(a, b) {
+  const da = String(a || '').trim();
+  const db = String(b || '').trim();
+  if (!da && !db) return true;
+  if (!da || !db) return false;
+  if (da === db) return true;
+  const na = normalizarDestino(da);
+  const nb = normalizarDestino(db);
+  if (na?.isGroup && nb?.isGroup && na.logKey === nb.logKey) return true;
+  const xa = da.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  const xb = db.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  return Boolean(xa && xb && xa === xb);
+}
+
+/** Trocar ou limpar o grupo já salvo exige `trocar_grupo: true` no painel. */
+function grupoMedicaoRequerDestrava(atual, novo) {
+  const a = limparCampoTexto(atual);
+  const n = limparCampoTexto(novo);
+  if (!a) return false;
+  return !jidsGrupoIguais(a, n);
+}
+
 async function filialOuErro(id) {
   const db = getDb();
   const f = await db.prepare(`
@@ -393,10 +415,17 @@ router.put('/filiais-chatbot/:id', requireChatbotAcesso, async (req, res, next) 
   if (!assertFilialNoEscopo(req, id)) {
     return res.status(403).json({ erro: 'Filial fora do seu escopo' });
   }
-  const { whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token } = req.body || {};
+  const { whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token, trocar_grupo } = req.body || {};
 
   try {
     const f = await filialOuErro(id);
+    if (whatsapp_grupo !== undefined && grupoMedicaoRequerDestrava(f.whatsapp_grupo, whatsapp_grupo)) {
+      if (trocar_grupo !== true) {
+        return res.status(409).json({
+          erro: 'Grupo da medição está travado. Clique em “Escolher outro grupo” no painel do chatbot.',
+        });
+      }
+    }
     const db = getDb();
     const podeToken = isAdmin(req.user) || req.user.papel === 'gerente';
 

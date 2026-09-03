@@ -778,6 +778,16 @@ function limparTextoFilial(v) {
   return s;
 }
 
+function gruposFilialIguais(a, b) {
+  const da = limparTextoFilial(a);
+  const db = limparTextoFilial(b);
+  if (!da && !db) return true;
+  if (!da || !db) return false;
+  if (da === db) return true;
+  return da.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '')
+    === db.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   const { nome, codigo, contrato, login, senha, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token } = req.body || {};
   if (!nome?.trim() || !codigo?.trim()) {
@@ -891,6 +901,16 @@ router.put('/:id', async (req, res, next) => {
   try {
     const atual = await db.prepare('SELECT * FROM filiais WHERE id = ?').get(req.params.id);
     if (!atual) return res.status(404).json({ erro: 'Filial não encontrada' });
+
+    if (whatsapp_grupo !== undefined) {
+      const atualG = limparTextoFilial(atual.whatsapp_grupo);
+      const novoG = limparTextoFilial(whatsapp_grupo);
+      if (atualG && !gruposFilialIguais(atualG, novoG) && req.body?.trocar_grupo !== true) {
+        return res.status(409).json({
+          erro: 'Grupo da medição está travado. Clique em “Escolher outro grupo” no painel do chatbot.',
+        });
+      }
+    }
 
     const admin = isAdmin(req.user);
 
