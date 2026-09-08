@@ -36,16 +36,6 @@ async function main() {
       if (config.allowVercelPreviews && /\.vercel\.app$/i.test(normalized)) {
         return cb(null, true);
       }
-      // Capacitor / WebView do app mobile
-      const capacitorOrigins = [
-        'https://localhost',
-        'http://localhost',
-        'capacitor://localhost',
-        'ionic://localhost',
-        'https://br.com.pneusistemma.app',
-        'capacitor://br.com.pneusistemma.app',
-      ];
-      if (capacitorOrigins.includes(normalized)) return cb(null, true);
       return cb(null, false);
     },
     credentials: true,

@@ -6,9 +6,11 @@ import {
   requireAdmin,
   requireGerenteOuAdmin,
   hashSenha,
+  verificarSenha,
   filiaisEscopoIds,
   isAdmin,
 } from '../auth.js';
+import { excluirFilialCompleta } from '../services/limpar-filial.js';
 import { classificarSulco, getLimites, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
 import {
@@ -1037,20 +1039,30 @@ router.post('/:id/reset-senha', async (req, res, next) => {
 });
 
 router.delete('/:id', requireAdmin, async (req, res, next) => {
+  const senhaAdmin = String(req.body?.senha_admin || '');
+  if (!senhaAdmin) {
+    return res.status(400).json({
+      erro: 'Informe a senha de administrador para confirmar a exclusão',
+    });
+  }
+
   try {
     const db = getDb();
-    const result = await db.prepare(`
-      UPDATE filiais SET ativo = 0, updated_at = NOW() WHERE id = ?
-    `).run(req.params.id);
-    if (result.changes === 0) return res.status(404).json({ erro: 'Filial não encontrada' });
+    const admin = await db.prepare(`
+      SELECT id, senha_hash FROM usuarios
+      WHERE id = ? AND papel = 'admin' AND ativo = 1
+    `).get(req.user.id);
+    if (!admin || !verificarSenha(senhaAdmin, admin.senha_hash)) {
+      return res.status(403).json({ erro: 'Senha de administrador incorreta' });
+    }
 
-    await db.prepare(`
-      UPDATE usuarios SET ativo = 0, updated_at = NOW()
-      WHERE filial_id = ? AND papel IN ('filial', 'gerente')
-    `).run(req.params.id);
-
-    res.json({ mensagem: 'Filial desativada' });
+    const resultado = await excluirFilialCompleta(db, req.params.id);
+    res.json({
+      mensagem: `Unidade ${resultado.filial.nome} excluída. Veículos, pneus, medições e logins dessa unidade foram apagados.`,
+      removidos: resultado.removidos,
+    });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });

@@ -89,14 +89,60 @@ export async function contarFrotaFilial(db, filialId) {
   };
 }
 
-export async function limparFrotaFilial(db, filialId) {
+async function apagarDependenciasOperacionais(db, id) {
+  await delSafe(db, `
+    DELETE FROM tokens_acesso_rapido WHERE filial_id = ?
+  `, id);
+
+  await delSafe(db, `
+    DELETE FROM notificacoes_whatsapp
+    WHERE filial_id = ?
+       OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
+       OR medicao_id IN (
+         SELECT m.id FROM medicoes m
+         JOIN pneus p ON p.id = m.pneu_id
+         WHERE p.filial_id = ? OR p.veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
+       )
+  `, id, id, id, id);
+
+  await delSafe(db, `
+    DELETE FROM alertas_posicao_vaga WHERE filial_id = ?
+  `, id);
+
+  await db.prepare(`
+    DELETE FROM medicoes
+    WHERE pneu_id IN (
+      SELECT id FROM pneus
+      WHERE filial_id = ? OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
+    )
+  `).run(id, id);
+
+  await db.prepare(`
+    DELETE FROM movimentacoes
+    WHERE pneu_id IN (
+      SELECT id FROM pneus
+      WHERE filial_id = ? OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
+    )
+       OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
+  `).run(id, id, id);
+
+  await db.prepare(`
+    DELETE FROM pneus
+    WHERE filial_id = ? OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
+  `).run(id, id);
+
+  await db.prepare(`
+    DELETE FROM veiculos WHERE filial_id = ?
+  `).run(id);
+}
+
+async function filialOu404(db, filialId) {
   const id = Number(filialId);
   if (!Number.isFinite(id) || id <= 0) {
     const err = new Error('filial_id inválido');
     err.status = 400;
     throw err;
   }
-
   const filial = await db.prepare(`
     SELECT id, nome, codigo FROM filiais WHERE id = ?
   `).get(id);
@@ -105,56 +151,52 @@ export async function limparFrotaFilial(db, filialId) {
     err.status = 404;
     throw err;
   }
+  return { id, filial };
+}
 
+export async function limparFrotaFilial(db, filialId) {
+  const { id, filial } = await filialOu404(db, filialId);
   const antes = await contarFrotaFilial(db, id);
 
   await db.transaction(async () => {
-    await delSafe(db, `
-      DELETE FROM tokens_acesso_rapido WHERE filial_id = ?
-    `, id);
-
-    await delSafe(db, `
-      DELETE FROM notificacoes_whatsapp
-      WHERE filial_id = ?
-         OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
-         OR medicao_id IN (
-           SELECT m.id FROM medicoes m
-           JOIN pneus p ON p.id = m.pneu_id
-           WHERE p.filial_id = ? OR p.veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
-         )
-    `, id, id, id, id);
-
-    await delSafe(db, `
-      DELETE FROM alertas_posicao_vaga WHERE filial_id = ?
-    `, id);
-
-    await db.prepare(`
-      DELETE FROM medicoes
-      WHERE pneu_id IN (
-        SELECT id FROM pneus
-        WHERE filial_id = ? OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
-      )
-    `).run(id, id);
-
-    await db.prepare(`
-      DELETE FROM movimentacoes
-      WHERE pneu_id IN (
-        SELECT id FROM pneus
-        WHERE filial_id = ? OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
-      )
-         OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
-    `).run(id, id, id);
-
-    await db.prepare(`
-      DELETE FROM pneus
-      WHERE filial_id = ? OR veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ?)
-    `).run(id, id);
-
-    await db.prepare(`
-      DELETE FROM veiculos WHERE filial_id = ?
-    `).run(id);
+    await apagarDependenciasOperacionais(db, id);
   });
 
   const depois = await contarFrotaFilial(db, id);
   return { filial, antes, depois };
+}
+
+/** Apaga a filial e tudo que pertence a ela — sem deixar cadastro órfão. */
+export async function excluirFilialCompleta(db, filialId) {
+  const { id, filial } = await filialOu404(db, filialId);
+  const antes = await contarFrotaFilial(db, id);
+  const usuarios = await nSafe(
+    db,
+    `SELECT COUNT(*) as c FROM usuarios WHERE filial_id = ? AND papel <> 'admin'`,
+    id
+  );
+
+  await db.transaction(async () => {
+    await apagarDependenciasOperacionais(db, id);
+    await delSafe(db, `
+      DELETE FROM whatsapp_sessoes WHERE filial_id = ?
+    `, id);
+    await delSafe(db, `
+      DELETE FROM alerta_destinatarios WHERE filial_id = ?
+    `, id);
+    await delSafe(db, `
+      DELETE FROM usuarios WHERE filial_id = ? AND papel <> 'admin'
+    `, id);
+    const result = await db.prepare(`DELETE FROM filiais WHERE id = ?`).run(id);
+    if (!result.changes) {
+      const err = new Error('Filial não encontrada');
+      err.status = 404;
+      throw err;
+    }
+  });
+
+  return {
+    filial,
+    removidos: { ...antes, usuarios },
+  };
 }
