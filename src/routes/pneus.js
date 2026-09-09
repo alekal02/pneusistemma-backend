@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb, classificarSulco } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { getLimites, limitesDoVeiculo, menorSulco, adicionarDias } from '../limites.js';
+import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import {
   diagnosticarPerfil,
   sugerirAcao,
@@ -395,13 +396,14 @@ router.get('/', async (req, res, next) => {
     SELECT p.*,
       v.placa as veiculo_placa, v.apelido as veiculo_apelido,
       v.tipo as veiculo_tipo, v.layout_pneus,
-      (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
-      (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
-      (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
-      (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux,
-      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao
+      um.sulco_externo as ult_sulco_ext,
+      um.sulco_central as ult_sulco_cent,
+      um.sulco_interno as ult_sulco_int,
+      um.sulco_auxiliar as ult_sulco_aux,
+      um.data_medicao as ult_medicao
     FROM pneus p
     LEFT JOIN veiculos v ON v.id = p.veiculo_id
+    ${SQL_LATERAL_ULTIMA_MEDICAO}
     WHERE ${where}
     ORDER BY
       CASE p.status_pneu

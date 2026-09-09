@@ -5,6 +5,7 @@ import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
 import { papelPosicao } from '../pneus-layouts.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
 import { normalizarDiaMedicao, labelDiaMedicao, semanaMedicaoBrasil } from '../dia-medicao.js';
+import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 
 const router = Router();
 
@@ -21,12 +22,10 @@ router.get('/resumo', async (req, res, next) => {
     SELECT
       p.id, p.vida_recap, p.condicao, p.numero_fogo, p.posicao,
       v.placa, v.apelido, v.tipo, v.layout_pneus,
-      (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
-      (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
-      (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
-      (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_auxiliar
+      um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar
     FROM pneus p
     JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
+    ${SQL_LATERAL_ULTIMA_MEDICAO}
     WHERE p.ativo = 1 AND p.status_pneu = 'montado'
   `).all(filialId);
 

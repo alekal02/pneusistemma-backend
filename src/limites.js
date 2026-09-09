@@ -98,11 +98,26 @@ function textoOuPadrao(valor, padrao, { max = 200 } = {}) {
   return t.slice(0, max);
 }
 
+function valorDeMapa(map, chave) {
+  if (!Object.prototype.hasOwnProperty.call(map, chave) || map[chave] == null) {
+    return PADROES[chave];
+  }
+  if (CHAVES_TEXTO.has(chave)) {
+    const txt = String(map[chave] ?? '').trim();
+    return txt || PADROES[chave];
+  }
+  const n = parseFloat(map[chave]);
+  return Number.isFinite(n) ? n : PADROES[chave];
+}
+
 export async function refreshLimitesCache() {
-  const keys = Object.values(CHAVES);
+  const db = getDb();
+  const rows = await db.prepare('SELECT chave, valor FROM configuracoes').all();
+  const map = {};
+  for (const r of rows) map[r.chave] = r.valor;
   const values = {};
-  for (const k of keys) {
-    values[k] = await lerValorAsync(k);
+  for (const k of Object.values(CHAVES)) {
+    values[k] = valorDeMapa(map, k);
   }
   cache = {
     sulco_critico_mm: values[CHAVES.CRITICO],

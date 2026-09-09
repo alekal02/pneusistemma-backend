@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS alerta_destinatarios (
 CREATE INDEX IF NOT EXISTS idx_pneus_veiculo ON pneus(veiculo_id);
 CREATE INDEX IF NOT EXISTS idx_pneus_filial ON pneus(filial_id);
 CREATE INDEX IF NOT EXISTS idx_medicoes_pneu ON medicoes(pneu_id);
+CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_recente ON medicoes(pneu_id, data_medicao DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_medicoes_data ON medicoes(data_medicao);
 CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu ON movimentacoes(pneu_id);
 CREATE INDEX IF NOT EXISTS idx_veiculos_filial ON veiculos(filial_id);
@@ -340,6 +341,10 @@ export async function initDatabase() {
       ON pneus(filial_id, numero_fogo)
       WHERE numero_fogo IS NOT NULL AND numero_fogo != '' AND ativo = 1;
   `);
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_recente
+      ON medicoes(pneu_id, data_medicao DESC, id DESC);
+  `);
 
   // Colunas extras (idempotente)
   await ensureColumn('notificacoes_whatsapp', 'filial_id', 'BIGINT');
@@ -399,7 +404,16 @@ export async function initDatabase() {
   await db.prepare(`UPDATE pneus SET filial_id = ? WHERE filial_id IS NULL`).run(matrizId);
 
   try {
-    await corrigirEncodingBanco(db);
+    const jaCorrigiu = await db.prepare(
+      'SELECT valor FROM configuracoes WHERE chave = ?'
+    ).get('encoding_corrigido_v1');
+    if (!jaCorrigiu) {
+      await corrigirEncodingBanco(db);
+      await db.prepare(`
+        INSERT INTO configuracoes (chave, valor) VALUES (?, ?)
+        ON CONFLICT (chave) DO NOTHING
+      `).run('encoding_corrigido_v1', '1');
+    }
   } catch (err) {
     console.warn('[database] encoding:', err.message);
   }

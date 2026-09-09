@@ -19,6 +19,7 @@ import {
 } from '../pneus-layouts.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
+import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import {
   parseCsv,
   toCsv,
@@ -377,37 +378,33 @@ router.get('/', async (req, res, next) => {
     const filialId = filialScopeId(req);
     const veiculos = await db.prepare(`
     SELECT v.*,
-      (SELECT COUNT(*) FROM pneus p WHERE p.veiculo_id = v.id AND p.ativo = 1 AND p.status_pneu = 'montado') as total_pneus,
-      (SELECT MIN(
-        CASE
-          WHEN m.sulco_externo IS NULL AND m.sulco_central IS NULL
-               AND m.sulco_interno IS NULL AND m.sulco_auxiliar IS NULL THEN NULL
-          ELSE MIN(
-            COALESCE(m.sulco_externo, 999),
-            COALESCE(m.sulco_central, 999),
-            COALESCE(m.sulco_interno, 999),
-            COALESCE(m.sulco_auxiliar, 999)
-          )
-        END
-      )
-      FROM pneus p
-      LEFT JOIN medicoes m ON m.pneu_id = p.id
-        AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
-      WHERE p.veiculo_id = v.id AND p.ativo = 1
-      ) as menor_sulco,
-      (SELECT MAX(m.data_medicao)
-       FROM pneus p
-       JOIN medicoes m ON m.pneu_id = p.id
-       WHERE p.veiculo_id = v.id AND p.ativo = 1) as ultima_medicao,
-      (SELECT MAX(m.created_at)
-       FROM pneus p
-       JOIN medicoes m ON m.pneu_id = p.id
-       WHERE p.veiculo_id = v.id AND p.ativo = 1) as ultima_atualizacao,
-      (SELECT COUNT(DISTINCT p.id)
-       FROM pneus p
-       JOIN medicoes m ON m.pneu_id = p.id
-       WHERE p.veiculo_id = v.id AND p.ativo = 1 AND p.status_pneu = 'montado') as pneus_medidos
+      COALESCE(s.total_pneus, 0) as total_pneus,
+      s.menor_sulco,
+      s.ultima_medicao,
+      s.ultima_atualizacao,
+      COALESCE(s.pneus_medidos, 0) as pneus_medidos
     FROM veiculos v
+    LEFT JOIN (
+      SELECT
+        p.veiculo_id,
+        COUNT(*) FILTER (WHERE p.status_pneu = 'montado') as total_pneus,
+        MIN(LEAST(
+          COALESCE(um.sulco_externo, 999),
+          COALESCE(um.sulco_central, 999),
+          COALESCE(um.sulco_interno, 999),
+          COALESCE(um.sulco_auxiliar, 999)
+        )) FILTER (WHERE um.id IS NOT NULL AND (
+          um.sulco_externo IS NOT NULL OR um.sulco_central IS NOT NULL
+          OR um.sulco_interno IS NOT NULL OR um.sulco_auxiliar IS NOT NULL
+        )) as menor_sulco,
+        MAX(um.data_medicao) as ultima_medicao,
+        MAX(um.created_at) as ultima_atualizacao,
+        COUNT(*) FILTER (WHERE p.status_pneu = 'montado' AND um.id IS NOT NULL) as pneus_medidos
+      FROM pneus p
+      ${SQL_LATERAL_ULTIMA_MEDICAO}
+      WHERE p.ativo = 1 AND p.veiculo_id IS NOT NULL
+      GROUP BY p.veiculo_id
+    ) s ON s.veiculo_id = v.id
     WHERE v.ativo = 1 AND v.filial_id = ?
     ORDER BY v.apelido, v.placa
   `).all(filialId);

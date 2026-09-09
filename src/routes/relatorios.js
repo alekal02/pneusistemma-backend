@@ -7,6 +7,7 @@ import {
   filiaisEscopoIds,
 } from '../auth.js';
 import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
+import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import { sugerirAcao } from '../diagnostico.js';
 import { toCsv } from '../csv-utils.js';
 import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
@@ -96,12 +97,10 @@ async function montarRelatorioDiretoria() {
       SELECT
         p.id, p.vida_recap, p.status_pneu, p.custo, p.nota_fiscal, p.modelo, p.marca, p.numero_fogo,
         v.tipo, v.layout_pneus,
-        (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
-        (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
-        (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
-        (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_auxiliar
+        um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar
       FROM pneus p
       LEFT JOIN veiculos v ON v.id = p.veiculo_id
+      ${SQL_LATERAL_ULTIMA_MEDICAO}
       WHERE p.ativo = 1 AND p.filial_id = ? AND p.status_pneu != 'descarte'
     `).all(f.id);
 
