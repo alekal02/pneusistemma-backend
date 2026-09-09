@@ -132,7 +132,7 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
     err.upstreamStatus = upstream;
     err.data = data;
     if (upstream === 401 || upstream === 403) {
-      err.message = 'Token WuzAPI inválido ou sem permissão. Clique em “Gerar token” no painel WhatsApp (WuzAPI precisa estar no ar: npm run wuzapi:up).';
+      err.message = 'Token WuzAPI inválido ou sem permissão. Clique em “Gerar de novo” e depois em Conectar / QR.';
     }
     throw err;
   }
@@ -746,18 +746,43 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
-    const f = await filialOuErro(req.params.id);
-    const token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+    let f = await filialOuErro(req.params.id);
+
+    // Garante token válido no WuzAPI (repara órfão / compartilhado antes do QR).
+    const garantia = await garantirTokenExclusivoFilial(f);
+    if (garantia.criado || garantia.regenerado) {
+      f = await filialOuErro(req.params.id);
+    }
+
+    let token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
     if (!token) {
       return res.status(400).json({
         erro: 'Gere o token desta unidade antes de conectar (cada filial tem sua própria sessão)',
       });
     }
 
-    const status = await conectarEObterQr(token, {
-      filial_id: f.id,
-      nome: f.nome,
-    });
+    let status;
+    try {
+      status = await conectarEObterQr(token, {
+        filial_id: f.id,
+        nome: f.nome,
+      });
+    } catch (err) {
+      // Token antigo no banco / sessão inválida → regenera uma vez e tenta de novo.
+      if (err.upstreamStatus === 401 || err.upstreamStatus === 403 || err.status === 502) {
+        const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+        f = await filialOuErro(req.params.id);
+        token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
+        if (!token) throw err;
+        status = await conectarEObterQr(token, {
+          filial_id: f.id,
+          nome: f.nome,
+        });
+      } else {
+        throw err;
+      }
+    }
+
     const webhook = await garantirWebhook(token, f.id);
 
     let mensagem = `Conexão do chatbot “${f.nome}” iniciada — escaneie o QR`;

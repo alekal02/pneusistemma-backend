@@ -183,7 +183,7 @@ async function adminUsersWuzapi() {
 }
 
 /**
- * Garante token WuzAPI exclusivo da filial (cria ao cadastrar / corrige token compartilhado).
+ * Garante token WuzAPI exclusivo da filial (cria ao cadastrar / corrige token compartilhado ou órfão).
  * Sessão nasce desconectada — gerente gera QR com o chip da unidade.
  *
  * @param {{ id: number, codigo?: string, nome?: string, wuzapi_token?: string }} filial
@@ -205,7 +205,14 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     ? (await tokenUsadoPorOutraFilial(atual.id, tokenAtual) || (envTok && tokenAtual === envTok))
     : false;
 
-  const precisaNovo = opts.forcarNovo || !tokenAtual || compartilhado;
+  // Confere se o token do banco ainda existe no WuzAPI (evita 401 no QR).
+  const usersWuz = await adminUsersWuzapi();
+  const tokenConhecidoNoWuzapi = Boolean(
+    tokenAtual && usersWuz.some((u) => tokenNaoEAdmin(u.token) === tokenAtual)
+  );
+  const orfao = Boolean(tokenAtual && usersWuz.length > 0 && !tokenConhecidoNoWuzapi);
+
+  let precisaNovo = opts.forcarNovo || !tokenAtual || compartilhado || orfao;
 
   if (!precisaNovo) {
     return {
@@ -218,15 +225,13 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     };
   }
 
-  // Preferência: usuário WuzAPI já dedicado a esta filial (mesmo nome), se não estiver
-  // logado com sessão de outra unidade e o token não estiver em outra filial.
+  // Preferência: usuário WuzAPI já dedicado a esta filial (mesmo nome).
   let token = null;
   let origem = 'criado';
   let criadoNoWuzapi = false;
 
-  if (!opts.forcarNovo && !compartilhado) {
-    const users = await adminUsersWuzapi();
-    const dedicado = users.find((u) => {
+  if (!opts.forcarNovo || orfao || compartilhado) {
+    const dedicado = usersWuz.find((u) => {
       const n = String(u.name || u.Name || '').trim();
       return n === nomeUser || n === `PneuSistemma-${atual.id}`;
     });
@@ -238,44 +243,59 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
   }
 
   if (!token) {
-    token = `pneu_${atual.id}_${crypto.randomBytes(8).toString('hex')}`;
     const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
-    if (admin && config.wuzapiBaseUrl) {
-      try {
-        const res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
-          method: 'POST',
-          headers: {
-            Authorization: admin,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ name: nomeUser, token }),
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!res.ok) {
-          const raw = await res.text();
-          // Usuário pode já existir — tenta achar pelo nome e rotacionar token no banco só
-          const users = await adminUsersWuzapi();
-          const mesmoNome = users.find((u) => String(u.name || u.Name || '').trim() === nomeUser);
-          if (mesmoNome && tokenNaoEAdmin(mesmoNome.token)
-            && !(await tokenUsadoPorOutraFilial(atual.id, mesmoNome.token))) {
-            token = tokenNaoEAdmin(mesmoNome.token);
-            origem = 'existente';
-          } else {
-            console.warn('[whatsapp] criar user WuzAPI:', res.status, raw?.slice?.(0, 200));
-          }
+    if (!admin || !config.wuzapiBaseUrl) {
+      const err = new Error(
+        'WUZAPI_ADMIN_TOKEN ou WUZAPI_BASE_URL ausente no backend. Configure no Render e tente Gerar token de novo.'
+      );
+      err.status = 503;
+      throw err;
+    }
+
+    token = `pneu_${atual.id}_${crypto.randomBytes(8).toString('hex')}`;
+    try {
+      const res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
+        method: 'POST',
+        headers: {
+          Authorization: admin,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: nomeUser, token }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const raw = await res.text();
+        const users = await adminUsersWuzapi();
+        const mesmoNome = users.find((u) => String(u.name || u.Name || '').trim() === nomeUser);
+        if (mesmoNome && tokenNaoEAdmin(mesmoNome.token)
+          && !(await tokenUsadoPorOutraFilial(atual.id, mesmoNome.token))) {
+          token = tokenNaoEAdmin(mesmoNome.token);
+          origem = 'existente';
         } else {
-          criadoNoWuzapi = true;
-          origem = 'criado';
+          const err = new Error(
+            `Não foi possível criar usuário no WuzAPI (${res.status}). `
+            + 'Confira WUZAPI_ADMIN_TOKEN no Render. '
+            + (raw ? String(raw).slice(0, 160) : '')
+          );
+          err.status = res.status === 401 || res.status === 403 ? 502 : 502;
+          throw err;
         }
-      } catch (err) {
-        console.warn('[whatsapp] WuzAPI indisponível ao provisionar filial:', err.message);
-        // Mantém token no banco — conectar/QR tenta depois
+      } else {
+        criadoNoWuzapi = true;
+        origem = 'criado';
       }
+    } catch (err) {
+      if (err.status) throw err;
+      const e = new Error(
+        `WuzAPI indisponível ao gerar token (${config.wuzapiBaseUrl}): ${err.message}`
+      );
+      e.status = 503;
+      throw e;
     }
   }
 
-  // Token novo / regenerado: limpa chip/grupo herdados de outra sessão
-  const limparCampos = compartilhado || opts.forcarNovo || !tokenAtual;
+  // Só grava token que existe (ou acabou de ser criado) no WuzAPI — nunca órfão.
+  const limparCampos = compartilhado || opts.forcarNovo || orfao || !tokenAtual;
   await db.prepare(`
     UPDATE filiais SET
       wuzapi_token = ?,
@@ -288,12 +308,12 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
   return {
     token,
     criado: criadoNoWuzapi || origem === 'criado',
-    regenerado: Boolean(compartilhado || opts.forcarNovo),
+    regenerado: Boolean(compartilhado || opts.forcarNovo || orfao),
     compartilhado: Boolean(compartilhado),
     nome_wuzapi: nomeUser,
     precisa_conectar: true,
-    mensagem: compartilhado
-      ? `Token exclusivo gerado para ${atual.nome} (havia sessão de outra unidade). Conecte o QR com o chip desta filial.`
+    mensagem: (compartilhado || orfao)
+      ? `Token exclusivo gerado para ${atual.nome}. Conecte o QR com o chip desta filial.`
       : `Token do chatbot criado para ${atual.nome}. Conecte / QR para iniciar.`,
   };
 }
