@@ -3,7 +3,7 @@
  */
 import PDFDocument from 'pdfkit';
 import { getDb } from '../database.js';
-import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
+import { classificarSulco, getLimites, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
 import {
   labelPosicao,
@@ -138,7 +138,6 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
   const prioridadesRodizio = [];
 
   for (const v of veiculos) {
-    const limV = limitesDoVeiculo(v);
     const pneus = await db.prepare(`
       SELECT
         p.*,
@@ -186,12 +185,12 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
         auxiliar: p.sulco_auxiliar,
       };
       const menor = menorSulco(pontos);
-      const status = classificarSulco(menor, limV);
-      const diag = diagnosticarPerfil(pontos, limV.diagnostico_tolerancia_mm, {
-        limites: limV,
+      const status = classificarSulco(menor);
+      const diag = diagnosticarPerfil(pontos, limites.diagnostico_tolerancia_mm, {
+        limites,
         posicao: p.posicao,
       });
-      const acao = sugerirAcao(menor, limV, p.vida_recap || 0, {
+      const acao = sugerirAcao(menor, limites, p.vida_recap || 0, {
         pontos,
         candidatos,
         posicaoAtual: p.posicao,
@@ -402,11 +401,9 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     SELECT
       m.data_medicao, m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
       m.diagnostico, m.acao_sugerida, m.veiculo_placa, m.responsavel, m.observacoes,
-      p.numero_fogo, p.posicao, p.status_pneu,
-      v.tipo, v.layout_pneus
+      p.numero_fogo, p.posicao, p.status_pneu
     FROM medicoes m
     JOIN pneus p ON p.id = m.pneu_id
-    LEFT JOIN veiculos v ON v.id = p.veiculo_id
     WHERE p.filial_id = ?
       AND m.data_medicao >= ?
       AND m.data_medicao <= ?
@@ -422,7 +419,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       placa: m.veiculo_placa || (m.status_pneu === 'estoque' ? 'Estoque' : m.status_pneu === 'recapagem' ? 'Recap' : '—'),
       posicao: m.posicao || '—',
       menor_sulco: menor,
-      status: labelStatusSulco(classificarSulco(menor, limitesDoVeiculo(m))),
+      status: labelStatusSulco(classificarSulco(menor)),
       acao: m.acao_sugerida || '—',
       diag: m.diagnostico || '—',
       obs: m.observacoes || m.responsavel || '',

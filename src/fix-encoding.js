@@ -100,15 +100,11 @@ export function normalizarTipoVeiculo(tipo) {
   if (!tipo || typeof tipo !== 'string') return tipo;
   const t = tipo.trim();
   if (t === 'Truck / Tração' || t === 'Toco / Mini') return t;
-  if (t === 'Compactador' || t === 'Utilitário / Varredeira' || t === 'Trator') return t;
   if (/^Truck\s*\/\s*Tra/i.test(t)) return 'Truck / Tração';
   if (/^Toco/i.test(t)) return 'Toco / Mini';
-  if (/^Trator/i.test(t)) return 'Trator';
-  if (/compactador/i.test(t)) return 'Compactador';
-  if (/utilit/i.test(t) || /varred/i.test(t)) return 'Utilitário / Varredeira';
   if (t.includes(REPL) || t.includes('?')) {
     if (/Truck/i.test(t) && /Tra/i.test(t)) return 'Truck / Tração';
-    if (/Caminh/i.test(t) && /Compactador/i.test(t)) return 'Compactador';
+    if (/Caminh/i.test(t) && /Compactador/i.test(t)) return 'Caminhão Compactador';
   }
   return t;
 }

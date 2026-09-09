@@ -19,9 +19,6 @@ router.get('/', (_req, res) => {
       mudanca_posicao: `Desvio entre pontos > ${limites.rodizio_desvio_mm} mm — ${a.rodizio.label}: ${a.rodizio.instrucao}`,
       ok: `Acima de ${limites.sulco_alerta_mm} mm — ${a.ok.label}: ${a.ok.instrucao}`,
       novo: `Sulco típico de pneu novo: ~${limites.sulco_novo_mm} mm`,
-      trator: limites.trator
-        ? `Trator: crítico ≤ ${limites.trator.sulco_critico_mm} mm · monitorar ≤ ${limites.trator.sulco_alerta_mm} mm · novo ~${limites.trator.sulco_novo_mm} mm`
-        : null,
     },
     diagnosticos: Object.values(DIAGNOSTICOS).filter(
       (d) => d.codigo !== 'alinhamento' && d.codigo !== 'alinhamento_traseiro'

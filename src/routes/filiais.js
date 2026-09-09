@@ -11,8 +11,7 @@ import {
   isAdmin,
 } from '../auth.js';
 import { excluirFilialCompleta } from '../services/limpar-filial.js';
-import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
-import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
+import { classificarSulco, getLimites, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
 import {
   labelPosicao,
@@ -42,27 +41,31 @@ async function resumoFilial(db, filialId, limites) {
     SELECT COUNT(*) as total FROM veiculos WHERE filial_id = ? AND ativo = 1
   `).get(filialId)).total);
 
-  const counts = await db.prepare(`
-    SELECT
-      COUNT(*) FILTER (WHERE ativo = 1 AND status_pneu = 'recapagem') as em_recapagem,
-      COUNT(*) FILTER (WHERE status_pneu = 'descarte') as em_descarte,
-      COUNT(*) FILTER (WHERE ativo = 1 AND status_pneu = 'estoque') as em_estoque
-    FROM pneus
-    WHERE filial_id = ?
-  `).get(filialId);
-  const emRecapagem = Number(counts?.em_recapagem || 0);
-  const emDescarte = Number(counts?.em_descarte || 0);
-  const emEstoque = Number(counts?.em_estoque || 0);
+  const emRecapagem = Number((await db.prepare(`
+    SELECT COUNT(*) as total FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'recapagem'
+  `).get(filialId)).total);
+
+  const emDescarte = Number((await db.prepare(`
+    SELECT COUNT(*) as total FROM pneus
+    WHERE filial_id = ? AND status_pneu = 'descarte'
+  `).get(filialId)).total);
+
+  const emEstoque = Number((await db.prepare(`
+    SELECT COUNT(*) as total FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+  `).get(filialId)).total);
 
   const pneus = await db.prepare(`
     SELECT
       p.id, p.vida_recap,
-      v.tipo, v.layout_pneus,
-      um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar,
-      um.data_medicao
+      (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
+      (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
+      (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
+      (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_auxiliar,
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as data_medicao
     FROM pneus p
     JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
-    ${SQL_LATERAL_ULTIMA_MEDICAO}
     WHERE p.ativo = 1 AND p.status_pneu = 'montado'
   `).all(filialId);
 
@@ -72,14 +75,13 @@ async function resumoFilial(db, filialId, limites) {
 
   for (const p of pneus) {
     const menor = menorSulco(p);
-    const limV = limitesDoVeiculo(p);
-    const status = classificarSulco(menor, limV);
+    const status = classificarSulco(menor);
     if (status === 'ok') ok++;
     else if (status === 'alerta') alerta++;
     else if (status === 'critico') critico++;
     else semDado++;
 
-    const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
+    const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
     if (acao.codigo === 'troca') troca++;
     else if (acao.codigo === 'recap') recapSugestao++;
     else if (acao.codigo === 'monitorar') monitorar++;
@@ -189,23 +191,23 @@ async function pendenciasFilial(db, filialId, limites) {
     SELECT
       p.id as pneu_id, p.posicao, p.numero_fogo, p.marca as pneu_marca,
       p.tipo_pneu, p.condicao, p.vida_recap, p.sulco_inicial_mm,
-      v.id as veiculo_id, v.placa, v.apelido, v.tipo as veiculo_tipo, v.km_atual, v.layout_pneus,
-      um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar,
-      um.data_medicao, um.diagnostico, um.km_veiculo
+      v.id as veiculo_id, v.placa, v.apelido, v.tipo as veiculo_tipo, v.km_atual,
+      m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
+      m.data_medicao, m.diagnostico, m.km_veiculo
     FROM pneus p
     JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
-    ${SQL_LATERAL_ULTIMA_MEDICAO}
+    LEFT JOIN medicoes m ON m.pneu_id = p.id
+      AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
     WHERE p.ativo = 1 AND p.status_pneu = 'montado'
   `).all(filialId);
 
   const itens = rows.map((p) => {
     const menor = menorSulco(p);
-    const limV = limitesDoVeiculo({ tipo: p.veiculo_tipo, layout_pneus: p.layout_pneus });
-    const status = classificarSulco(menor, limV);
-    const diag = diagnosticarPerfil(p, limV.diagnostico_tolerancia_mm, {
-      limites: limV,
+    const status = classificarSulco(menor);
+    const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm, {
+      limites,
     });
-    const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
+    const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
     return {
       pneu_id: p.pneu_id,
       veiculo_id: p.veiculo_id,
@@ -281,27 +283,14 @@ router.get('/', async (req, res, next) => {
     sql += ' ORDER BY f.nome';
     const filiais = await db.prepare(sql).all(...params);
 
-    const leve = String(req.query.leve || '') === '1';
     const resultado = [];
-    if (leve) {
-      for (const f of filiais) {
-        resultado.push({
-          ...f,
-          wuzapi_token: undefined,
-          tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
-        });
-      }
-    } else {
-      const resumos = await Promise.all(filiais.map((f) => resumoFilial(db, f.id, limites)));
-      for (let i = 0; i < filiais.length; i += 1) {
-        const f = filiais[i];
-        resultado.push({
-          ...f,
-          wuzapi_token: undefined,
-          tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
-          resumo: resumos[i],
-        });
-      }
+    for (const f of filiais) {
+      resultado.push({
+        ...f,
+        wuzapi_token: undefined,
+        tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
+        resumo: await resumoFilial(db, f.id, limites),
+      });
     }
 
     res.json(resultado);
@@ -325,12 +314,11 @@ router.get('/compras/consolidado', async (req, res, next) => {
     sql += ' ORDER BY nome';
     const filiais = await db.prepare(sql).all(...params);
 
-    const porFilial = await Promise.all(filiais.map(async (f) => {
-      const [resumo, pendencias] = await Promise.all([
-        resumoFilial(db, f.id, limites),
-        pendenciasFilial(db, f.id, limites),
-      ]);
-      return {
+    const porFilial = [];
+    for (const f of filiais) {
+      const resumo = await resumoFilial(db, f.id, limites);
+      const pendencias = await pendenciasFilial(db, f.id, limites);
+      porFilial.push({
         filial_id: f.id,
         nome: f.nome,
         codigo: f.codigo,
@@ -339,8 +327,8 @@ router.get('/compras/consolidado', async (req, res, next) => {
         troca: pendencias.troca,
         recap: pendencias.recap,
         monitorar: pendencias.monitorar,
-      };
-    }));
+      });
+    }
 
     const totalComprar = porFilial.reduce((s, f) => s + f.compras.pneus_para_comprar, 0);
     const totalRecap = porFilial.reduce((s, f) => s + f.compras.pneus_para_recap, 0);
@@ -384,29 +372,29 @@ router.get('/:id', async (req, res, next) => {
 
     const veiculos = await db.prepare(`
     SELECT v.*,
-      COALESCE(s.total_pneus, 0) as total_pneus,
-      s.menor_sulco,
-      s.ultima_medicao
-    FROM veiculos v
-    LEFT JOIN (
-      SELECT
-        p.veiculo_id,
-        COUNT(*) as total_pneus,
-        MIN(LEAST(
-          COALESCE(um.sulco_externo, 999),
-          COALESCE(um.sulco_central, 999),
-          COALESCE(um.sulco_interno, 999),
-          COALESCE(um.sulco_auxiliar, 999)
-        )) FILTER (WHERE um.id IS NOT NULL AND (
-          um.sulco_externo IS NOT NULL OR um.sulco_central IS NOT NULL
-          OR um.sulco_interno IS NOT NULL OR um.sulco_auxiliar IS NOT NULL
-        )) as menor_sulco,
-        MAX(um.data_medicao) as ultima_medicao
+      (SELECT COUNT(*) FROM pneus p WHERE p.veiculo_id = v.id AND p.ativo = 1) as total_pneus,
+      (SELECT MIN(
+        CASE
+          WHEN m.sulco_externo IS NULL AND m.sulco_central IS NULL
+               AND m.sulco_interno IS NULL AND m.sulco_auxiliar IS NULL THEN NULL
+          ELSE MIN(
+            COALESCE(m.sulco_externo, 999),
+            COALESCE(m.sulco_central, 999),
+            COALESCE(m.sulco_interno, 999),
+            COALESCE(m.sulco_auxiliar, 999)
+          )
+        END
+      )
       FROM pneus p
-      ${SQL_LATERAL_ULTIMA_MEDICAO}
-      WHERE p.ativo = 1 AND p.veiculo_id IS NOT NULL
-      GROUP BY p.veiculo_id
-    ) s ON s.veiculo_id = v.id
+      LEFT JOIN medicoes m ON m.pneu_id = p.id
+        AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
+      WHERE p.veiculo_id = v.id AND p.ativo = 1
+      ) as menor_sulco,
+      (SELECT MAX(m.data_medicao)
+       FROM pneus p
+       JOIN medicoes m ON m.pneu_id = p.id
+       WHERE p.veiculo_id = v.id AND p.ativo = 1) as ultima_medicao
+    FROM veiculos v
     WHERE v.filial_id = ? AND v.ativo = 1
     ORDER BY v.apelido, v.placa
   `).all(f.id);
@@ -414,7 +402,7 @@ router.get('/:id', async (req, res, next) => {
     const veiculosComStatus = veiculos.map((v) => ({
       ...v,
       menor_sulco: v.menor_sulco === 999 ? null : v.menor_sulco,
-      status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco, limitesDoVeiculo(v)),
+      status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco),
       pendencias_troca: pendencias.troca.filter((p) => p.veiculo_id === v.id).length,
       pendencias_recap: pendencias.recap.filter((p) => p.veiculo_id === v.id).length,
       pendencias_monitorar: pendencias.monitorar.filter((p) => p.veiculo_id === v.id).length,
@@ -463,6 +451,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
   }
   try {
     const db = getDb();
+    const limites = getLimites();
     const filial = await db.prepare('SELECT id, nome, codigo FROM filiais WHERE id = ? AND ativo = 1').get(req.params.id);
     if (!filial) return res.status(404).json({ erro: 'Filial não encontrada' });
 
@@ -470,21 +459,19 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       SELECT * FROM veiculos WHERE id = ? AND filial_id = ? AND ativo = 1
     `).get(req.params.veiculoId, filial.id);
     if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado nesta filial' });
-    const limites = limitesDoVeiculo(veiculo);
 
     const orderSql = sqlOrderPosicao('p.posicao');
     const pneus = await db.prepare(`
     SELECT p.*,
-      um.sulco_externo as ult_sulco_ext,
-      um.sulco_central as ult_sulco_cent,
-      um.sulco_interno as ult_sulco_int,
-      um.sulco_auxiliar as ult_sulco_aux,
-      um.diagnostico as ult_diagnostico,
-      um.acao_sugerida as ult_acao,
-      um.data_medicao as ult_medicao,
-      um.id as ult_medicao_id
+      (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
+      (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
+      (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
+      (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_aux,
+      (SELECT diagnostico FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_diagnostico,
+      (SELECT acao_sugerida FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_acao,
+      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao,
+      (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_medicao_id
     FROM pneus p
-    ${SQL_LATERAL_ULTIMA_MEDICAO}
     WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     ORDER BY ${orderSql}
   `).all(veiculo.id);
@@ -512,7 +499,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
         padrao: p.tipo_pneu,
         padrao_label: labelTipoPneu(p.tipo_pneu),
         menor_sulco: menor,
-        status_sulco: classificarSulco(menor, limites),
+        status_sulco: classificarSulco(menor),
         diagnostico: diag.codigo,
         diagnostico_label: diag.label,
         diagnostico_desc: diag.descricao || '',
@@ -654,16 +641,15 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
   }
   try {
     const db = getDb();
+    const limites = getLimites();
     const med = await db.prepare(`
-      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, p.posicao, v.filial_id,
-        v.tipo as veiculo_tipo, v.layout_pneus
+      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, p.posicao, v.filial_id
       FROM medicoes m
       JOIN pneus p ON p.id = m.pneu_id
       JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
       WHERE m.id = ?
     `).get(req.params.id, req.params.medicaoId);
     if (!med) return res.status(404).json({ erro: 'Medição não encontrada nesta filial' });
-    const limites = limitesDoVeiculo({ tipo: med.veiculo_tipo, layout_pneus: med.layout_pneus });
 
     const {
       data_medicao,
@@ -754,7 +740,7 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
       medicao: {
         ...atualizada,
         menor_sulco: menor,
-        status_sulco: classificarSulco(menor, limites),
+        status_sulco: classificarSulco(menor),
         diagnostico_label: diag.label,
         acao_label: acao.label,
         acao_motivo: acao.motivo,

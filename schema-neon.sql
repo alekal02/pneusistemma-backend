@@ -166,7 +166,6 @@ CREATE TABLE IF NOT EXISTS alerta_destinatarios (
 CREATE INDEX IF NOT EXISTS idx_pneus_veiculo ON pneus(veiculo_id);
 CREATE INDEX IF NOT EXISTS idx_pneus_filial ON pneus(filial_id);
 CREATE INDEX IF NOT EXISTS idx_medicoes_pneu ON medicoes(pneu_id);
-CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_recente ON medicoes(pneu_id, data_medicao DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_medicoes_data ON medicoes(data_medicao);
 CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu ON movimentacoes(pneu_id);
 CREATE INDEX IF NOT EXISTS idx_veiculos_filial ON veiculos(filial_id);
