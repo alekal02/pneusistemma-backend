@@ -40,6 +40,13 @@ import {
   trocarPorEstoque,
   moverOuTrocarNaFrota,
 } from '../services/whatsapp-ops.js';
+import {
+  consultarProximoFogo,
+  criarGeradorNumeroFogo,
+  comRetryFogoUnico,
+  resolverNumeroFogo,
+  assertFogoLivre,
+} from '../numero-fogo.js';
 
 const router = Router();
 
@@ -254,6 +261,17 @@ router.get('/meta', (_req, res) => {
   });
 });
 
+/** Próxima marca de fogo no padrão {codigo}-{sequencia} (ex.: 0110-0001) */
+router.get('/proximo-fogo', async (req, res, next) => {
+  try {
+    const info = await consultarProximoFogo(getDb(), filialScopeId(req));
+    res.json(info);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
 /** Planilha-modelo de pneus (CSV Excel BR) */
 router.get('/import/modelo', (_req, res) => {
   const csv = toCsv(PNEU_TEMPLATE_HEADERS, PNEU_TEMPLATE_ROWS);
@@ -288,11 +306,17 @@ router.post('/import', async (req, res, next) => {
 
   try {
     await db.transaction(async () => {
+      const gerador = await criarGeradorNumeroFogo(db, filialId);
       for (const raw of rows) {
         const linha = raw.__linha || '?';
-        const fogo = String(raw.numero_fogo || raw.fogo || '').trim();
-        if (!fogo) {
-          erros.push({ linha, erro: 'Nº de fogo obrigatório' });
+        let fogo;
+        let gerado = false;
+        try {
+          const alocado = gerador.alocar(raw.numero_fogo || raw.fogo);
+          fogo = alocado.numero_fogo;
+          gerado = alocado.gerado;
+        } catch (err) {
+          erros.push({ linha, erro: err.message });
           continue;
         }
 
@@ -311,33 +335,47 @@ router.post('/import', async (req, res, next) => {
           ? parseFloat(String(raw.custo).replace(',', '.'))
           : null;
 
-        try {
-          const result = await comSavepoint(db, () => insert.run(
-            filialId,
-            String(raw.marca || '').trim() || null,
-            String(raw.modelo || '').trim() || null,
-            String(raw.medida || '').trim() || null,
-            String(raw.dot || '').trim() || null,
-            fogo,
-            tipo,
-            cond,
-            vida,
-            Number.isFinite(sulco) ? sulco : null,
-            String(raw.observacoes || '').trim() || null,
-            Number.isFinite(custo) ? custo : null,
-            String(raw.nota_fiscal || raw.nota || '').trim() || null
-          ));
-          inseridos.push({ id: result.lastInsertRowid, numero_fogo: fogo, tipo_pneu: tipo, condicao: cond });
-        } catch (err) {
-          if (ehViolacaoUnique(err)) {
-            erros.push({ linha, numero_fogo: fogo, erro: 'Nº de fogo já existe nesta filial' });
-          } else {
-            erros.push({ linha, numero_fogo: fogo, erro: err.message });
+        const argsBase = () => [
+          filialId,
+          String(raw.marca || '').trim() || null,
+          String(raw.modelo || '').trim() || null,
+          String(raw.medida || '').trim() || null,
+          String(raw.dot || '').trim() || null,
+          fogo,
+          tipo,
+          cond,
+          vida,
+          Number.isFinite(sulco) ? sulco : null,
+          String(raw.observacoes || '').trim() || null,
+          Number.isFinite(custo) ? custo : null,
+          String(raw.nota_fiscal || raw.nota || '').trim() || null,
+        ];
+
+        let gravou = false;
+        for (let tentativa = 0; tentativa < 8 && !gravou; tentativa++) {
+          try {
+            if (!gerado) await assertFogoLivre(db, filialId, fogo);
+            const result = await comSavepoint(db, () => insert.run(...argsBase()));
+            inseridos.push({ id: result.lastInsertRowid, numero_fogo: fogo, tipo_pneu: tipo, condicao: cond });
+            gravou = true;
+          } catch (err) {
+            const colisao = ehViolacaoUnique(err) || err.status === 409;
+            if (colisao && gerado && tentativa < 7) {
+              fogo = gerador.alocar('').numero_fogo;
+              continue;
+            }
+            erros.push({
+              linha,
+              numero_fogo: fogo,
+              erro: colisao ? 'Nº de fogo já existe nesta filial' : err.message,
+            });
+            break;
           }
         }
       }
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     return next(err);
   }
 
@@ -443,10 +481,6 @@ router.post('/', async (req, res, next) => {
     custo, nota_fiscal,
   } = req.body;
 
-  const fogo = numero_fogo?.trim();
-  if (!fogo) {
-    return res.status(400).json({ erro: 'Nº de fogo é obrigatório para cadastro no estoque' });
-  }
   if (!modelo?.trim()) {
     return res.status(400).json({ erro: 'Modelo do pneu é obrigatório' });
   }
@@ -465,27 +499,29 @@ router.post('/', async (req, res, next) => {
   const custoNum = custo != null && custo !== '' ? parseFloat(String(custo).replace(',', '.')) : null;
 
   try {
-    const result = await db.prepare(`
+    const { result } = await comRetryFogoUnico(db, filialId, numero_fogo, (fogoOk) => (
+      db.prepare(`
       INSERT INTO pneus (
         veiculo_id, posicao, filial_id, marca, modelo, medida, dot, numero_fogo,
         tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo, observacoes,
         custo, nota_fiscal
       ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1, ?, ?, ?)
     `).run(
-      filialId,
-      marca?.trim() || null,
-      modelo.trim(),
-      medida?.trim() || null,
-      dot?.trim() || null,
-      fogo,
-      tipo,
-      cond,
-      Number.isFinite(vida) ? vida : 0,
-      sulco_inicial_mm != null ? parseFloat(sulco_inicial_mm) : null,
-      observacoes?.trim() || null,
-      Number.isFinite(custoNum) ? custoNum : null,
-      nota_fiscal?.trim() || null
-    );
+        filialId,
+        marca?.trim() || null,
+        modelo.trim(),
+        medida?.trim() || null,
+        dot?.trim() || null,
+        fogoOk,
+        tipo,
+        cond,
+        Number.isFinite(vida) ? vida : 0,
+        sulco_inicial_mm != null ? parseFloat(sulco_inicial_mm) : null,
+        observacoes?.trim() || null,
+        Number.isFinite(custoNum) ? custoNum : null,
+        nota_fiscal?.trim() || null
+      )
+    ));
 
     const pneu = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json({
@@ -493,6 +529,7 @@ router.post('/', async (req, res, next) => {
       pneu: enriquecerPneu(pneu),
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Já existe um pneu com este nº de fogo na filial' });
     }
@@ -618,7 +655,6 @@ router.put('/:id', async (req, res, next) => {
     return res.status(400).json({ erro: 'Condição do pneu não pode ser alterada (use Registrar recap)' });
   }
 
-  const fogo = numero_fogo != null ? String(numero_fogo).trim() : atual.numero_fogo;
   const modeloFinal = modelo != null ? String(modelo).trim() : atual.modelo;
   if (!modeloFinal) {
     return res.status(400).json({ erro: 'Modelo do pneu é obrigatório' });
@@ -628,7 +664,21 @@ router.put('/:id', async (req, res, next) => {
     ? parseFloat(String(custo).replace(',', '.'))
     : atual.custo;
 
+  const filialId = filialScopeId(req);
+  let fogo = atual.numero_fogo;
+
   try {
+    if (numero_fogo != null && String(numero_fogo).trim()) {
+      const resolvido = await resolverNumeroFogo(db, filialId, numero_fogo);
+      if (!resolvido.gerado) {
+        fogo = resolvido.numero_fogo;
+        const atualNorm = String(atual.numero_fogo || '').trim().toUpperCase();
+        if (String(fogo).trim().toUpperCase() !== atualNorm) {
+          await assertFogoLivre(db, filialId, fogo, { ignorarId: atual.id });
+        }
+      }
+    }
+
     await db.prepare(`
       UPDATE pneus SET
         marca = ?,
@@ -666,6 +716,7 @@ router.put('/:id', async (req, res, next) => {
       pneu: enriquecerPneu(atualizado, await ultimaMedicaoDoPneu(db, atualizado.id)),
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Já existe um pneu com este nº de fogo na filial' });
     }

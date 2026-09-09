@@ -78,6 +78,7 @@ if (filial) {
   await checar('GET /veiculos/meta', 'GET', '/veiculos/meta', { token: filial });
   await checar('GET /veiculos', 'GET', '/veiculos', { token: filial });
   await checar('GET /pneus/meta', 'GET', '/pneus/meta', { token: filial });
+  await checar('GET /pneus/proximo-fogo', 'GET', '/pneus/proximo-fogo', { token: filial });
   await checar('GET /pneus', 'GET', '/pneus', { token: filial });
   await checar('GET /medicoes/alertas', 'GET', '/medicoes/alertas', { token: filial });
   await checar('GET /medicoes/acoes', 'GET', '/medicoes/acoes', { token: filial });

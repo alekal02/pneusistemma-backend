@@ -33,6 +33,7 @@ import {
   marcarTokenUsado,
   montarDetalheVeiculo,
 } from '../services/acesso-rapido.js';
+import { consultarProximoFogo, comRetryFogoUnico } from '../numero-fogo.js';
 
 const router = Router();
 
@@ -61,6 +62,7 @@ router.get('/acesso-rapido', async (req, res, next) => {
       ...detalhe,
       acesso_rapido: true,
       token_acesso: tokenRow.token,
+      proximo_fogo: await consultarProximoFogo(getDb(), tokenRow.filial_id).catch(() => null),
     });
   } catch (err) {
     next(err);
@@ -87,9 +89,6 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
 
   if (!token) return res.status(400).json({ erro: 'Token obrigatório' });
   if (!posicao) return res.status(400).json({ erro: 'Informe a posição' });
-  if (!String(numero_fogo || '').trim()) {
-    return res.status(400).json({ erro: 'Informe o nº de fogo' });
-  }
   if (!String(modelo || '').trim()) {
     return res.status(400).json({ erro: 'Informe o modelo do pneu' });
   }
@@ -135,7 +134,6 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
       });
     }
 
-    const fogo = String(numero_fogo).trim();
     const data = new Date().toISOString().split('T')[0];
     const km = km_veiculo != null ? parseInt(km_veiculo, 10) : veiculo.km_atual;
     const hr = hr_veiculo != null ? parseFloat(hr_veiculo) : veiculo.hr_atual;
@@ -144,27 +142,34 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
       : null;
     const vida = cond === 'recapado' ? 1 : 0;
 
+    let fogoUsado = null;
     const pneuId = await db.transaction(async () => {
-      const created = await db.prepare(`
-        INSERT INTO pneus (
-          veiculo_id, posicao, filial_id, marca, modelo, numero_fogo,
-          tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu,
-          data_instalacao, km_instalacao, ativo
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'montado', ?, ?, 1)
-      `).run(
-        veiculo.id,
-        posicao,
+      const { result, numero_fogo: fogoOk } = await comRetryFogoUnico(
+        db,
         filialId,
-        marca ? String(marca).trim() : null,
-        String(modelo).trim(),
-        fogo,
-        tipo,
-        cond,
-        vida,
-        Number.isFinite(sulco) ? sulco : null,
-        data,
-        Number.isFinite(km) ? km : null
+        numero_fogo,
+        (fogo) => comSavepoint(db, () => db.prepare(`
+          INSERT INTO pneus (
+            veiculo_id, posicao, filial_id, marca, modelo, numero_fogo,
+            tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu,
+            data_instalacao, km_instalacao, ativo
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'montado', ?, ?, 1)
+        `).run(
+          veiculo.id,
+          posicao,
+          filialId,
+          marca ? String(marca).trim() : null,
+          String(modelo).trim(),
+          fogo,
+          tipo,
+          cond,
+          vida,
+          Number.isFinite(sulco) ? sulco : null,
+          data,
+          Number.isFinite(km) ? km : null
+        ))
       );
+      fogoUsado = fogoOk;
 
       await db.prepare(`
         INSERT INTO movimentacoes (
@@ -172,7 +177,7 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
           posicao, detalhes, veiculo_placa
         ) VALUES (?, ?, 'montagem', ?, ?, ?, ?, ?, ?)
       `).run(
-        created.lastInsertRowid,
+        result.lastInsertRowid,
         veiculo.id,
         data,
         Number.isFinite(km) ? km : null,
@@ -182,18 +187,19 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
         veiculo.placa
       );
 
-      return created.lastInsertRowid;
+      return result.lastInsertRowid;
     });
 
     const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
     res.status(201).json({
-      mensagem: `Pneu ${fogo} montado em ${labelPosicao(posicao)}`,
+      mensagem: `Pneu ${fogoUsado} montado em ${labelPosicao(posicao)}`,
       pneu_id: pneuId,
       veiculo: detalhe,
       token_acesso: tokenRow.token,
       acesso_rapido: true,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Nº de fogo já existe nesta filial' });
     }
