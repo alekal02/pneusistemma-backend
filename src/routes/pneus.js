@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getDb, classificarSulco } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
-import { getLimites, menorSulco, adicionarDias } from '../limites.js';
+import { getLimites, limitesDoVeiculo, menorSulco, adicionarDias } from '../limites.js';
 import {
   diagnosticarPerfil,
   sugerirAcao,
@@ -168,7 +168,9 @@ async function sincronizarAlertaMonitorar(db, pneuId, statusSulco, dataRef) {
 }
 
 function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
-  const limites = getLimites();
+  const limites = pneu.veiculo_id
+    ? limitesDoVeiculo({ tipo: pneu.veiculo_tipo || pneu.tipo, layout_pneus: pneu.layout_pneus })
+    : getLimites();
   const row = ultimaMedicao || {};
   const menor = menorSulco(row);
   const papel = pneu.posicao ? papelPosicao(pneu.posicao) : null;
@@ -182,7 +184,7 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
     posicaoAtual: pneu.posicao || null,
   });
   const sulcoRef = pneu.sulco_inicial_mm ?? limites.sulco_novo_mm;
-  const statusSulco = classificarSulco(menor);
+  const statusSulco = classificarSulco(menor, limites);
   const prazo = enriquecerPrazoRecap(pneu, statusSulco, limites);
 
   return {
@@ -392,6 +394,7 @@ router.get('/', async (req, res, next) => {
     const rows = await db.prepare(`
     SELECT p.*,
       v.placa as veiculo_placa, v.apelido as veiculo_apelido,
+      v.tipo as veiculo_tipo, v.layout_pneus,
       (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_ext,
       (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_cent,
       (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as ult_sulco_int,
@@ -501,7 +504,9 @@ router.get('/:id', async (req, res, next) => {
     if (!pneu) return res.status(404).json({ erro: 'Pneu não encontrado' });
 
     const db = getDb();
-    const limites = getLimites();
+    const limites = pneu.veiculo_id
+      ? limitesDoVeiculo({ tipo: pneu.veiculo_tipo, layout_pneus: pneu.layout_pneus })
+      : getLimites();
     const medicoes = await db.prepare(`
     SELECT m.*,
       COALESCE(m.veiculo_placa, v.placa) as veiculo_placa
@@ -521,7 +526,7 @@ router.get('/:id', async (req, res, next) => {
       return {
         ...m,
         menor_sulco: menor,
-        status_sulco: classificarSulco(menor),
+        status_sulco: classificarSulco(menor, limites),
         diagnostico_label: diag.label,
         veiculo_placa: m.veiculo_placa || pneu.placa || null,
       };

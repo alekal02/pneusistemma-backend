@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import { getDb, classificarSulco } from '../database.js';
 import { config } from '../config.js';
-import { getLimites, menorSulco } from '../limites.js';
+import { getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import {
@@ -103,7 +103,7 @@ export async function listarEstoqueFilial(filialId, limite = 40) {
 /** Mesmo payload de GET /veiculos/:id */
 export async function montarDetalheVeiculo(veiculoId, filialId = null) {
   const db = getDb();
-  const limites = getLimites();
+  const limites = limitesDoVeiculo(veiculo);
 
   let veiculo;
   if (filialId != null) {
@@ -154,7 +154,7 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
       padrao: p.tipo_pneu,
       padrao_label: labelTipoPneu(p.tipo_pneu),
       menor_sulco: menor,
-      status_sulco: classificarSulco(menor),
+      status_sulco: classificarSulco(menor, limites),
       diagnostico: diag.codigo,
       diagnostico_label: diag.label,
       diagnostico_desc: diag.descricao || '',
@@ -258,6 +258,11 @@ export async function resumoStatusPneusVeiculo(veiculoId) {
 export async function resumoStatusPneusVeiculoRapido(veiculoId) {
   const db = getDb();
 
+  const veiculo = await db.prepare(`
+    SELECT tipo, layout_pneus FROM veiculos WHERE id = ?
+  `).get(veiculoId);
+  const limites = limitesDoVeiculo(veiculo || {});
+
   const rows = await db.prepare(`
     SELECT
       p.posicao,
@@ -284,7 +289,7 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
 
   for (const r of rows) {
     const menor = menorSulco(r);
-    const status = classificarSulco(menor);
+    const status = classificarSulco(menor, limites);
     if (status === 'critico') criticos += 1;
     else if (status === 'alerta') alertas += 1;
     else if (status === 'ok') ok += 1;

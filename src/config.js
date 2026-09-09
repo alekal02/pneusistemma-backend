@@ -60,4 +60,7 @@ export const config = {
 export const TIPOS_VEICULO = [
   'Truck / Tração',
   'Toco / Mini',
+  'Compactador',
+  'Utilitário / Varredeira',
+  'Trator',
 ];

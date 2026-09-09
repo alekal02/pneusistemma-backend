@@ -11,7 +11,7 @@ import {
   isAdmin,
 } from '../auth.js';
 import { excluirFilialCompleta } from '../services/limpar-filial.js';
-import { classificarSulco, getLimites, menorSulco } from '../limites.js';
+import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
 import {
   labelPosicao,
@@ -59,6 +59,7 @@ async function resumoFilial(db, filialId, limites) {
   const pneus = await db.prepare(`
     SELECT
       p.id, p.vida_recap,
+      v.tipo, v.layout_pneus,
       (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
       (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
       (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
@@ -75,13 +76,14 @@ async function resumoFilial(db, filialId, limites) {
 
   for (const p of pneus) {
     const menor = menorSulco(p);
-    const status = classificarSulco(menor);
+    const limV = limitesDoVeiculo(p);
+    const status = classificarSulco(menor, limV);
     if (status === 'ok') ok++;
     else if (status === 'alerta') alerta++;
     else if (status === 'critico') critico++;
     else semDado++;
 
-    const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
+    const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
     if (acao.codigo === 'troca') troca++;
     else if (acao.codigo === 'recap') recapSugestao++;
     else if (acao.codigo === 'monitorar') monitorar++;
@@ -191,7 +193,7 @@ async function pendenciasFilial(db, filialId, limites) {
     SELECT
       p.id as pneu_id, p.posicao, p.numero_fogo, p.marca as pneu_marca,
       p.tipo_pneu, p.condicao, p.vida_recap, p.sulco_inicial_mm,
-      v.id as veiculo_id, v.placa, v.apelido, v.tipo as veiculo_tipo, v.km_atual,
+      v.id as veiculo_id, v.placa, v.apelido, v.tipo as veiculo_tipo, v.km_atual, v.layout_pneus,
       m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
       m.data_medicao, m.diagnostico, m.km_veiculo
     FROM pneus p
@@ -203,11 +205,12 @@ async function pendenciasFilial(db, filialId, limites) {
 
   const itens = rows.map((p) => {
     const menor = menorSulco(p);
-    const status = classificarSulco(menor);
-    const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm, {
-      limites,
+    const limV = limitesDoVeiculo({ tipo: p.veiculo_tipo, layout_pneus: p.layout_pneus });
+    const status = classificarSulco(menor, limV);
+    const diag = diagnosticarPerfil(p, limV.diagnostico_tolerancia_mm, {
+      limites: limV,
     });
-    const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
+    const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
     return {
       pneu_id: p.pneu_id,
       veiculo_id: p.veiculo_id,
@@ -402,7 +405,7 @@ router.get('/:id', async (req, res, next) => {
     const veiculosComStatus = veiculos.map((v) => ({
       ...v,
       menor_sulco: v.menor_sulco === 999 ? null : v.menor_sulco,
-      status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco),
+      status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco, limitesDoVeiculo(v)),
       pendencias_troca: pendencias.troca.filter((p) => p.veiculo_id === v.id).length,
       pendencias_recap: pendencias.recap.filter((p) => p.veiculo_id === v.id).length,
       pendencias_monitorar: pendencias.monitorar.filter((p) => p.veiculo_id === v.id).length,
@@ -451,7 +454,6 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
   }
   try {
     const db = getDb();
-    const limites = getLimites();
     const filial = await db.prepare('SELECT id, nome, codigo FROM filiais WHERE id = ? AND ativo = 1').get(req.params.id);
     if (!filial) return res.status(404).json({ erro: 'Filial não encontrada' });
 
@@ -459,6 +461,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       SELECT * FROM veiculos WHERE id = ? AND filial_id = ? AND ativo = 1
     `).get(req.params.veiculoId, filial.id);
     if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado nesta filial' });
+    const limites = limitesDoVeiculo(veiculo);
 
     const orderSql = sqlOrderPosicao('p.posicao');
     const pneus = await db.prepare(`
@@ -499,7 +502,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
         padrao: p.tipo_pneu,
         padrao_label: labelTipoPneu(p.tipo_pneu),
         menor_sulco: menor,
-        status_sulco: classificarSulco(menor),
+        status_sulco: classificarSulco(menor, limites),
         diagnostico: diag.codigo,
         diagnostico_label: diag.label,
         diagnostico_desc: diag.descricao || '',
@@ -641,15 +644,16 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
   }
   try {
     const db = getDb();
-    const limites = getLimites();
     const med = await db.prepare(`
-      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, p.posicao, v.filial_id
+      SELECT m.*, p.id as pneu_id, p.vida_recap, p.veiculo_id, p.posicao, v.filial_id,
+        v.tipo as veiculo_tipo, v.layout_pneus
       FROM medicoes m
       JOIN pneus p ON p.id = m.pneu_id
       JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ?
       WHERE m.id = ?
     `).get(req.params.id, req.params.medicaoId);
     if (!med) return res.status(404).json({ erro: 'Medição não encontrada nesta filial' });
+    const limites = limitesDoVeiculo({ tipo: med.veiculo_tipo, layout_pneus: med.layout_pneus });
 
     const {
       data_medicao,
@@ -740,7 +744,7 @@ router.put('/:id/medicoes/:medicaoId', async (req, res, next) => {
       medicao: {
         ...atualizada,
         menor_sulco: menor,
-        status_sulco: classificarSulco(menor),
+        status_sulco: classificarSulco(menor, limites),
         diagnostico_label: diag.label,
         acao_label: acao.label,
         acao_motivo: acao.motivo,

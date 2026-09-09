@@ -13,6 +13,7 @@ import {
   labelPosicao,
   validarMontagem,
   aplicarLayoutPneus,
+  layoutPadraoPorTipo,
 } from '../pneus-layouts.js';
 
 function hojeIso() {
@@ -67,8 +68,7 @@ export async function criarVeiculo(filialId, {
   placa, apelido = null, tipo = 'Truck / Tração', km_atual = 0, layout_pneus = null,
 }) {
   const db = getDb();
-  const layoutId = layout_pneus
-    || (String(tipo).toLowerCase().includes('toco') ? 'toco_6' : LAYOUT_PADRAO);
+  const layoutId = layout_pneus || layoutPadraoPorTipo(tipo);
   try {
     const result = await db.prepare(`
       INSERT INTO veiculos (

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../database.js';
-import { classificarSulco, getLimites, menorSulco } from '../limites.js';
+import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
 import { papelPosicao } from '../pneus-layouts.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
@@ -20,7 +20,7 @@ router.get('/resumo', async (req, res, next) => {
     const pneus = await db.prepare(`
     SELECT
       p.id, p.vida_recap, p.condicao, p.numero_fogo, p.posicao,
-      v.placa, v.apelido,
+      v.placa, v.apelido, v.tipo, v.layout_pneus,
       (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
       (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
       (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
@@ -42,13 +42,14 @@ router.get('/resumo', async (req, res, next) => {
 
     for (const p of pneus) {
       const menor = menorSulco(p);
-      const status = classificarSulco(menor);
+      const limV = limitesDoVeiculo(p);
+      const status = classificarSulco(menor, limV);
       if (status === 'ok') ok += 1;
       else if (status === 'alerta') alerta += 1;
       else if (status === 'critico') critico += 1;
       else semDado += 1;
 
-      const acao = sugerirAcao(menor, limites, p.vida_recap || 0, {
+      const acao = sugerirAcao(menor, limV, p.vida_recap || 0, {
         pontos: p,
         posicaoAtual: p.posicao || null,
       });

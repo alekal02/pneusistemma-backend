@@ -168,7 +168,8 @@ export async function assertPneuDaFilial(pneuId, filialId, { incluirInativos = f
   const row = await db.prepare(`
     SELECT p.*,
       COALESCE(p.filial_id, v.filial_id) as filial_id,
-      v.placa, v.apelido, v.km_atual, v.hr_atual
+      v.placa, v.apelido, v.km_atual, v.hr_atual,
+      v.tipo as veiculo_tipo, v.layout_pneus
     FROM pneus p
     LEFT JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1
     WHERE p.id = ?

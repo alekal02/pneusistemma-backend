@@ -11,6 +11,7 @@ import {
 import * as ops from '../services/whatsapp-ops.js';
 import { getDb } from '../database.js';
 import { assertVeiculoDaFilial } from '../auth.js';
+import { TIPOS_VEICULO } from '../config.js';
 import {
   TIPOS_PNEU,
   CONDICOES_PNEU,
@@ -48,7 +49,10 @@ router.get('/', async (req, res, next) => {
       expira_em: row.expira_em,
     };
 
-    if (row.tipo === 'cadastrar_veiculo' || row.tipo === 'cadastrar_pneu') {
+    if (row.tipo === 'cadastrar_veiculo') {
+      return res.json({ ...payload, tipos: TIPOS_VEICULO });
+    }
+    if (row.tipo === 'cadastrar_pneu') {
       return res.json(payload);
     }
 

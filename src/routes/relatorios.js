@@ -6,7 +6,7 @@ import {
   requireGerenteOuAdmin,
   filiaisEscopoIds,
 } from '../auth.js';
-import { classificarSulco, getLimites, menorSulco } from '../limites.js';
+import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { sugerirAcao } from '../diagnostico.js';
 import { toCsv } from '../csv-utils.js';
 import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
@@ -95,11 +95,13 @@ async function montarRelatorioDiretoria() {
     const pneus = await db.prepare(`
       SELECT
         p.id, p.vida_recap, p.status_pneu, p.custo, p.nota_fiscal, p.modelo, p.marca, p.numero_fogo,
+        v.tipo, v.layout_pneus,
         (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
         (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
         (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
         (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_auxiliar
       FROM pneus p
+      LEFT JOIN veiculos v ON v.id = p.veiculo_id
       WHERE p.ativo = 1 AND p.filial_id = ? AND p.status_pneu != 'descarte'
     `).all(f.id);
 
@@ -123,13 +125,14 @@ async function montarRelatorioDiretoria() {
       if (p.custo != null) custoMontado += Number(p.custo);
 
       const menor = menorSulco(p);
-      const status = classificarSulco(menor);
+      const limV = limitesDoVeiculo(p);
+      const status = classificarSulco(menor, limV);
       if (status === 'ok') ok += 1;
       else if (status === 'alerta') alerta += 1;
       else if (status === 'critico') critico += 1;
       else semDado += 1;
 
-      const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
+      const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
       if (acao.codigo === 'troca') troca += 1;
       else if (acao.codigo === 'monitorar' || acao.codigo === 'rodizio') monitorar += 1;
     }

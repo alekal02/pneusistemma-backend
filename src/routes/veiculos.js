@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb, classificarSulco } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { TIPOS_VEICULO } from '../config.js';
+import { limitesDoVeiculo } from '../limites.js';
 import { requireAuth, requireFilial, requireGerenteOuAdmin, filialScopeId, filiaisEscopoIds, assertVeiculoDaFilial } from '../auth.js';
 import {
   POSICOES_PNEU,
@@ -415,7 +416,7 @@ router.get('/', async (req, res, next) => {
       ...v,
       tipo: normalizarTipoVeiculo(v.tipo),
       menor_sulco: v.menor_sulco === 999 ? null : v.menor_sulco,
-      status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco),
+      status_sulco: classificarSulco(v.menor_sulco === 999 ? null : v.menor_sulco, limitesDoVeiculo(v)),
       pneus_medidos: Number(v.pneus_medidos) || 0,
       ultima_medicao: v.ultima_medicao || null,
       dia_medicao: normalizarDiaMedicao(v.dia_medicao),

@@ -221,6 +221,9 @@ async function seedConfigs() {
   await insertIgnore.run('max_recaps', '6');
   await insertIgnore.run('prazo_recap_dias', '15');
   await insertIgnore.run('diagnostico_tolerancia_mm', '1');
+  await insertIgnore.run('trator_sulco_critico_mm', '10');
+  await insertIgnore.run('trator_sulco_alerta_mm', '15');
+  await insertIgnore.run('trator_sulco_novo_mm', '25');
 
   const migrou = await db.prepare(`SELECT valor FROM configuracoes WHERE chave = ?`).get('limites_faixas_v3');
   if (!migrou) {
