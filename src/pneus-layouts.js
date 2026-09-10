@@ -83,60 +83,77 @@ export const LAYOUTS_PNEU = {
     id: 'truck_10',
     nome: 'Truck 10 pneus — dianteira + 2 eixos duplos',
     descricao: '3 eixos: 2 na dianteira + 4 no 2º eixo + 4 no 3º eixo',
+    familia: 'caminhao',
     posicoes: ['1E', '1D', '2EE', '2EI', '2DI', '2DE', '3EE', '3EI', '3DI', '3DE'],
   },
   truck_8: {
     id: 'truck_8',
     nome: 'Truck 8 pneus — dianteira + eixo duplo + eixo simples',
     descricao: '3 eixos: 2 na dianteira + 4 no 2º eixo + 2 no 3º eixo',
+    familia: 'caminhao',
     posicoes: ['1E', '1D', '2EE', '2EI', '2DI', '2DE', '3E', '3D'],
   },
   truck_8_b: {
     id: 'truck_8_b',
     nome: 'Truck 8 pneus — dianteira + eixo simples + eixo duplo',
     descricao: '3 eixos: 2 na dianteira + 2 no 2º eixo + 4 no 3º eixo',
+    familia: 'caminhao',
     posicoes: ['1E', '1D', '2E', '2D', '3EE', '3EI', '3DI', '3DE'],
   },
   toco_6: {
     id: 'toco_6',
     nome: 'Toco / Mini 6 pneus — dianteira + tração dupla',
     descricao: '2 eixos: 2 na dianteira + 4 na tração',
+    familia: 'caminhao',
     posicoes: ['1E', '1D', '2EE', '2EI', '2DI', '2DE'],
   },
   padrao_5: {
     id: 'padrao_5',
     nome: 'Padrão — 4 rodas + estepe',
     descricao: 'Utilitário, van ou caminhão leve',
+    familia: 'caminhao',
     posicoes: ['DD', 'DE', 'TD', 'TE', 'ESTEPE'],
   },
   utilitario_4: {
     id: 'utilitario_4',
     nome: 'Utilitário — 4 rodas',
     descricao: 'Sem estepe cadastrado',
+    familia: 'caminhao',
     posicoes: ['DD', 'DE', 'TD', 'TE'],
   },
   duplo_traseiro: {
     id: 'duplo_traseiro',
     nome: 'Caminhão — duplo traseiro (6 + estepe)',
     descricao: '1 eixo dianteiro + 1 eixo duplo traseiro',
+    familia: 'caminhao',
     posicoes: ['DD', 'DE', 'TDE', 'TDI', 'TEE', 'TEI', 'ESTEPE'],
   },
   truck_10_estepe: {
     id: 'truck_10_estepe',
     nome: 'Caminhão pesado — 10 + estepe',
     descricao: 'Dianteiro + 2 eixos duplos + estepe (legado)',
+    familia: 'caminhao',
     posicoes: ['DD', 'DE', 'E2DE', 'E2DI', 'E2EE', 'E2EI', 'E3DE', 'E3DI', 'E3EE', 'E3EI', 'ESTEPE'],
   },
   compactador: {
     id: 'compactador',
-    nome: 'Compactador / Basculante — 8 rodas (legado)',
-    descricao: 'Layout legado frota urbana',
+    nome: 'Compactador / Basculante — 8 rodas',
+    descricao: 'Frota urbana: dianteira + 2 eixos (duplo no 2º)',
+    familia: 'caminhao',
     posicoes: ['DD', 'DE', 'E2DE', 'E2DI', 'E2EE', 'E2EI', 'E3DE', 'E3EE'],
+  },
+  trator_4: {
+    id: 'trator_4',
+    nome: 'Trator 4 pneus — 2 dianteiros + 2 traseiros',
+    descricao: '2 eixos simples; traseiros maiores. Medição com faixas próprias de sulco.',
+    familia: 'trator',
+    posicoes: ['1E', '1D', '2E', '2D'],
   },
   moto_2: {
     id: 'moto_2',
     nome: 'Moto — 2 pneus',
     descricao: 'Dianteiro e traseiro',
+    familia: 'caminhao',
     posicoes: ['D', 'T'],
   },
 };
@@ -174,6 +191,29 @@ export function labelTipoPneu(codigo) {
 
 export function getLayout(id) {
   return LAYOUTS_PNEU[id] || LAYOUTS_PNEU[LAYOUT_PADRAO];
+}
+
+export function familiaLayout(id) {
+  return getLayout(id)?.familia || 'caminhao';
+}
+
+/** Régua de sulco: caminhão (padrão) ou trator. */
+export function perfilMedicaoVeiculo(tipo, layoutId) {
+  const t = String(tipo || '').toLowerCase();
+  if (t.includes('trator')) return 'trator';
+  const layout = String(layoutId || '').toLowerCase();
+  if (layout.startsWith('trator')) return 'trator';
+  return familiaLayout(layoutId);
+}
+
+/** Layout sugerido ao cadastrar pelo tipo (WhatsApp / import). */
+export function layoutPadraoPorTipo(tipo) {
+  const t = String(tipo || '').toLowerCase();
+  if (t.includes('toco') || t.includes('mini')) return 'toco_6';
+  if (t.includes('compactador')) return 'compactador';
+  if (t.includes('utilit') || t.includes('varredeira')) return 'utilitario_4';
+  if (t.includes('trator')) return 'trator_4';
+  return LAYOUT_PADRAO;
 }
 
 export function labelPosicao(codigo) {

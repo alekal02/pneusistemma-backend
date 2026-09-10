@@ -229,11 +229,20 @@ export function mapLayoutId(raw, tipo) {
     toco: 'toco_6',
     mini: 'toco_6',
     '6': 'toco_6',
+    compactador: 'compactador',
+    utilitario_4: 'utilitario_4',
+    utilitario: 'utilitario_4',
+    varredeira: 'utilitario_4',
+    trator_4: 'trator_4',
+    trator: 'trator_4',
   };
   if (v && aliases[v]) return aliases[v];
   if (v && aliases[v.replace(/\s+/g, '')]) return aliases[v.replace(/\s+/g, '')];
 
   const t = String(tipo || '').toLowerCase();
+  if (t.includes('trator')) return 'trator_4';
+  if (t.includes('compactador')) return 'compactador';
+  if (t.includes('utilit') || t.includes('varred')) return 'utilitario_4';
   if (t.includes('toco') || t.includes('mini')) return 'toco_6';
   return 'truck_10';
 }

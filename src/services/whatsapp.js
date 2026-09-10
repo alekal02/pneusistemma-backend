@@ -200,9 +200,11 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
 
   const nomeUser = nomeUsuarioWuzapiFilial(atual);
   const tokenAtual = tokenNaoEAdmin(atual.wuzapi_token);
-  const envTok = tokenNaoEAdmin(config.wuzapiToken);
+  // Só é "compartilhado" se OUTRA filial usa o mesmo token.
+  // Igualdade com WUZAPI_TOKEN do .env é comum (primeira unidade) e NÃO
+  // deve regenerar o token — isso derrubava a sessão WhatsApp a cada status.
   const compartilhado = tokenAtual
-    ? (await tokenUsadoPorOutraFilial(atual.id, tokenAtual) || (envTok && tokenAtual === envTok))
+    ? await tokenUsadoPorOutraFilial(atual.id, tokenAtual)
     : false;
 
   // Confere se o token do banco ainda existe no WuzAPI (evita 401 no QR).
@@ -236,7 +238,7 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
       return n === nomeUser || n === `PneuSistemma-${atual.id}`;
     });
     const cand = tokenNaoEAdmin(dedicado?.token);
-    if (cand && !(await tokenUsadoPorOutraFilial(atual.id, cand)) && !(envTok && cand === envTok)) {
+    if (cand && !(await tokenUsadoPorOutraFilial(atual.id, cand))) {
       token = cand;
       origem = 'existente';
     }
@@ -294,16 +296,13 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     }
   }
 
-  // Só grava token que existe (ou acabou de ser criado) no WuzAPI — nunca órfão.
-  const limparCampos = compartilhado || opts.forcarNovo || orfao || !tokenAtual;
+  // Nunca apaga número/grupo da unidade — só o disconnect explícito faz isso.
   await db.prepare(`
     UPDATE filiais SET
       wuzapi_token = ?,
-      whatsapp = CASE WHEN ? THEN NULL ELSE whatsapp END,
-      whatsapp_grupo = CASE WHEN ? THEN NULL ELSE whatsapp_grupo END,
       updated_at = NOW()
     WHERE id = ?
-  `).run(token, limparCampos ? 1 : 0, limparCampos ? 1 : 0, atual.id);
+  `).run(token, atual.id);
 
   return {
     token,

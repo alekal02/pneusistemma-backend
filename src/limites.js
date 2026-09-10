@@ -1,5 +1,6 @@
 import { getDb } from './database.js';
 import { config } from './config.js';
+import { perfilMedicaoVeiculo } from './pneus-layouts.js';
 
 const CHAVES = {
   CRITICO: 'sulco_critico_mm',
@@ -21,6 +22,9 @@ const CHAVES = {
   ACAO_RODIZIO_INSTRUCAO: 'acao_rodizio_instrucao',
   ACAO_OK_LABEL: 'acao_ok_label',
   ACAO_OK_INSTRUCAO: 'acao_ok_instrucao',
+  TRATOR_CRITICO: 'trator_sulco_critico_mm',
+  TRATOR_ALERTA: 'trator_sulco_alerta_mm',
+  TRATOR_NOVO: 'trator_sulco_novo_mm',
 };
 
 const PADROES = {
@@ -43,6 +47,9 @@ const PADROES = {
   [CHAVES.ACAO_RODIZIO_INSTRUCAO]: 'Rodízio para o lado oposto do eixo (ex.: 1E → 1D) para equalizar o desgaste',
   [CHAVES.ACAO_OK_LABEL]: 'OK',
   [CHAVES.ACAO_OK_INSTRUCAO]: 'Manter em operação — sulco adequado',
+  [CHAVES.TRATOR_CRITICO]: 10,
+  [CHAVES.TRATOR_ALERTA]: 15,
+  [CHAVES.TRATOR_NOVO]: 25,
 };
 
 const CHAVES_TEXTO = new Set([
@@ -91,11 +98,26 @@ function textoOuPadrao(valor, padrao, { max = 200 } = {}) {
   return t.slice(0, max);
 }
 
+function valorDeMapa(map, chave) {
+  if (!Object.prototype.hasOwnProperty.call(map, chave) || map[chave] == null) {
+    return PADROES[chave];
+  }
+  if (CHAVES_TEXTO.has(chave)) {
+    const txt = String(map[chave] ?? '').trim();
+    return txt || PADROES[chave];
+  }
+  const n = parseFloat(map[chave]);
+  return Number.isFinite(n) ? n : PADROES[chave];
+}
+
 export async function refreshLimitesCache() {
-  const keys = Object.values(CHAVES);
+  const db = getDb();
+  const rows = await db.prepare('SELECT chave, valor FROM configuracoes').all();
+  const map = {};
+  for (const r of rows) map[r.chave] = r.valor;
   const values = {};
-  for (const k of keys) {
-    values[k] = await lerValorAsync(k);
+  for (const k of Object.values(CHAVES)) {
+    values[k] = valorDeMapa(map, k);
   }
   cache = {
     sulco_critico_mm: values[CHAVES.CRITICO],
@@ -129,6 +151,11 @@ export async function refreshLimitesCache() {
         instrucao: values[CHAVES.ACAO_OK_INSTRUCAO],
       },
     },
+    trator: {
+      sulco_critico_mm: values[CHAVES.TRATOR_CRITICO],
+      sulco_alerta_mm: values[CHAVES.TRATOR_ALERTA],
+      sulco_novo_mm: values[CHAVES.TRATOR_NOVO],
+    },
   };
   return cache;
 }
@@ -154,9 +181,37 @@ export function getLimites() {
         rodizio: { label: PADROES[CHAVES.ACAO_RODIZIO_LABEL], instrucao: PADROES[CHAVES.ACAO_RODIZIO_INSTRUCAO] },
         ok: { label: PADROES[CHAVES.ACAO_OK_LABEL], instrucao: PADROES[CHAVES.ACAO_OK_INSTRUCAO] },
       },
+      trator: {
+        sulco_critico_mm: PADROES[CHAVES.TRATOR_CRITICO],
+        sulco_alerta_mm: PADROES[CHAVES.TRATOR_ALERTA],
+        sulco_novo_mm: PADROES[CHAVES.TRATOR_NOVO],
+      },
     };
   }
   return cache;
+}
+
+export function getLimitesPorPerfil(perfil = 'caminhao') {
+  const base = getLimites();
+  if (perfil !== 'trator') {
+    return { ...base, perfil: 'caminhao' };
+  }
+  const t = base.trator || {};
+  const critico = t.sulco_critico_mm ?? PADROES[CHAVES.TRATOR_CRITICO];
+  return {
+    ...base,
+    perfil: 'trator',
+    sulco_critico_mm: critico,
+    sulco_alerta_mm: t.sulco_alerta_mm ?? PADROES[CHAVES.TRATOR_ALERTA],
+    sulco_novo_mm: t.sulco_novo_mm ?? PADROES[CHAVES.TRATOR_NOVO],
+    sulco_recap_mm: critico,
+  };
+}
+
+export function limitesDoVeiculo(row = {}, layoutId = null) {
+  const tipo = row.tipo || row.tipo_veiculo || row.veiculo_tipo || null;
+  const layout = row.layout_pneus || layoutId || null;
+  return getLimitesPorPerfil(perfilMedicaoVeiculo(tipo, layout));
 }
 
 export async function setLimites(body) {
@@ -234,6 +289,32 @@ export async function setLimites(body) {
   await salvarValor(CHAVES.ACAO_OK_LABEL, okLabel);
   await salvarValor(CHAVES.ACAO_OK_INSTRUCAO, okInstrucao);
 
+  const tratorBody = body.trator && typeof body.trator === 'object' ? body.trator : {};
+  const tratorAtual = atual.trator || {};
+  const tratorCritico = tratorBody.sulco_critico_mm != null
+    ? parseFloat(tratorBody.sulco_critico_mm)
+    : (body.trator_sulco_critico_mm != null ? parseFloat(body.trator_sulco_critico_mm) : tratorAtual.sulco_critico_mm);
+  const tratorAlerta = tratorBody.sulco_alerta_mm != null
+    ? parseFloat(tratorBody.sulco_alerta_mm)
+    : (body.trator_sulco_alerta_mm != null ? parseFloat(body.trator_sulco_alerta_mm) : tratorAtual.sulco_alerta_mm);
+  const tratorNovo = tratorBody.sulco_novo_mm != null
+    ? parseFloat(tratorBody.sulco_novo_mm)
+    : (body.trator_sulco_novo_mm != null ? parseFloat(body.trator_sulco_novo_mm) : tratorAtual.sulco_novo_mm);
+
+  if (!Number.isFinite(tratorCritico) || tratorCritico < 0) {
+    throw new Error('Limite crítico do trator inválido');
+  }
+  if (!Number.isFinite(tratorAlerta) || tratorAlerta <= tratorCritico) {
+    throw new Error('No trator, o limiar de monitorar deve ser maior que o crítico');
+  }
+  if (!Number.isFinite(tratorNovo) || tratorNovo <= tratorAlerta) {
+    throw new Error('No trator, o sulco de pneu novo deve ser maior que o limiar de monitorar');
+  }
+
+  await salvarValor(CHAVES.TRATOR_CRITICO, tratorCritico);
+  await salvarValor(CHAVES.TRATOR_ALERTA, tratorAlerta);
+  await salvarValor(CHAVES.TRATOR_NOVO, tratorNovo);
+
   return refreshLimitesCache();
 }
 
@@ -244,12 +325,25 @@ export function atingiuCritico(mm, criticoMm) {
   return mm <= limiar;
 }
 
-export function classificarSulco(mm) {
+export function classificarSulco(mm, limites) {
   if (mm === null || mm === undefined) return 'sem_dado';
-  const { sulco_critico_mm, sulco_alerta_mm } = getLimites();
-  if (mm <= sulco_critico_mm) return 'critico';
-  if (mm <= sulco_alerta_mm) return 'alerta';
+  const lim = limites && Number.isFinite(Number(limites.sulco_critico_mm))
+    ? limites
+    : getLimites();
+  if (mm <= lim.sulco_critico_mm) return 'critico';
+  if (mm <= lim.sulco_alerta_mm) return 'alerta';
   return 'ok';
+}
+
+/** Maior limiar de monitorar entre caminhão e trator (filtros SQL de alerta). */
+export function alertaSulcoMaxMm() {
+  const lim = getLimites();
+  const tratorAlerta = Number(lim.trator?.sulco_alerta_mm);
+  return Math.max(
+    Number(lim.sulco_alerta_mm) || 0,
+    Number(lim.sulco_recap_mm) || 0,
+    Number.isFinite(tratorAlerta) ? tratorAlerta : 0,
+  );
 }
 
 export function menorSulco(row) {

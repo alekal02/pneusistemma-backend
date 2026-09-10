@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getDb, classificarSulco } from '../database.js';
-import { getLimites, menorSulco, adicionarDias } from '../limites.js';
+import { getLimites, limitesDoVeiculo, menorSulco, adicionarDias, alertaSulcoMaxMm } from '../limites.js';
 import {
   diagnosticarPerfil,
   sugerirAcao,
@@ -52,7 +52,6 @@ async function requireAuthOrAcessoRapido(req, res, next) {
 router.get('/alertas', requireAuth, requireFilial, async (req, res, next) => {
   try {
     const db = getDb();
-    const limites = getLimites();
     const filialId = filialScopeId(req);
 
     const alertas = await db.prepare(`
@@ -60,7 +59,7 @@ router.get('/alertas', requireAuth, requireFilial, async (req, res, next) => {
       m.*,
       p.posicao, p.marca as pneu_marca, p.modelo as pneu_modelo,
       p.numero_fogo, p.tipo_pneu, p.condicao, p.vida_recap, p.sulco_inicial_mm,
-      v.placa, v.apelido, v.tipo,
+      v.placa, v.apelido, v.tipo, v.layout_pneus,
       MIN(
         COALESCE(m.sulco_externo, 999),
         COALESCE(m.sulco_central, 999),
@@ -81,16 +80,17 @@ router.get('/alertas', requireAuth, requireFilial, async (req, res, next) => {
       COALESCE(m.sulco_auxiliar, 999)
     ) <= ?
     ORDER BY menor_sulco_raw ASC
-  `).all(filialId, Math.max(limites.sulco_alerta_mm, limites.sulco_recap_mm));
+  `).all(filialId, alertaSulcoMaxMm());
 
     const resultado = alertas.map((a) => {
       const menor = a.menor_sulco_raw === 999 ? null : a.menor_sulco_raw;
-      const diag = diagnosticarPerfil(a, limites.diagnostico_tolerancia_mm);
-      const acao = sugerirAcao(menor, limites, a.vida_recap || 0);
+      const limV = limitesDoVeiculo(a);
+      const diag = diagnosticarPerfil(a, limV.diagnostico_tolerancia_mm);
+      const acao = sugerirAcao(menor, limV, a.vida_recap || 0);
       return {
         ...a,
         menor_sulco: menor,
-        status_sulco: classificarSulco(menor),
+        status_sulco: classificarSulco(menor, limV),
         diagnostico: diag.codigo,
         diagnostico_label: diag.label,
         acao_sugerida: acao.codigo,
@@ -99,7 +99,7 @@ router.get('/alertas', requireAuth, requireFilial, async (req, res, next) => {
       };
     });
 
-    res.json(resultado);
+    res.json(resultado.filter((a) => a.status_sulco === 'alerta' || a.status_sulco === 'critico'));
   } catch (err) {
     next(err);
   }
@@ -108,13 +108,12 @@ router.get('/alertas', requireAuth, requireFilial, async (req, res, next) => {
 router.get('/acoes', requireAuth, requireFilial, async (req, res, next) => {
   try {
     const db = getDb();
-    const limites = getLimites();
     const filialId = filialScopeId(req);
 
     const pneus = await db.prepare(`
     SELECT
       p.*,
-      v.placa, v.apelido, v.tipo,
+      v.placa, v.apelido, v.tipo, v.layout_pneus,
       m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
       m.data_medicao, m.km_veiculo, m.diagnostico, m.acao_sugerida
     FROM pneus p
@@ -127,8 +126,9 @@ router.get('/acoes', requireAuth, requireFilial, async (req, res, next) => {
     const itens = pneus
       .map((p) => {
         const menor = menorSulco(p);
-        const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm);
-        const acao = sugerirAcao(menor, limites, p.vida_recap || 0);
+        const limV = limitesDoVeiculo(p);
+        const diag = diagnosticarPerfil(p, limV.diagnostico_tolerancia_mm);
+        const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
         return {
           pneu_id: p.id,
           veiculo_id: p.veiculo_id,
@@ -137,7 +137,7 @@ router.get('/acoes', requireAuth, requireFilial, async (req, res, next) => {
           posicao: p.posicao,
           numero_fogo: p.numero_fogo,
           menor_sulco: menor,
-          status_sulco: classificarSulco(menor),
+          status_sulco: classificarSulco(menor, limV),
           diagnostico: diag.codigo,
           diagnostico_label: diag.label,
           acao_sugerida: acao.codigo,
@@ -205,7 +205,9 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
     return next(err);
   }
 
-  const limites = getLimites();
+  const limites = pneu.veiculo_id
+    ? limitesDoVeiculo({ tipo: pneu.veiculo_tipo, layout_pneus: pneu.layout_pneus })
+    : getLimites();
   const medicaoRow = {
     sulco_externo: sulco_externo ?? null,
     sulco_central: sulco_central ?? null,
@@ -261,7 +263,7 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
       candidatos,
       posicaoAtual: pneu.posicao || null,
     });
-    statusSulco = classificarSulco(menor);
+    statusSulco = classificarSulco(menor, limites);
 
     const anterior = await db.prepare(`
       SELECT * FROM medicoes WHERE pneu_id = ?

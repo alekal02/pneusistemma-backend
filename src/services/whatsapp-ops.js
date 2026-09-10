@@ -5,6 +5,7 @@ import { getDb } from '../database.js';
 import { ehViolacaoUnique } from '../db-utils.js';
 import { getLimites } from '../limites.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
+import { comRetryFogoUnico } from '../numero-fogo.js';
 import {
   LAYOUT_PADRAO,
   TIPOS_PNEU,
@@ -13,6 +14,7 @@ import {
   labelPosicao,
   validarMontagem,
   aplicarLayoutPneus,
+  layoutPadraoPorTipo,
 } from '../pneus-layouts.js';
 
 function hojeIso() {
@@ -67,8 +69,7 @@ export async function criarVeiculo(filialId, {
   placa, apelido = null, tipo = 'Truck / Tração', km_atual = 0, layout_pneus = null,
 }) {
   const db = getDb();
-  const layoutId = layout_pneus
-    || (String(tipo).toLowerCase().includes('toco') ? 'toco_6' : LAYOUT_PADRAO);
+  const layoutId = layout_pneus || layoutPadraoPorTipo(tipo);
   try {
     const result = await db.prepare(`
       INSERT INTO veiculos (
@@ -100,31 +101,32 @@ export async function criarPneuEstoque(filialId, {
   condicao = 'novo', sulco_inicial_mm = null,
 }) {
   const db = getDb();
-  const fogo = String(numero_fogo || '').trim();
   const modeloOk = String(modelo || '').trim();
-  if (!fogo) throw Object.assign(new Error('Nº de fogo obrigatório'), { status: 400 });
   if (!modeloOk) throw Object.assign(new Error('Modelo obrigatório'), { status: 400 });
   const tipo = TIPOS_PNEU.includes(tipo_pneu) ? tipo_pneu : 'misto';
   const cond = CONDICOES_PNEU.includes(condicao) ? condicao : 'novo';
   const vida = cond === 'recapado' ? 1 : 0;
   try {
-    const result = await db.prepare(`
+    const { result } = await comRetryFogoUnico(db, filialId, numero_fogo, (fogo) => (
+      db.prepare(`
       INSERT INTO pneus (
         veiculo_id, posicao, filial_id, marca, modelo, numero_fogo,
         tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo
       ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1)
     `).run(
-      filialId,
-      marca?.trim() || null,
-      modeloOk,
-      fogo,
-      tipo,
-      cond,
-      vida,
-      sulco_inicial_mm != null ? Number(sulco_inicial_mm) : null
-    );
+        filialId,
+        marca?.trim() || null,
+        modeloOk,
+        fogo,
+        tipo,
+        cond,
+        vida,
+        sulco_inicial_mm != null ? Number(sulco_inicial_mm) : null
+      )
+    ));
     return db.prepare('SELECT * FROM pneus WHERE id = ?').get(result.lastInsertRowid);
   } catch (err) {
+    if (err.status) throw err;
     if (ehViolacaoUnique(err)) {
       throw Object.assign(new Error('Já existe pneu com este nº de fogo'), { status: 409 });
     }

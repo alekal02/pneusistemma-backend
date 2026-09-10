@@ -11,6 +11,7 @@ import {
 import * as ops from '../services/whatsapp-ops.js';
 import { getDb } from '../database.js';
 import { assertVeiculoDaFilial } from '../auth.js';
+import { TIPOS_VEICULO } from '../config.js';
 import {
   TIPOS_PNEU,
   CONDICOES_PNEU,
@@ -19,6 +20,7 @@ import {
   validarMontagem,
   labelPosicao,
 } from '../pneus-layouts.js';
+import { consultarProximoFogo } from '../numero-fogo.js';
 
 const router = Router();
 
@@ -48,8 +50,12 @@ router.get('/', async (req, res, next) => {
       expira_em: row.expira_em,
     };
 
-    if (row.tipo === 'cadastrar_veiculo' || row.tipo === 'cadastrar_pneu') {
-      return res.json(payload);
+    if (row.tipo === 'cadastrar_veiculo') {
+      return res.json({ ...payload, tipos: TIPOS_VEICULO });
+    }
+    if (row.tipo === 'cadastrar_pneu') {
+      const proximo_fogo = await consultarProximoFogo(db, row.filial_id).catch(() => null);
+      return res.json({ ...payload, proximo_fogo });
     }
 
     if (!row.veiculo_id) {
@@ -70,6 +76,7 @@ router.get('/', async (req, res, next) => {
     }
 
     // medir (compatível com GET /veiculos/acesso-rapido)
+    const proximo_fogo = await consultarProximoFogo(db, row.filial_id).catch(() => null);
     res.json({
       ...veiculo,
       tipo_token: 'medir',
@@ -77,7 +84,19 @@ router.get('/', async (req, res, next) => {
       token_acesso: row.token,
       token_valido: true,
       filial,
+      proximo_fogo,
     });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
+router.get('/proximo-fogo', async (req, res, next) => {
+  try {
+    const row = await tokenOuErro(req.query.token, ['cadastrar_pneu', 'medir']);
+    const info = await consultarProximoFogo(getDb(), row.filial_id);
+    res.json(info);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
@@ -116,9 +135,6 @@ router.post('/pneu', async (req, res, next) => {
       token, numero_fogo, marca, modelo, tipo_pneu, condicao, sulco_inicial_mm,
     } = req.body || {};
     const row = await tokenOuErro(token, ['cadastrar_pneu']);
-    if (!String(numero_fogo || '').trim()) {
-      return res.status(400).json({ erro: 'Nº de fogo é obrigatório' });
-    }
     if (!String(modelo || '').trim()) {
       return res.status(400).json({ erro: 'Modelo é obrigatório' });
     }
@@ -132,7 +148,7 @@ router.post('/pneu', async (req, res, next) => {
     }
 
     const created = await ops.criarPneuEstoque(row.filial_id, {
-      numero_fogo: String(numero_fogo).trim(),
+      numero_fogo,
       marca: marca || null,
       modelo: String(modelo).trim(),
       tipo_pneu: tipo,
