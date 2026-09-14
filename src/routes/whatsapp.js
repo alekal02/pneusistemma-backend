@@ -26,6 +26,8 @@ import {
   tokenUsadoPorOutraFilial,
   chipUsadoPorOutraFilial,
   garantirTokenExclusivoFilial,
+  sessaoVivaDaFilial,
+  reconectarSessaoVivaFilial,
 } from '../services/whatsapp.js';
 
 const router = Router();
@@ -149,7 +151,7 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
       err.bancoInterno = ehErroBancoInternoWuzapi(bruto);
       err.message = mensagemInfraWuzapi(bruto);
     } else if (upstream === 401 || upstream === 403) {
-      err.message = 'Token WuzAPI inválido ou sem permissão. Clique em “Gerar de novo” e depois em Conectar / QR.';
+      err.message = 'Token desta unidade não bate com a sessão do WhatsApp. Clique em Conectar chip — não gere token novo.';
     }
     throw err;
   }
@@ -687,18 +689,6 @@ router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) =>
   }
   try {
     let f = await filialOuErro(req.params.id);
-    // Só cria token se a unidade ainda não tiver um. Nunca regenera nem
-    // apaga chip/grupo ao abrir o painel — unidades em produção ficam intactas.
-    let garantia = {
-      criado: false,
-      regenerado: false,
-      precisa_conectar: false,
-      mensagem: null,
-    };
-    if (!tokenWuzapiUtil(f.wuzapi_token)) {
-      garantia = await garantirTokenExclusivoFilial(f);
-      f = await filialOuErro(req.params.id);
-    }
     res.json({
       id: f.id,
       nome: f.nome,
@@ -710,9 +700,9 @@ router.get('/filial/:id/config', requireChatbotAcesso, async (req, res, next) =>
       admin_token_ok: Boolean(tokenWuzapiUtil(config.wuzapiAdminToken)),
       wuzapi_url: config.wuzapiBaseUrl,
       alertas_enabled: Boolean(config.whatsappAlertasEnabled),
-      token_recem_criado: Boolean(garantia.criado || garantia.regenerado),
-      precisa_conectar: Boolean(garantia.precisa_conectar),
-      aviso_token: garantia.regenerado ? garantia.mensagem : null,
+      token_recem_criado: false,
+      precisa_conectar: !limparCampoTexto(f.whatsapp),
+      aviso_token: null,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });
@@ -756,14 +746,32 @@ router.get('/filial/:id/grupos', requireChatbotAcesso, async (req, res) => {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
     const f = await filialOuErro(req.params.id);
-    const token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+    let token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+    if (!token) {
+      const viva = await reconectarSessaoVivaFilial(f);
+      token = viva?.token || '';
+    }
     if (!token) {
       return res.status(400).json({
         erro: 'Cadastre o token e conecte o chatbot desta unidade antes de listar grupos',
         grupos: [],
       });
     }
-    const data = await wuzapiFetch('/group/list', { token });
+    let data;
+    try {
+      data = await wuzapiFetch('/group/list', { token });
+    } catch (err) {
+      if (err.upstreamStatus === 401 || err.upstreamStatus === 403) {
+        const viva = await reconectarSessaoVivaFilial(f);
+        if (viva?.token) {
+          data = await wuzapiFetch('/group/list', { token: viva.token });
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    }
     const raw = data?.data?.Groups || data?.data?.groups || data?.Groups || data?.groups || [];
     const grupos = (Array.isArray(raw) ? raw : []).map((g) => ({
       jid: g.JID || g.jid || g.Id || g.id || '',
@@ -879,16 +887,32 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
     const f = await filialOuErro(req.params.id);
-    const token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+    const viva = await reconectarSessaoVivaFilial(f);
+    const token = viva?.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
     const extra = {
       filial_id: f.id,
       nome: f.nome,
       whatsapp: f.whatsapp,
-      chip_salvo: limparCampoTexto(f.whatsapp),
+      chip_salvo: limparCampoTexto(f.whatsapp) || viva?.phone || '',
       grupo_salvo: limparCampoTexto(f.whatsapp_grupo),
-      tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token)),
+      tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token) || viva?.token),
       token: Boolean(token),
     };
+    if (viva?.loggedIn) {
+      const outro = viva.phone ? await chipUsadoPorOutraFilial(f.id, viva.phone) : null;
+      if (!outro || chipsWhatsappIguais(f.whatsapp, viva.phone)) {
+        return res.json({
+          configurado: true,
+          loggedIn: true,
+          connected: true,
+          phone: viva.phone,
+          name: viva.name,
+          jid: viva.jid,
+          qrcode: '',
+          ...extra,
+        });
+      }
+    }
     if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
       try {
         const status = await statusSessao(token, extra);
@@ -1017,9 +1041,30 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
     let f = await filialOuErro(req.params.id);
-    let token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
-
     const extraFilial = { filial_id: f.id, nome: f.nome };
+
+    const viva = await reconectarSessaoVivaFilial(f);
+    if (viva?.loggedIn) {
+      const outro = viva.phone ? await chipUsadoPorOutraFilial(f.id, viva.phone) : null;
+      if (!outro || chipsWhatsappIguais(f.whatsapp, viva.phone)) {
+        const webhook = await garantirWebhook(viva.token, f.id);
+        return res.json({
+          mensagem: `Chatbot “${f.nome}” já está conectado`,
+          webhook,
+          configurado: true,
+          loggedIn: true,
+          connected: true,
+          phone: viva.phone,
+          name: viva.name,
+          jid: viva.jid,
+          qrcode: '',
+          tem_qr: false,
+          sessao_desta_filial: true,
+        });
+      }
+    }
+
+    let token = viva?.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
 
     // Chip já pareado nesta sessão → NÃO gera token novo nem outro QR
     if (token) {
@@ -1067,16 +1112,33 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     }
 
     // Token compartilhado SEM ser o chip desta unidade: sessão exclusiva + QR
-    if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
-      await garantirTokenExclusivoFilial(f, { forcarNovo: true });
-      f = await filialOuErro(req.params.id);
-      token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
-    }
+    try {
+      if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
+        await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+        f = await filialOuErro(req.params.id);
+        token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+      }
 
-    if (!token) {
-      const garantia = await garantirTokenExclusivoFilial(f);
-      f = await filialOuErro(req.params.id);
-      token = garantia.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
+      if (!token) {
+        const garantia = await garantirTokenExclusivoFilial(f);
+        f = await filialOuErro(req.params.id);
+        token = garantia.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
+      }
+    } catch (errProv) {
+      const infra = errProv.infraWuzapi
+        || /banco interno|database error|problem accessing DB|lookup db|server misbehaving/i.test(errProv.message || '');
+      if (infra) {
+        return res.json({
+          mensagem: errProv.message,
+          qrcode: '',
+          tem_qr: false,
+          infra_wuzapi: true,
+          qr_erro: errProv.message,
+          loggedIn: false,
+          connected: false,
+        });
+      }
+      throw errProv;
     }
 
     if (!token) {
