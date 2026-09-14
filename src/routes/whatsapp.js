@@ -113,7 +113,6 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
         'Content-Type': 'application/json',
         token: t,
         Token: t,
-        Authorization: t,
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(timeoutMs),
@@ -1233,7 +1232,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
           console.warn('[whatsapp] QR parear status:', err.message);
           if (err.upstreamStatus === 401 || err.upstreamStatus === 403 || err.status === 502) {
             try {
-              const reparo = await garantirTokenExclusivoFilial(f);
+              const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
               token = reparo.token || token;
               iniciarBuscaQrFundo(token, f.id);
             } catch (errRep) {

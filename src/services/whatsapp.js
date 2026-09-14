@@ -460,7 +460,7 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     }
   }
 
-  if (tokenAtual) {
+  if (tokenAtual && !opts.forcarNovo) {
     return {
       token: tokenAtual,
       criado: false,
