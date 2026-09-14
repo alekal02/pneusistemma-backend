@@ -76,10 +76,15 @@ async function wuzapiAdminFetch(path, { method = 'GET', body } = {}) {
     data = { raw };
   }
   if (!res.ok) {
-    const err = new Error(data?.error || data?.erro || data?.details || `WuzAPI admin ${res.status}`);
+    const bruto = data?.error || data?.erro || data?.details || data?.message || `WuzAPI admin ${res.status}`;
+    const err = new Error(bruto);
     err.status = (res.status === 401 || res.status === 403) ? 502 : res.status;
     err.data = data;
-    if (res.status === 401 || res.status === 403) {
+    if (ehErroInfraWuzapi(bruto)) {
+      err.status = 503;
+      err.infraWuzapi = true;
+      err.message = mensagemInfraWuzapi();
+    } else if (res.status === 401 || res.status === 403) {
       err.message = 'WUZAPI_ADMIN_TOKEN inválido. Confira backend/.env e o token admin do container WuzAPI.';
     }
     throw err;
@@ -128,13 +133,20 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
   }
 
   if (!res.ok) {
-    const err = new Error(data?.error || data?.erro || `WuzAPI ${res.status}`);
-    // Nunca repassar 401/403 do WuzAPI — o frontend trata 401 como "sessão expirada" e faz logout
+    const bruto = [data?.error, data?.erro, data?.details, data?.message, data?.Error, data?.raw]
+      .map((p) => (typeof p === 'string' ? p : p ? JSON.stringify(p) : ''))
+      .filter(Boolean)
+      .join(' ') || `WuzAPI ${res.status}`;
+    const err = new Error(bruto);
     const upstream = res.status;
     err.status = (upstream === 401 || upstream === 403) ? 502 : upstream;
     err.upstreamStatus = upstream;
     err.data = data;
-    if (upstream === 401 || upstream === 403) {
+    if (ehErroInfraWuzapi(bruto)) {
+      err.status = 503;
+      err.infraWuzapi = true;
+      err.message = mensagemInfraWuzapi();
+    } else if (upstream === 401 || upstream === 403) {
       err.message = 'Token WuzAPI inválido ou sem permissão. Clique em “Gerar de novo” e depois em Conectar / QR.';
     }
     throw err;
@@ -184,6 +196,15 @@ function normalizarStatus(payload, extra = {}) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function ehErroInfraWuzapi(msg) {
+  return /lookup db|127\.0\.0\.11|server misbehaving|dial tcp|connection refused|i\/o timeout|no such host|context deadline|econnrefused|enotfound|pq:|could not translate/i
+    .test(String(msg || ''));
+}
+
+function mensagemInfraWuzapi() {
+  return 'O servidor do WhatsApp está instável (não alcança o banco interno). Nada foi apagado nas filiais. Espere cerca de 20 segundos e clique de novo em Conectar chip.';
 }
 
 /** Aceita data URL, base64 puro ou campos QRCode/qrcode em vários formatos da WuzAPI. */
@@ -309,6 +330,20 @@ async function conectarSessao(token) {
   }
 }
 
+async function conectarSessaoComRetry(token, tentativas = 4) {
+  let ultimo = null;
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await conectarSessao(token);
+    } catch (err) {
+      ultimo = err;
+      if (!ehErroInfraWuzapi(err.message) && !err.infraWuzapi) throw err;
+      if (i < tentativas - 1) await sleep(2000 * (i + 1));
+    }
+  }
+  throw ultimo;
+}
+
 /**
  * Conecta e espera o QR. Sessão antiga (disconnect sem logout) não gera QR —
  * nesse caso encerra a sessão e conecta de novo.
@@ -319,13 +354,19 @@ async function conectarEObterQr(token, extra = {}) {
 
   const esperarQr = async (tentativas) => {
     for (let i = 0; i < tentativas; i++) {
-      await sleep(i === 0 ? 700 : 1000);
+      await sleep(i === 0 ? 700 : 1200);
       try {
         status = await statusComQr(token, extra);
         ultimoErro = status.qr_erro || null;
         if (status.loggedIn || status.qrcode) return status;
+        if (ehErroInfraWuzapi(status.qr_erro)) {
+          await sleep(1500);
+        }
       } catch (err) {
         ultimoErro = err.message;
+        if (ehErroInfraWuzapi(err.message) || err.infraWuzapi) {
+          await sleep(1500);
+        }
       }
     }
     return status;
@@ -334,24 +375,53 @@ async function conectarEObterQr(token, extra = {}) {
   try {
     status = await statusSessao(token, extra);
     if (status.loggedIn) return { ...status, qrcode: '' };
-  } catch {
+  } catch (err) {
+    if (ehErroInfraWuzapi(err.message) || err.infraWuzapi) {
+      return {
+        ...normalizarStatus({}, extra),
+        qrcode: '',
+        infra_wuzapi: true,
+        qr_erro: mensagemInfraWuzapi(),
+      };
+    }
     const extraSessao = await telefoneDaSessaoWuzapi(token);
     if (extraSessao.loggedIn || extraSessao.phone) {
       return statusAPartirDoAdmin(extraSessao, extra);
     }
   }
 
-  await conectarSessao(token);
+  try {
+    await conectarSessaoComRetry(token);
+  } catch (err) {
+    if (ehErroInfraWuzapi(err.message) || err.infraWuzapi) {
+      return {
+        ...normalizarStatus({}, extra),
+        qrcode: '',
+        infra_wuzapi: true,
+        qr_erro: mensagemInfraWuzapi(),
+      };
+    }
+    throw err;
+  }
   status = await esperarQr(8);
   if (status?.loggedIn || status?.qrcode) return status;
 
-  // Não faz logout se a sessão ainda parece viva — isso derrubava o chip
-  if (status?.connected || status?.loggedIn) {
-    return status;
-  }
   const extraSessao = await telefoneDaSessaoWuzapi(token);
   if (extraSessao.loggedIn || extraSessao.phone) {
     return statusAPartirDoAdmin(extraSessao, extra);
+  }
+
+  // WuzAPI costuma marcar connected=true enquanto gera o QR. Se o banco
+  // interno caiu, NÃO devolver "connected" — a tela pintava Aguardando QR.
+  if (ehErroInfraWuzapi(ultimoErro) || ehErroInfraWuzapi(status?.qr_erro)) {
+    return {
+      ...(status || normalizarStatus({}, extra)),
+      connected: false,
+      loggedIn: false,
+      qrcode: '',
+      infra_wuzapi: true,
+      qr_erro: mensagemInfraWuzapi(),
+    };
   }
 
   try {
@@ -360,15 +430,30 @@ async function conectarEObterQr(token, extra = {}) {
     // sessão pode já estar morta
   }
   await sleep(400);
-  await conectarSessao(token);
+  try {
+    await conectarSessaoComRetry(token);
+  } catch (err) {
+    if (ehErroInfraWuzapi(err.message) || err.infraWuzapi) {
+      return {
+        ...normalizarStatus({}, extra),
+        qrcode: '',
+        infra_wuzapi: true,
+        qr_erro: mensagemInfraWuzapi(),
+      };
+    }
+    throw err;
+  }
   status = await esperarQr(8);
   if (status?.loggedIn || status?.qrcode) return status;
 
   return {
     ...(status || normalizarStatus({}, extra)),
     qrcode: '',
-    qr_erro: ultimoErro || status?.qr_erro
-      || 'WuzAPI não devolveu o QR. Confira se o serviço está no ar e tente de novo.',
+    infra_wuzapi: ehErroInfraWuzapi(ultimoErro || status?.qr_erro),
+    qr_erro: ehErroInfraWuzapi(ultimoErro || status?.qr_erro)
+      ? mensagemInfraWuzapi()
+      : (ultimoErro || status?.qr_erro
+        || 'WuzAPI não devolveu o QR. Confira se o serviço está no ar e tente de novo.'),
   };
 }
 
@@ -847,38 +932,63 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
           });
         }
       }
-      res.json({ configurado: true, ...status, ...extra, qrcode: querQr ? status.qrcode : '' });
+      if (!querQr && status.connected && !status.loggedIn) {
+        try {
+          await buscarQr(token);
+        } catch (qrErr) {
+          if (qrErr.infraWuzapi || ehErroInfraWuzapi(qrErr.message)) {
+            status.infra_wuzapi = true;
+            status.qr_erro = mensagemInfraWuzapi();
+          }
+        }
+      }
+      const infra = Boolean(status.infra_wuzapi) || ehErroInfraWuzapi(status.qr_erro);
+      res.json({
+        configurado: true,
+        ...status,
+        ...extra,
+        qrcode: querQr && !infra ? status.qrcode : '',
+        instavel: Boolean(status.instavel || infra),
+        infra_wuzapi: infra,
+        mensagem: infra ? mensagemInfraWuzapi() : status.mensagem,
+        connected: infra ? false : status.connected,
+        loggedIn: infra ? false : status.loggedIn,
+      });
     } catch (err) {
       try {
-        const extraSessao = await telefoneDaSessaoWuzapi(token);
-        if (extraSessao.loggedIn || extraSessao.phone) {
-          const status = statusAPartirDoAdmin(extraSessao, extra);
-          if (status.phone) {
-            const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
-            if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
-              return res.json({
-                ...extra,
-                configurado: true,
-                connected: false,
-                loggedIn: false,
-                phone: '',
-                qrcode: '',
-                sessao_alheia: true,
-                mensagem: `Esse chip pertence a ${outro.nome}. Clique em Conectar chip e escaneie o QR DESTA unidade.`,
-              });
+        if (!(err.infraWuzapi || ehErroInfraWuzapi(err.message))) {
+          const extraSessao = await telefoneDaSessaoWuzapi(token);
+          if (extraSessao.loggedIn || extraSessao.phone) {
+            const status = statusAPartirDoAdmin(extraSessao, extra);
+            if (status.phone) {
+              const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
+              if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
+                return res.json({
+                  ...extra,
+                  configurado: true,
+                  connected: false,
+                  loggedIn: false,
+                  phone: '',
+                  qrcode: '',
+                  sessao_alheia: true,
+                  mensagem: `Esse chip pertence a ${outro.nome}. Clique em Conectar chip e escaneie o QR DESTA unidade.`,
+                });
+              }
             }
+            return res.json({ configurado: true, ...status, ...extra, qrcode: '', loggedIn: true, connected: true });
           }
-          return res.json({ configurado: true, ...status, ...extra, qrcode: '', loggedIn: true, connected: true });
         }
       } catch {
         // mantém instavel abaixo
       }
+      const infra = err.infraWuzapi || ehErroInfraWuzapi(err.message);
       res.json({
         configurado: true,
         connected: false,
         loggedIn: false,
         instavel: true,
-        mensagem: err.message,
+        infra_wuzapi: Boolean(infra),
+        mensagem: infra ? mensagemInfraWuzapi() : err.message,
         ...extra,
       });
     }
@@ -913,7 +1023,18 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
             sessao_desta_filial: true,
           });
         }
-      } catch {
+      } catch (errJa) {
+        if (errJa.infraWuzapi || ehErroInfraWuzapi(errJa.message)) {
+          return res.json({
+            mensagem: mensagemInfraWuzapi(),
+            qrcode: '',
+            tem_qr: false,
+            infra_wuzapi: true,
+            qr_erro: mensagemInfraWuzapi(),
+            loggedIn: false,
+            connected: false,
+          });
+        }
         const extraSessao = await telefoneDaSessaoWuzapi(token);
         if (extraSessao.loggedIn || extraSessao.phone) {
           const ja = statusAPartirDoAdmin(extraSessao, extraFilial);
@@ -958,6 +1079,17 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
         nome: f.nome,
       });
     } catch (err) {
+      if (err.infraWuzapi || ehErroInfraWuzapi(err.message)) {
+        return res.json({
+          mensagem: mensagemInfraWuzapi(),
+          qrcode: '',
+          tem_qr: false,
+          infra_wuzapi: true,
+          qr_erro: mensagemInfraWuzapi(),
+          loggedIn: false,
+          connected: false,
+        });
+      }
       // Só gera token novo se o usuário WuzAPI desta unidade realmente não existir.
       // 401 com chip já pareado NÃO pode rotacionar token nem pedir outro QR.
       if (err.upstreamStatus === 401 || err.upstreamStatus === 403 || err.status === 502) {
@@ -965,6 +1097,21 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
         if (extraSessao.loggedIn || extraSessao.phone) {
           status = statusAPartirDoAdmin(extraSessao, extraFilial);
         } else {
+          try {
+            await wuzapiAdminFetch('/admin/users');
+          } catch (adminErr) {
+            if (adminErr.infraWuzapi || ehErroInfraWuzapi(adminErr.message) || adminErr.status === 503) {
+              return res.json({
+                mensagem: mensagemInfraWuzapi(),
+                qrcode: '',
+                tem_qr: false,
+                infra_wuzapi: true,
+                qr_erro: mensagemInfraWuzapi(),
+                loggedIn: false,
+                connected: false,
+              });
+            }
+          }
           const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
           f = await filialOuErro(req.params.id);
           token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
@@ -974,6 +1121,18 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       } else {
         throw err;
       }
+    }
+
+    if (status?.infra_wuzapi) {
+      return res.json({
+        mensagem: status.qr_erro || mensagemInfraWuzapi(),
+        qrcode: '',
+        tem_qr: false,
+        infra_wuzapi: true,
+        qr_erro: status.qr_erro || mensagemInfraWuzapi(),
+        loggedIn: false,
+        connected: false,
+      });
     }
 
     const webhook = await garantirWebhook(token, f.id);
@@ -1003,7 +1162,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       mensagem = `Chatbot “${f.nome}” já está conectado`;
     } else if (!status.qrcode) {
       mensagem = status.qr_erro
-        || 'Não foi possível gerar o QR. Confira o WuzAPI e clique em Conectar / QR de novo.';
+        || 'Não foi possível gerar o QR. Espere uns segundos e clique em Conectar chip de novo — os dados das filiais não foram apagados.';
     }
 
     res.json({
@@ -1013,6 +1172,17 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       tem_qr: Boolean(status.qrcode),
     });
   } catch (err) {
+    if (err.infraWuzapi || ehErroInfraWuzapi(err.message)) {
+      return res.json({
+        mensagem: mensagemInfraWuzapi(),
+        qrcode: '',
+        tem_qr: false,
+        infra_wuzapi: true,
+        qr_erro: mensagemInfraWuzapi(),
+        loggedIn: false,
+        connected: false,
+      });
+    }
     res.status(err.status || 500).json({ erro: err.message });
   }
 });
