@@ -288,8 +288,10 @@ function mensagemInfraWuzapi(origem, { parear = false } = {}) {
 /** Aceita data URL, base64 puro ou campos QRCode/qrcode em vários formatos da WuzAPI. */
 function extrairQr(payload) {
   const d = payload?.data && typeof payload.data === 'object' ? payload.data : {};
-  const raw = d.QRCode || d.qrcode || d.QrCode
-    || payload?.QRCode || payload?.qrcode || payload?.QrCode || '';
+  const nested = d.data && typeof d.data === 'object' ? d.data : {};
+  const raw = d.QRCode || d.qrcode || d.QrCode || d.qr
+    || nested.QRCode || nested.qrcode
+    || payload?.QRCode || payload?.qrcode || payload?.QrCode || payload?.qr || '';
   let qr = String(raw || '').trim();
   if (!qr || qr === 'null' || qr === 'undefined') return '';
   if (qr.startsWith('data:image')) return qr;
@@ -434,6 +436,63 @@ async function conectarSessaoComRetry(token, tentativas = 4) {
   throw ultimo;
 }
 
+const prepQrPorToken = new Map();
+const pareamentoAtivo = new Map();
+
+/** WuzAPI só gera QR com websocket conectado e loggedIn=false. Depois de logout o connect cai e precisa de pausa. */
+async function garantirSessaoParaQr(token) {
+  const key = tokenWuzapiUtil(token) || String(token || '');
+  const existente = prepQrPorToken.get(key);
+  if (existente) return existente;
+  const p = (async () => {
+    let n = null;
+    try {
+      n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 6_000 }));
+    } catch {
+      // sessão morta — connect abaixo
+    }
+    if (n?.loggedIn) {
+      return {
+        loggedIn: true,
+        connected: true,
+        qrcode: '',
+        phone: n.phone || '',
+        name: n.name || '',
+        jid: n.jid || '',
+      };
+    }
+    if (n?.qrcode) return { loggedIn: false, connected: true, qrcode: n.qrcode };
+    if (!n?.connected) {
+      try {
+        await conectarSessao(token, 12_000);
+      } catch (err) {
+        if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
+        console.warn('[whatsapp] connect para QR:', err.message);
+      }
+      await sleep(2500);
+    }
+    return { loggedIn: false, connected: true, qrcode: '' };
+  })().finally(() => {
+    if (prepQrPorToken.get(key) === p) prepQrPorToken.delete(key);
+  });
+  prepQrPorToken.set(key, p);
+  return p;
+}
+
+async function buscarQrComRetry(token, tentativas = 6) {
+  for (let i = 0; i < tentativas; i++) {
+    if (i > 0) await sleep(800);
+    try {
+      const qr = await buscarQr(token, 5_000);
+      if (qr) return qr;
+    } catch (err) {
+      if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
+      console.warn('[whatsapp] /session/qr:', err.message);
+    }
+  }
+  return '';
+}
+
 /**
  * Conecta e espera o QR.
  * - Chip já no cadastro: não faz logout sozinho.
@@ -506,34 +565,38 @@ async function conectarEObterQr(token, extra = {}) {
 
   if (parear) {
     try {
-      await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 4_000 });
+      await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 8_000 });
     } catch {
-      // sessão pode já estar morta
+      try {
+        await wuzapiFetch('/session/disconnect', { method: 'POST', token, timeoutMs: 4_000 });
+      } catch {
+        // sessão pode já estar morta
+      }
     }
     invalidarCacheAdminUsers();
-    await sleep(250);
+    await sleep(2500);
     try {
-      await conectarSessao(token, 8_000);
+      await conectarSessao(token, 10_000);
     } catch (err) {
+      if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
       ultimoErro = err.message;
     }
-    for (let i = 0; i < 3; i++) {
-      if (i > 0) await sleep(500);
-      try {
-        const qr = await buscarQr(token, 4_000);
-        if (qr) {
-          return {
-            ...normalizarStatus({}, extraLimpo),
-            connected: true,
-            loggedIn: false,
-            qrcode: qr,
-            infra_wuzapi: false,
-            qr_erro: null,
-          };
-        }
-      } catch (err) {
-        ultimoErro = err.message;
+    await sleep(2500);
+    try {
+      const qr = await buscarQrComRetry(token, 3);
+      if (qr) {
+        return {
+          ...normalizarStatus({}, extraLimpo),
+          connected: true,
+          loggedIn: false,
+          qrcode: qr,
+          infra_wuzapi: false,
+          qr_erro: null,
+        };
       }
+    } catch (err) {
+      if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
+      ultimoErro = err.message;
     }
     return {
       ...normalizarStatus({}, extraLimpo),
@@ -542,7 +605,7 @@ async function conectarEObterQr(token, extra = {}) {
       loggedIn: false,
       infra_wuzapi: false,
       qr_erro: null,
-      mensagem: 'QR a caminho. Se não aparecer, clique em Gerar QR de novo.',
+      mensagem: 'QR a caminho. Aguarde — a tela continua tentando sozinha.',
     };
   }
 
@@ -1009,8 +1072,40 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     }
     if (pareando && token) {
       if (querQr) {
+        const emPareamento = pareamentoAtivo.has(Number(f.id));
+        if (!emPareamento) {
+          try {
+            const prep = await garantirSessaoParaQr(token);
+            if (prep?.qrcode) {
+              return res.json(comEstado({
+                configurado: true,
+                loggedIn: false,
+                connected: true,
+                qrcode: prep.qrcode,
+                ...extra,
+                chip_salvo: '',
+              }));
+            }
+            if (prep?.loggedIn) {
+              return res.json(comEstado({
+                configurado: true,
+                loggedIn: true,
+                connected: true,
+                phone: prep.phone || '',
+                name: prep.name || '',
+                jid: prep.jid || '',
+                qrcode: '',
+                ...extra,
+              }));
+            }
+          } catch (err) {
+            if (err.upstreamStatus !== 401 && err.upstreamStatus !== 403) {
+              console.warn('[whatsapp] prep QR parear:', err.message);
+            }
+          }
+        }
         try {
-          const qr = await buscarQr(token, 5_000);
+          const qr = await buscarQr(token, 8_000);
           if (qr) {
             return res.json(comEstado({
               configurado: true,
@@ -1024,24 +1119,6 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         } catch {
           // poll continua tentando
         }
-        try {
-          const data = await wuzapiFetch('/session/status', { token, timeoutMs: 5_000 });
-          const n = normalizarStatus(data, extra);
-          if (n.loggedIn) {
-            return res.json(comEstado({
-              configurado: true,
-              loggedIn: true,
-              connected: true,
-              phone: n.phone || '',
-              name: n.name || '',
-              jid: n.jid || '',
-              qrcode: '',
-              ...extra,
-            }));
-          }
-        } catch {
-          // ainda sem QR nem sessão lida
-        }
       }
       return res.json(comEstado({
         configurado: true,
@@ -1050,7 +1127,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         qrcode: '',
         ...extra,
         chip_salvo: '',
-        mensagem: 'Gerando QR… se não aparecer, clique em Gerar QR de novo.',
+        mensagem: 'Gerando QR… pode levar até 30 segundos.',
       }));
     }
     if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
@@ -1192,6 +1269,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     const chipFilial = String(f.whatsapp || '').replace(/\D/g, '');
     parear = chipFilial.length < 10 || forcarQrBody;
     const extraFilial = { filial_id: f.id, nome: f.nome };
+    if (parear) pareamentoAtivo.set(Number(f.id), Date.now());
 
     const viva = parear ? null : await reconectarSessaoVivaFilial(f);
     if (viva?.loggedIn && !parear) {
@@ -1371,7 +1449,11 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
           f = await filialOuErro(req.params.id);
           token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
           if (!token) throw err;
-          status = await conectarEObterQr(token, extraFilial);
+          status = await conectarEObterQr(token, {
+            ...extraFilial,
+            parear,
+            forcar_qr: parear,
+          });
         }
       } else {
         throw err;
@@ -1429,8 +1511,8 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     if (status.loggedIn && !parear) {
       mensagem = `Chatbot “${f.nome}” já está conectado`;
     } else if (!status.qrcode) {
-      mensagem = status.qr_erro
-        || 'O QR ainda não chegou. Clique em “Gerar QR de novo”.';
+      mensagem = status.mensagem
+        || 'Gerando QR… pode levar até 30 segundos.';
     }
 
     invalidarCacheAdminUsers();
@@ -1453,6 +1535,8 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       }));
     }
     res.status(err.status || 500).json({ erro: err.message });
+  } finally {
+    if (parear && req.params?.id) pareamentoAtivo.delete(Number(req.params.id));
   }
 });
 
