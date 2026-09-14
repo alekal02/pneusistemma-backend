@@ -565,6 +565,20 @@ async function conectarEObterQr(token, extra = {}) {
 
   if (parear) {
     try {
+      const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 6_000 }), extraLimpo);
+      const extraSessao = await telefoneDaSessaoWuzapi(token);
+      const phone = extraSessao.phone || n.phone || '';
+      if ((n.loggedIn || extraSessao.loggedIn) && String(phone).replace(/\D/g, '').length >= 10) {
+        return {
+          ...statusAPartirDoAdmin({ ...extraSessao, loggedIn: true, phone, jid: extraSessao.jid || n.jid, name: extraSessao.name || n.name }, extraLimpo),
+          qrcode: '',
+          mensagem: 'Chip ainda está conectado no WhatsApp. Não precisa escanear de novo.',
+        };
+      }
+    } catch {
+      // segue para gerar QR
+    }
+    try {
       await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 8_000 });
     } catch {
       try {
@@ -597,6 +611,22 @@ async function conectarEObterQr(token, extra = {}) {
     } catch (err) {
       if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
       ultimoErro = err.message;
+    }
+    try {
+      const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 6_000 }), extraLimpo);
+      if (n.loggedIn) {
+        const extraSessao = await telefoneDaSessaoWuzapi(token);
+        const phone = extraSessao.phone || n.phone || '';
+        if (String(phone).replace(/\D/g, '').length >= 10) {
+          return {
+            ...statusAPartirDoAdmin({ ...extraSessao, loggedIn: true, phone, jid: extraSessao.jid || n.jid, name: extraSessao.name || n.name }, extraLimpo),
+            qrcode: '',
+            mensagem: 'Chip ainda está conectado no WhatsApp. Não precisa escanear de novo.',
+          };
+        }
+      }
+    } catch {
+      // continua aguardando QR
     }
     return {
       ...normalizarStatus({}, extraLimpo),
@@ -1477,16 +1507,6 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       : await garantirWebhook(token, f.id);
     if (parear) garantirWebhook(token, f.id).catch(() => {});
 
-    if (parear && status?.loggedIn && !status.qrcode) {
-      status = {
-        ...status,
-        loggedIn: false,
-        phone: '',
-        qrcode: '',
-        qr_erro: 'Gerando o QR do novo chip. Se não aparecer, clique em Gerar QR de novo.',
-      };
-    }
-
     if (status?.loggedIn && status.phone) {
       const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
       if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
@@ -1508,8 +1528,8 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     }
 
     let mensagem = `Conexão do chatbot “${f.nome}” iniciada — escaneie o QR`;
-    if (status.loggedIn && !parear) {
-      mensagem = `Chatbot “${f.nome}” já está conectado`;
+    if (status.loggedIn) {
+      mensagem = status.mensagem || `Chatbot “${f.nome}” já está conectado`;
     } else if (!status.qrcode) {
       mensagem = status.mensagem
         || 'Gerando QR… pode levar até 30 segundos.';
