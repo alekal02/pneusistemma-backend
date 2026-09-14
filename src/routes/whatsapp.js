@@ -566,8 +566,12 @@ async function conectarEObterQr(token, extra = {}) {
   if (parear) {
     try {
       const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 6_000 }), extraLimpo);
-      const extraSessao = await telefoneDaSessaoWuzapi(token);
-      const phone = extraSessao.phone || n.phone || '';
+      let phone = n.phone || '';
+      let extraSessao = { phone, jid: n.jid, name: n.name, loggedIn: n.loggedIn };
+      if (n.loggedIn && String(phone).replace(/\D/g, '').length < 10) {
+        extraSessao = await telefoneDaSessaoWuzapi(token);
+        phone = extraSessao.phone || phone;
+      }
       if ((n.loggedIn || extraSessao.loggedIn) && String(phone).replace(/\D/g, '').length >= 10) {
         return {
           ...statusAPartirDoAdmin({ ...extraSessao, loggedIn: true, phone, jid: extraSessao.jid || n.jid, name: extraSessao.name || n.name }, extraLimpo),
@@ -1102,40 +1106,35 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     }
     if (pareando && token) {
       if (querQr) {
-        const emPareamento = pareamentoAtivo.has(Number(f.id));
-        if (!emPareamento) {
-          try {
-            const prep = await garantirSessaoParaQr(token);
-            if (prep?.qrcode) {
-              return res.json(comEstado({
-                configurado: true,
-                loggedIn: false,
-                connected: true,
-                qrcode: prep.qrcode,
-                ...extra,
-                chip_salvo: '',
-              }));
-            }
-            if (prep?.loggedIn) {
-              return res.json(comEstado({
-                configurado: true,
-                loggedIn: true,
-                connected: true,
-                phone: prep.phone || '',
-                name: prep.name || '',
-                jid: prep.jid || '',
-                qrcode: '',
-                ...extra,
-              }));
-            }
-          } catch (err) {
-            if (err.upstreamStatus !== 401 && err.upstreamStatus !== 403) {
-              console.warn('[whatsapp] prep QR parear:', err.message);
-            }
+        try {
+          const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 4_000 }), extra);
+          if (n.loggedIn) {
+            return res.json(comEstado({
+              configurado: true,
+              loggedIn: true,
+              connected: true,
+              phone: n.phone || '',
+              name: n.name || '',
+              jid: n.jid || '',
+              qrcode: '',
+              ...extra,
+            }));
           }
+          if (n.qrcode) {
+            return res.json(comEstado({
+              configurado: true,
+              loggedIn: false,
+              connected: true,
+              qrcode: n.qrcode,
+              ...extra,
+              chip_salvo: '',
+            }));
+          }
+        } catch {
+          // poll continua
         }
         try {
-          const qr = await buscarQr(token, 8_000);
+          const qr = await buscarQr(token, 4_000);
           if (qr) {
             return res.json(comEstado({
               configurado: true,
