@@ -303,8 +303,116 @@ function extrairQr(payload) {
 }
 
 async function buscarQr(token, timeoutMs = 8_000) {
-  const qrData = await wuzapiFetch('/session/qr', { token, timeoutMs });
-  return extrairQr(qrData);
+  try {
+    const qrData = await wuzapiFetch('/session/qr', { token, timeoutMs });
+    return extrairQr(qrData);
+  } catch (err) {
+    const msg = String(err.message || '');
+    if (/not connected|não conect|nao conect/i.test(msg) || err.upstreamStatus === 500) {
+      return '';
+    }
+    throw err;
+  }
+}
+
+const qrCachePorToken = new Map();
+const buscaQrFundo = new Map();
+
+function chaveTokenWuz(token) {
+  return tokenWuzapiUtil(token) || String(token || '');
+}
+
+function qrDoCache(token) {
+  const c = qrCachePorToken.get(chaveTokenWuz(token));
+  if (!c?.qrcode) return '';
+  if (Date.now() - c.at > 28_000) return '';
+  return c.qrcode;
+}
+
+function guardarQr(token, qr) {
+  if (!qr) return '';
+  qrCachePorToken.set(chaveTokenWuz(token), { qrcode: qr, at: Date.now() });
+  return qr;
+}
+
+function limparQrFilial(filialId, token) {
+  if (filialId != null) pareamentoAtivo.delete(Number(filialId));
+  if (token) {
+    qrCachePorToken.delete(chaveTokenWuz(token));
+    buscaQrFundo.delete(chaveTokenWuz(token));
+  }
+}
+
+/** WuzAPI só gera QR com websocket Connected e LoggedIn=false. Immediate:false espera ~10s. */
+async function obterQrComSessaoPronta(token, { ciclos = 3 } = {}) {
+  const cached = qrDoCache(token);
+  if (cached) return cached;
+  for (let ciclo = 0; ciclo < ciclos; ciclo++) {
+    try {
+      await conectarSessao(token, 18_000, { immediate: false });
+    } catch (err) {
+      if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
+      console.warn('[whatsapp] connect QR (false):', err.message);
+      try {
+        await conectarSessao(token, 8_000, { immediate: true });
+      } catch (err2) {
+        if (err2.upstreamStatus === 401 || err2.upstreamStatus === 403) throw err2;
+        console.warn('[whatsapp] connect QR (true):', err2.message);
+      }
+    }
+    for (let i = 0; i < 4; i++) {
+      await sleep(i === 0 ? 1200 : 1800);
+      try {
+        const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 5_000 }));
+        if (n.qrcode) return guardarQr(token, n.qrcode);
+        if (n.loggedIn) return '';
+        if (!n.connected) continue;
+      } catch {
+        continue;
+      }
+      const qr = await buscarQr(token, 6_000);
+      if (qr) return guardarQr(token, qr);
+    }
+  }
+  return qrDoCache(token) || '';
+}
+
+async function esperarQrCache(token, ms = 18_000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const qr = qrDoCache(token);
+    if (qr) return qr;
+    await sleep(700);
+  }
+  return qrDoCache(token) || '';
+}
+
+/** Continua tentando o QR depois que o POST do Render já respondeu. */
+function iniciarBuscaQrFundo(token, filialId) {
+  const key = chaveTokenWuz(token);
+  if (!key) return;
+  pareamentoAtivo.set(Number(filialId), Date.now());
+  if (buscaQrFundo.has(key)) return buscaQrFundo.get(key);
+  const p = (async () => {
+    const limite = Date.now() + 90_000;
+    try {
+      while (Date.now() < limite && pareamentoAtivo.has(Number(filialId))) {
+        const qr = await obterQrComSessaoPronta(token, { ciclos: 2 });
+        if (qr) {
+          guardarQr(token, qr);
+          await sleep(12_000);
+          continue;
+        }
+        await sleep(2500);
+      }
+    } catch (err) {
+      console.warn('[whatsapp] QR fundo:', err.message);
+    } finally {
+      if (buscaQrFundo.get(key) === p) buscaQrFundo.delete(key);
+    }
+  })();
+  buscaQrFundo.set(key, p);
+  return p;
 }
 
 async function statusSessao(token, extra = {}) {
@@ -405,13 +513,13 @@ async function telefoneDaSessaoWuzapi(token) {
   }
 }
 
-async function conectarSessao(token, timeoutMs = 20_000) {
+async function conectarSessao(token, timeoutMs = 20_000, { immediate = true } = {}) {
   try {
     return await wuzapiFetch('/session/connect', {
       method: 'POST',
       token,
       timeoutMs,
-      body: { Subscribe: ['Message'], Immediate: true },
+      body: { Subscribe: ['Message'], Immediate: immediate },
     });
   } catch (err) {
     const msg = String(err.message || '').toLowerCase();
@@ -452,22 +560,12 @@ async function garantirSessaoParaQr(token, { forcarQr = false } = {}) {
       // sessão morta — connect abaixo
     }
     if (n?.qrcode) return { loggedIn: false, connected: true, qrcode: n.qrcode };
-    const precisaConnect = forcarQr || !n?.connected || !n;
-    if (precisaConnect && !(n?.loggedIn && !forcarQr)) {
-      try {
-        await conectarSessao(token, 8_000);
-      } catch (err) {
-        if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
-        console.warn('[whatsapp] connect para QR:', err.message);
-      }
-      await sleep(2000);
-    }
     try {
-      const qr = await buscarQr(token, 5_000);
+      const qr = await obterQrComSessaoPronta(token, { ciclos: 1 });
       if (qr) return { loggedIn: false, connected: true, qrcode: qr };
     } catch (err) {
       if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
-      console.warn('[whatsapp] /session/qr:', err.message);
+      console.warn('[whatsapp] QR:', err.message);
     }
     if (n?.loggedIn && !forcarQr) {
       return {
@@ -572,15 +670,9 @@ async function conectarEObterQr(token, extra = {}) {
   }
 
   if (parear) {
+    iniciarBuscaQrFundo(token, extra.filial_id);
     try {
-      await conectarSessao(token, 8_000);
-    } catch (err) {
-      if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
-      ultimoErro = err.message;
-    }
-    await sleep(2000);
-    try {
-      const qr = await buscarQrComRetry(token, 4);
+      const qr = qrDoCache(token) || await esperarQrCache(token, 18_000);
       if (qr) {
         return {
           ...normalizarStatus({}, extraLimpo),
@@ -1081,13 +1173,26 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     if (pareando && token) {
       if (querQr) {
         try {
-          const prep = await garantirSessaoParaQr(token, { forcarQr: true });
-          if (prep?.qrcode) {
+          iniciarBuscaQrFundo(token, f.id);
+          const cached = qrDoCache(token);
+          if (cached) {
             return res.json(comEstado({
               configurado: true,
               loggedIn: false,
               connected: true,
-              qrcode: prep.qrcode,
+              qrcode: cached,
+              ...extra,
+              chip_salvo: '',
+            }));
+          }
+          const qr = await buscarQr(token, 5_000);
+          if (qr) {
+            guardarQr(token, qr);
+            return res.json(comEstado({
+              configurado: true,
+              loggedIn: false,
+              connected: true,
+              qrcode: qr,
               ...extra,
               chip_salvo: '',
             }));
@@ -1100,7 +1205,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         configurado: true,
         loggedIn: false,
         connected: true,
-        qrcode: '',
+        qrcode: qrDoCache(token) || '',
         ...extra,
         chip_salvo: '',
         mensagem: 'Gerando QR… pode levar até 20 segundos.',
@@ -1236,6 +1341,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
 
 router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
   let parear = Boolean(req.body?.forcar_qr);
+  let status = null;
   try {
     if (!assertFilialNoEscopo(req, req.params.id)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
@@ -1367,7 +1473,8 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       });
     }
 
-    let status;
+    if (parear) iniciarBuscaQrFundo(token, f.id);
+
     try {
       status = await conectarEObterQr(token, {
         filial_id: f.id,
@@ -1502,7 +1609,9 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     }
     res.status(err.status || 500).json({ erro: err.message });
   } finally {
-    if (parear && req.params?.id) pareamentoAtivo.delete(Number(req.params.id));
+    if (status?.loggedIn && req.params?.id) {
+      pareamentoAtivo.delete(Number(req.params.id));
+    }
   }
 });
 
@@ -1513,6 +1622,7 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
     }
     const f = await filialOuErro(req.params.id);
     const token = tokenWuzapiUtil(f.wuzapi_token);
+    limparQrFilial(f.id, token);
     let sessionEncerrada = false;
     let aviso = null;
 
