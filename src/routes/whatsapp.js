@@ -106,30 +106,25 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
 
   const url = `${config.wuzapiBaseUrl}${path}`;
   const payload = body ? JSON.stringify(body) : undefined;
-  const estilos = [
-    { token: t, Token: t },
-    { Authorization: t },
-    { Authorization: `Bearer ${t}` },
-  ];
+  // Só o header `token`. Enviar Token+token juntos vira valor duplicado e a WuzAPI responde 401.
   let res;
   let raw = '';
   let data = {};
   try {
-    for (let i = 0; i < estilos.length; i++) {
-      res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json', ...estilos[i] },
-        body: payload,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      raw = await res.text();
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        data = { raw };
-      }
-      if (res.ok) return data;
-      if ((res.status !== 401 && res.status !== 403) || i === estilos.length - 1) break;
+    res = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        token: t,
+      },
+      body: payload,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    raw = await res.text();
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = { raw };
     }
   } catch (e) {
     const cause = e?.cause?.code || e?.code || e?.name || '';
@@ -141,6 +136,8 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
     err.status = 503;
     throw err;
   }
+
+  if (res.ok) return data;
 
   const bruto = [data?.error, data?.erro, data?.details, data?.message, data?.Error, data?.raw]
     .map((p) => (typeof p === 'string' ? p : p ? JSON.stringify(p) : ''))
