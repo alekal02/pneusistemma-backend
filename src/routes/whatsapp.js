@@ -105,18 +105,32 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
   }
 
   const url = `${config.wuzapiBaseUrl}${path}`;
+  const payload = body ? JSON.stringify(body) : undefined;
+  const estilos = [
+    { token: t, Token: t },
+    { Authorization: t },
+    { Authorization: `Bearer ${t}` },
+  ];
   let res;
+  let raw = '';
+  let data = {};
   try {
-    res = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        token: t,
-        Token: t,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    for (let i = 0; i < estilos.length; i++) {
+      res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...estilos[i] },
+        body: payload,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      raw = await res.text();
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { raw };
+      }
+      if (res.ok) return data;
+      if ((res.status !== 401 && res.status !== 403) || i === estilos.length - 1) break;
+    }
   } catch (e) {
     const cause = e?.cause?.code || e?.code || e?.name || '';
     const err = new Error(
@@ -128,36 +142,24 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
     throw err;
   }
 
-  const raw = await res.text();
-  let data;
-  try {
-    data = raw ? JSON.parse(raw) : {};
-  } catch {
-    data = { raw };
+  const bruto = [data?.error, data?.erro, data?.details, data?.message, data?.Error, data?.raw]
+    .map((p) => (typeof p === 'string' ? p : p ? JSON.stringify(p) : ''))
+    .filter(Boolean)
+    .join(' ') || `WuzAPI ${res.status}`;
+  const err = new Error(bruto);
+  const upstream = res.status;
+  err.status = (upstream === 401 || upstream === 403) ? 502 : upstream;
+  err.upstreamStatus = upstream;
+  err.data = data;
+  if (ehErroInfraWuzapi(bruto)) {
+    err.status = 503;
+    err.infraWuzapi = true;
+    err.bancoInterno = ehErroBancoInternoWuzapi(bruto);
+    err.message = mensagemInfraWuzapi(bruto);
+  } else if (upstream === 401 || upstream === 403) {
+    err.message = `WuzAPI ${upstream}: ${bruto || 'unauthorized'}`;
   }
-
-  if (!res.ok) {
-    const bruto = [data?.error, data?.erro, data?.details, data?.message, data?.Error, data?.raw]
-      .map((p) => (typeof p === 'string' ? p : p ? JSON.stringify(p) : ''))
-      .filter(Boolean)
-      .join(' ') || `WuzAPI ${res.status}`;
-    const err = new Error(bruto);
-    const upstream = res.status;
-    err.status = (upstream === 401 || upstream === 403) ? 502 : upstream;
-    err.upstreamStatus = upstream;
-    err.data = data;
-    if (ehErroInfraWuzapi(bruto)) {
-      err.status = 503;
-      err.infraWuzapi = true;
-      err.bancoInterno = ehErroBancoInternoWuzapi(bruto);
-      err.message = mensagemInfraWuzapi(bruto);
-    } else if (upstream === 401 || upstream === 403) {
-      err.message = 'Token desta unidade não bate com a sessão do WhatsApp. Clique em Conectar chip — não gere token novo.';
-    }
-    throw err;
-  }
-
-  return data;
+  throw err;
 }
 
 /** Extrai número pessoal do JID WhatsApp (ignora device :xx e JID de grupo). */
@@ -1200,6 +1202,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         }
         let wuzErro = null;
         let wuzConnected = false;
+        let reparoInfo = '';
         try {
           const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 5_000 }));
           wuzConnected = Boolean(n.connected);
@@ -1234,6 +1237,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
             try {
               const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
               token = reparo.token || token;
+              reparoInfo = `${reparo.criado ? 'criado' : 'reuso'} ${reparo.nome_wuzapi || ''}`.trim();
               iniciarBuscaQrFundo(token, f.id);
             } catch (errRep) {
               wuzErro = errRep.message || wuzErro;
@@ -1264,7 +1268,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
           qrcode: '',
           ...extra,
           chip_salvo: '',
-          qr_erro: wuzErro,
+          qr_erro: [wuzErro, reparoInfo].filter(Boolean).join(' — ') || null,
           mensagem: wuzErro || 'Gerando QR… pode levar até 20 segundos.',
         }));
       }
