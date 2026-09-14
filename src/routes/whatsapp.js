@@ -1235,7 +1235,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
           console.warn('[whatsapp] QR parear status:', err.message);
           if (err.upstreamStatus === 401 || err.upstreamStatus === 403 || err.status === 502) {
             try {
-              const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+              const reparo = await garantirTokenExclusivoFilial(f);
               token = reparo.token || token;
               reparoInfo = `${reparo.criado ? 'criado' : 'reuso'} ${reparo.nome_wuzapi || ''}`.trim();
               iniciarBuscaQrFundo(token, f.id);
@@ -1505,7 +1505,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
           )
         );
         if (parear || !sessaoDestaUnidade) {
-          await garantirTokenExclusivoFilial(f, { forcarNovo: parear });
+          await garantirTokenExclusivoFilial(f);
           f = await filialOuErro(req.params.id);
           token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
         }
@@ -1545,7 +1545,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     }
 
     if (parear) {
-      const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+      const reparo = await garantirTokenExclusivoFilial(f);
       f = await filialOuErro(req.params.id);
       token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
       iniciarBuscaQrFundo(token, f.id);
@@ -1604,7 +1604,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
               chip_salvo: chipSalvo,
             }));
           }
-          const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: parear });
+          const reparo = await garantirTokenExclusivoFilial(f);
           f = await filialOuErro(req.params.id);
           token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
           if (!token) throw err;
