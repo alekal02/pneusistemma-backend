@@ -103,6 +103,7 @@ function classificarEstadoConexao(st = {}) {
 
 ok(classificarEstadoConexao({ loggedIn: true, phone: '5531' }) === 'conectado', 'estado: já conectado');
 ok(classificarEstadoConexao({ loggedIn: true, infra_wuzapi: true }) === 'conectado', 'estado: infra não derruba quem já está logado');
+ok(classificarEstadoConexao({ loggedIn: true, chip_presumido: true }) === 'conectado', 'estado: chip cadastrado continua conectado se o WuzAPI oscilar');
 ok(classificarEstadoConexao({ infra_wuzapi: true, loggedIn: false }) === 'servidor_indisponivel', 'estado: servidor lento sem logout');
 ok(classificarEstadoConexao({ connected: true, loggedIn: false, qrcode: 'data:image/png;base64,xx' }) === 'aguardando_qr', 'estado: QR sem desconectar outras filiais');
 

@@ -215,6 +215,32 @@ function comEstado(st = {}) {
   return payload;
 }
 
+function mensagemChipCadastrado(chip) {
+  const n = String(chip || '').replace(/\D/g, '');
+  return n
+    ? `Chip ${n} desta unidade continua cadastrado. Não precisa escanear de novo.`
+    : 'O chip desta unidade continua cadastrado. Não precisa escanear de novo.';
+}
+
+/** Chip já salvo no cadastro: trata como conectado quando o WuzAPI oscila. */
+function respostaChipCadastrado(extra, extras = {}) {
+  const chip = String(extra?.chip_salvo || extra?.whatsapp || extras.phone || '').replace(/\D/g, '');
+  if (chip.length < 10) return null;
+  return comEstado({
+    configurado: true,
+    ...extra,
+    instavel: true,
+    ...extras,
+    phone: extras.phone || chip,
+    loggedIn: true,
+    connected: true,
+    qrcode: '',
+    chip_presumido: true,
+    infra_wuzapi: false,
+    mensagem: extras.mensagem || mensagemChipCadastrado(chip),
+  });
+}
+
 let cacheAdminUsers = { at: 0, lista: null };
 const ADMIN_USERS_TTL_MS = 10_000;
 
@@ -251,9 +277,9 @@ function mensagemInfraWuzapi(origem) {
   const msg = typeof origem === 'string' ? origem : (origem?.message || origem?.qr_erro || '');
   const banco = origem?.bancoInterno || ehErroBancoInternoWuzapi(msg);
   if (banco) {
-    return 'O servidor do WhatsApp está com problema interno. O chip desta unidade não foi apagado. Espere um minuto e clique em Atualizar status — não gere outro token.';
+    return 'O servidor do WhatsApp está lento agora. O chip desta unidade não foi desconectado.';
   }
-  return 'Não foi possível falar com o servidor do WhatsApp agora. O chip não foi desconectado. Espere um pouco e tente de novo.';
+  return 'Não foi possível confirmar o WhatsApp agora. O chip não foi desconectado.';
 }
 
 /** Aceita data URL, base64 puro ou campos QRCode/qrcode em vários formatos da WuzAPI. */
@@ -994,16 +1020,18 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       }
       const infra = Boolean(status.infra_wuzapi) || ehErroInfraWuzapi(status.qr_erro);
       const chipSalvo = String(extra.chip_salvo || '').replace(/\D/g, '');
-      const manterLogin = Boolean(status.loggedIn) || (infra && chipSalvo.length >= 10);
+      if (infra && !status.loggedIn && chipSalvo.length >= 10) {
+        return res.json(respostaChipCadastrado(extra, { phone: status.phone || chipSalvo }));
+      }
       res.json(comEstado({
         configurado: true,
         ...status,
         ...extra,
         qrcode: querQr && !infra ? status.qrcode : '',
-        instavel: Boolean(status.instavel || (infra && !manterLogin)),
+        instavel: Boolean(status.instavel || infra),
         infra_wuzapi: infra && !status.loggedIn,
         mensagem: infra && !status.loggedIn ? mensagemInfraWuzapi(status.qr_erro) : status.mensagem,
-        connected: status.loggedIn ? true : (infra ? Boolean(status.connected) : status.connected),
+        connected: status.loggedIn ? true : status.connected,
         loggedIn: Boolean(status.loggedIn),
       }));
     } catch (err) {
@@ -1042,6 +1070,9 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       }
       const infra = err.infraWuzapi || ehErroInfraWuzapi(err.message);
       const chipSalvo = String(extra.chip_salvo || '').replace(/\D/g, '');
+      if (chipSalvo.length >= 10) {
+        return res.json(respostaChipCadastrado(extra));
+      }
       res.json(comEstado({
         configurado: true,
         connected: false,
@@ -1050,9 +1081,7 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         infra_wuzapi: Boolean(infra),
         mensagem: infra
           ? mensagemInfraWuzapi(err)
-          : (chipSalvo.length >= 10
-            ? 'Confirmando o chip salvo nesta unidade…'
-            : err.message),
+          : err.message,
         ...extra,
       }));
     }
