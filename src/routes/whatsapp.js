@@ -565,24 +565,6 @@ async function conectarEObterQr(token, extra = {}) {
 
   if (parear) {
     try {
-      const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 6_000 }), extraLimpo);
-      let phone = n.phone || '';
-      let extraSessao = { phone, jid: n.jid, name: n.name, loggedIn: n.loggedIn };
-      if (n.loggedIn && String(phone).replace(/\D/g, '').length < 10) {
-        extraSessao = await telefoneDaSessaoWuzapi(token);
-        phone = extraSessao.phone || phone;
-      }
-      if ((n.loggedIn || extraSessao.loggedIn) && String(phone).replace(/\D/g, '').length >= 10) {
-        return {
-          ...statusAPartirDoAdmin({ ...extraSessao, loggedIn: true, phone, jid: extraSessao.jid || n.jid, name: extraSessao.name || n.name }, extraLimpo),
-          qrcode: '',
-          mensagem: 'Chip ainda está conectado no WhatsApp. Não precisa escanear de novo.',
-        };
-      }
-    } catch {
-      // segue para gerar QR
-    }
-    try {
       await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 8_000 });
     } catch {
       try {
@@ -615,22 +597,6 @@ async function conectarEObterQr(token, extra = {}) {
     } catch (err) {
       if (err.upstreamStatus === 401 || err.upstreamStatus === 403) throw err;
       ultimoErro = err.message;
-    }
-    try {
-      const n = normalizarStatus(await wuzapiFetch('/session/status', { token, timeoutMs: 6_000 }), extraLimpo);
-      if (n.loggedIn) {
-        const extraSessao = await telefoneDaSessaoWuzapi(token);
-        const phone = extraSessao.phone || n.phone || '';
-        if (String(phone).replace(/\D/g, '').length >= 10) {
-          return {
-            ...statusAPartirDoAdmin({ ...extraSessao, loggedIn: true, phone, jid: extraSessao.jid || n.jid, name: extraSessao.name || n.name }, extraLimpo),
-            qrcode: '',
-            mensagem: 'Chip ainda está conectado no WhatsApp. Não precisa escanear de novo.',
-          };
-        }
-      }
-    } catch {
-      // continua aguardando QR
     }
     return {
       ...normalizarStatus({}, extraLimpo),
@@ -947,17 +913,27 @@ router.get('/filial/:id/grupos', requireChatbotAcesso, async (req, res) => {
     }
     let data;
     try {
-      data = await wuzapiFetch('/group/list', { token });
+      data = await wuzapiFetch('/group/list', { token, timeoutMs: 10_000 });
     } catch (err) {
       if (err.upstreamStatus === 401 || err.upstreamStatus === 403) {
         const viva = await reconectarSessaoVivaFilial(f);
         if (viva?.token) {
-          data = await wuzapiFetch('/group/list', { token: viva.token });
+          data = await wuzapiFetch('/group/list', { token: viva.token, timeoutMs: 10_000 });
         } else {
-          throw err;
+          return res.json({
+            grupos: [],
+            selecionado: limparCampoTexto(f.whatsapp_grupo),
+            precisa_qr: true,
+            erro: 'Sessão do WhatsApp não está ativa. Clique em Desconectar sessão e gere o QR de novo.',
+          });
         }
       } else {
-        throw err;
+        return res.json({
+          grupos: [],
+          selecionado: limparCampoTexto(f.whatsapp_grupo),
+          precisa_qr: true,
+          erro: err.message || 'Não foi possível listar os grupos. A sessão do WhatsApp não está no ar.',
+        });
       }
     }
     const raw = data?.data?.Groups || data?.data?.groups || data?.Groups || data?.groups || [];
@@ -971,9 +947,10 @@ router.get('/filial/:id/grupos', requireChatbotAcesso, async (req, res) => {
       selecionado: limparCampoTexto(f.whatsapp_grupo),
     });
   } catch (err) {
-    res.status(err.status || 500).json({
-      erro: err.message,
+    res.json({
       grupos: [],
+      precisa_qr: true,
+      erro: err.message || 'Não foi possível listar os grupos. Desconecte a sessão e gere o QR de novo.',
     });
   }
 });
@@ -1571,17 +1548,16 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
 
     if (token) {
       try {
-        await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 15_000 });
+        await wuzapiFetch('/session/logout', { method: 'POST', token, timeoutMs: 12_000 });
         sessionEncerrada = true;
       } catch (errLogout) {
-        try {
-          await wuzapiFetch('/session/disconnect', { method: 'POST', token });
-          sessionEncerrada = true;
-          aviso = 'Sessão desconectada; se o QR antigo voltar, clique em Conectar / QR de novo.';
-        } catch (errDisc) {
-          aviso = errLogout.message || errDisc.message
-            || 'WuzAPI não respondeu; número, grupo e alertas foram limpos mesmo assim.';
-        }
+        aviso = errLogout.message;
+      }
+      try {
+        await wuzapiFetch('/session/disconnect', { method: 'POST', token, timeoutMs: 8_000 });
+        sessionEncerrada = true;
+      } catch {
+        // logout já encerrou ou a sessão já estava morta
       }
     } else {
       aviso = 'Sem token próprio — limpou só número, grupo e alertas.';
@@ -1599,10 +1575,11 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
 
     invalidarCacheAdminUsers();
     res.json({
-      mensagem: `Chatbot de ${f.nome} desconectado — número, grupo e alertas apagados. Conecte o próximo chip pelo QR.`,
+      mensagem: `Sessão de ${f.nome} encerrada no WhatsApp. Número e grupo apagados. Escaneie o QR com o chip desta unidade.`,
       session_desconectada: sessionEncerrada,
       aviso,
       limpos: ['whatsapp', 'whatsapp_grupo', 'whatsapp_alerta'],
+      precisa_qr: true,
     });
   } catch (err) {
     res.status(err.status || 500).json({ erro: err.message });
