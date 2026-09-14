@@ -207,24 +207,48 @@ async function buscarQr(token) {
 }
 
 async function statusSessao(token, extra = {}) {
-  const data = await wuzapiFetch('/session/status', { token });
-  const status = normalizarStatus(data, extra);
-  if (!status.phone) {
+  let status = null;
+  try {
+    const data = await wuzapiFetch('/session/status', { token });
+    status = normalizarStatus(data, extra);
+  } catch (err) {
+    // /session/status 401 é comum com sessão já pareada — o admin/users é a fonte fiel.
+    const extraSessao = await telefoneDaSessaoWuzapi(token);
+    if (extraSessao.loggedIn || extraSessao.phone) {
+      return statusAPartirDoAdmin(extraSessao, extra);
+    }
+    throw err;
+  }
+
+  if (!status.loggedIn || !status.phone) {
     const extraSessao = await telefoneDaSessaoWuzapi(token);
     if (extraSessao.phone) status.phone = extraSessao.phone;
     if (extraSessao.jid && !status.jid) status.jid = extraSessao.jid;
     if (extraSessao.name && !status.name) status.name = extraSessao.name;
-    if (extraSessao.loggedIn) {
+    if (extraSessao.loggedIn || extraSessao.phone) {
       status.loggedIn = true;
       status.connected = true;
     }
   }
-  // WuzAPI às vezes devolve connected sem loggedIn por um instante
   if (!status.loggedIn && status.connected && status.phone) {
     status.loggedIn = true;
   }
   if (status.loggedIn) status.qrcode = '';
   return status;
+}
+
+function statusAPartirDoAdmin(extraSessao, extra = {}) {
+  return normalizarStatus({
+    data: {
+      loggedIn: true,
+      connected: true,
+      LoggedIn: true,
+      Connected: true,
+      jid: extraSessao.jid,
+      phone: extraSessao.phone,
+      name: extraSessao.name,
+    },
+  }, extra);
 }
 
 async function statusComQr(token, extra = {}) {
@@ -249,12 +273,16 @@ async function telefoneDaSessaoWuzapi(token) {
     const t = tokenWuzapiUtil(token);
     if (!t) return { phone: '', jid: null, name: null };
     // Só o usuário deste token — nunca outro chip logado
-    const u = users.find((x) => tokenWuzapiUtil(x.token) === t);
+    const u = users.find((x) => tokenWuzapiUtil(x.token || x.Token) === t);
     if (!u) return { phone: '', jid: null, name: null };
     const jid = u.jid || u.JID || '';
-    const loggedIn = Boolean(u.loggedIn ?? u.LoggedIn);
+    const phone = telefoneFromJid(jid) || telefoneFromJid(u.phone || u.Phone);
+    const connected = Boolean(u.connected ?? u.Connected);
+    const loggedInFlag = Boolean(u.loggedIn ?? u.LoggedIn);
+    // JID pessoal = chip já leu o QR, mesmo se loggedIn vier atrasado
+    const loggedIn = loggedInFlag || Boolean(phone && (connected || jid));
     return {
-      phone: telefoneFromJid(jid) || telefoneFromJid(u.phone || u.Phone),
+      phone,
       jid: jid || null,
       name: u.name || u.Name || null,
       loggedIn,
@@ -307,7 +335,10 @@ async function conectarEObterQr(token, extra = {}) {
     status = await statusSessao(token, extra);
     if (status.loggedIn) return { ...status, qrcode: '' };
   } catch {
-    // WuzAPI pode estar subindo — segue para connect
+    const extraSessao = await telefoneDaSessaoWuzapi(token);
+    if (extraSessao.loggedIn || extraSessao.phone) {
+      return statusAPartirDoAdmin(extraSessao, extra);
+    }
   }
 
   await conectarSessao(token);
@@ -317,6 +348,10 @@ async function conectarEObterQr(token, extra = {}) {
   // Não faz logout se a sessão ainda parece viva — isso derrubava o chip
   if (status?.connected || status?.loggedIn) {
     return status;
+  }
+  const extraSessao = await telefoneDaSessaoWuzapi(token);
+  if (extraSessao.loggedIn || extraSessao.phone) {
+    return statusAPartirDoAdmin(extraSessao, extra);
   }
 
   try {
@@ -366,6 +401,16 @@ function limparCampoTexto(v) {
   const s = String(v).trim();
   if (!s || s === 'null' || s === 'undefined') return null;
   return s;
+}
+
+async function sessaoPertenceAFilial(filial, status) {
+  if (!status?.loggedIn && !status?.phone) return false;
+  if (!status.phone) return Boolean(status.loggedIn);
+  const ehChipDesta = chipsWhatsappIguais(filial.whatsapp, status.phone);
+  if (ehChipDesta) return true;
+  const outro = await chipUsadoPorOutraFilial(filial.id, status.phone);
+  if (outro) return false;
+  return Boolean(status.loggedIn);
 }
 
 function jidsGrupoIguais(a, b) {
@@ -747,6 +792,21 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       token: Boolean(token),
     };
     if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
+      try {
+        const status = await statusSessao(token, extra);
+        if (await sessaoPertenceAFilial(f, status)) {
+          return res.json({
+            configurado: true,
+            ...status,
+            ...extra,
+            qrcode: '',
+            loggedIn: true,
+            connected: true,
+          });
+        }
+      } catch {
+        // segue: token compartilhado sem sessão desta unidade
+      }
       return res.json({
         ...extra,
         configurado: true,
@@ -789,7 +849,30 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       }
       res.json({ configurado: true, ...status, ...extra, qrcode: querQr ? status.qrcode : '' });
     } catch (err) {
-      // Não devolve 5xx: o painel trataria como queda. Mantém leitura estável.
+      try {
+        const extraSessao = await telefoneDaSessaoWuzapi(token);
+        if (extraSessao.loggedIn || extraSessao.phone) {
+          const status = statusAPartirDoAdmin(extraSessao, extra);
+          if (status.phone) {
+            const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
+            if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
+              return res.json({
+                ...extra,
+                configurado: true,
+                connected: false,
+                loggedIn: false,
+                phone: '',
+                qrcode: '',
+                sessao_alheia: true,
+                mensagem: `Esse chip pertence a ${outro.nome}. Clique em Conectar chip e escaneie o QR DESTA unidade.`,
+              });
+            }
+          }
+          return res.json({ configurado: true, ...status, ...extra, qrcode: '', loggedIn: true, connected: true });
+        }
+      } catch {
+        // mantém instavel abaixo
+      }
       res.json({
         configurado: true,
         connected: false,
@@ -813,7 +896,43 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     let f = await filialOuErro(req.params.id);
     let token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
 
-    // Token compartilhado: cria sessão exclusiva desta unidade e NÃO desloga a outra.
+    const extraFilial = { filial_id: f.id, nome: f.nome };
+
+    // Chip já pareado nesta sessão → NÃO gera token novo nem outro QR
+    if (token) {
+      try {
+        const ja = await statusSessao(token, extraFilial);
+        if (await sessaoPertenceAFilial(f, ja)) {
+          const webhook = await garantirWebhook(token, f.id);
+          return res.json({
+            mensagem: `Chatbot “${f.nome}” já está conectado`,
+            webhook,
+            ...ja,
+            qrcode: '',
+            tem_qr: false,
+            sessao_desta_filial: true,
+          });
+        }
+      } catch {
+        const extraSessao = await telefoneDaSessaoWuzapi(token);
+        if (extraSessao.loggedIn || extraSessao.phone) {
+          const ja = statusAPartirDoAdmin(extraSessao, extraFilial);
+          if (await sessaoPertenceAFilial(f, ja)) {
+            const webhook = await garantirWebhook(token, f.id);
+            return res.json({
+              mensagem: `Chatbot “${f.nome}” já está conectado`,
+              webhook,
+              ...ja,
+              qrcode: '',
+              tem_qr: false,
+              sessao_desta_filial: true,
+            });
+          }
+        }
+      }
+    }
+
+    // Token compartilhado SEM ser o chip desta unidade: sessão exclusiva + QR
     if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
       await garantirTokenExclusivoFilial(f, { forcarNovo: true });
       f = await filialOuErro(req.params.id);
@@ -832,32 +951,6 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       });
     }
 
-    // Só trata como "já conectado" se o chip for DESTA unidade.
-    try {
-      const ja = await statusSessao(token, { filial_id: f.id, nome: f.nome });
-      if (ja.loggedIn) {
-        const outro = ja.phone ? await chipUsadoPorOutraFilial(f.id, ja.phone) : null;
-        const ehChipDesta = chipsWhatsappIguais(f.whatsapp, ja.phone);
-        if (outro && !ehChipDesta) {
-          await garantirTokenExclusivoFilial(f, { forcarNovo: true });
-          f = await filialOuErro(req.params.id);
-          token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
-        } else {
-          const webhook = await garantirWebhook(token, f.id);
-          return res.json({
-            mensagem: `Chatbot “${f.nome}” já está conectado`,
-            webhook,
-            ...ja,
-            qrcode: '',
-            tem_qr: false,
-            sessao_desta_filial: true,
-          });
-        }
-      }
-    } catch {
-      // Sessão inacessível — segue para QR
-    }
-
     let status;
     try {
       status = await conectarEObterQr(token, {
@@ -865,16 +958,19 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
         nome: f.nome,
       });
     } catch (err) {
-      // Token órfão / 401 → gera outro e tenta o QR, sem apagar número/grupo.
+      // Só gera token novo se o usuário WuzAPI desta unidade realmente não existir.
+      // 401 com chip já pareado NÃO pode rotacionar token nem pedir outro QR.
       if (err.upstreamStatus === 401 || err.upstreamStatus === 403 || err.status === 502) {
-        const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
-        f = await filialOuErro(req.params.id);
-        token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
-        if (!token) throw err;
-        status = await conectarEObterQr(token, {
-          filial_id: f.id,
-          nome: f.nome,
-        });
+        const extraSessao = await telefoneDaSessaoWuzapi(token);
+        if (extraSessao.loggedIn || extraSessao.phone) {
+          status = statusAPartirDoAdmin(extraSessao, extraFilial);
+        } else {
+          const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+          f = await filialOuErro(req.params.id);
+          token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
+          if (!token) throw err;
+          status = await conectarEObterQr(token, extraFilial);
+        }
       } else {
         throw err;
       }
