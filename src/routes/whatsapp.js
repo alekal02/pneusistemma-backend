@@ -22,6 +22,9 @@ import {
   tokenWuzapiUtil,
   enviarERegistrar,
   normalizarDestino,
+  chipsWhatsappIguais,
+  tokenUsadoPorOutraFilial,
+  chipUsadoPorOutraFilial,
   garantirTokenExclusivoFilial,
 } from '../services/whatsapp.js';
 
@@ -743,6 +746,18 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token)),
       token: Boolean(token),
     };
+    if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
+      return res.json({
+        ...extra,
+        configurado: true,
+        connected: false,
+        loggedIn: false,
+        phone: '',
+        token_compartilhado: true,
+        sessao_alheia: true,
+        mensagem: 'Esta unidade estava na sessão de outra filial. Clique em Conectar chip e escaneie o QR do chip DESTA unidade.',
+      });
+    }
     if (!wuzapiConfigurado(token)) {
       return res.json({
         ...extra,
@@ -757,6 +772,21 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       const status = querQr
         ? await statusComQr(token, extra)
         : await statusSessao(token, extra);
+      if (status.loggedIn && status.phone) {
+        const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
+        if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
+          return res.json({
+            ...extra,
+            configurado: true,
+            connected: false,
+            loggedIn: false,
+            phone: '',
+            qrcode: '',
+            sessao_alheia: true,
+            mensagem: `Esse chip pertence a ${outro.nome}. Clique em Conectar chip e escaneie o QR DESTA unidade.`,
+          });
+        }
+      }
       res.json({ configurado: true, ...status, ...extra, qrcode: querQr ? status.qrcode : '' });
     } catch (err) {
       // Não devolve 5xx: o painel trataria como queda. Mantém leitura estável.
@@ -783,23 +813,11 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     let f = await filialOuErro(req.params.id);
     let token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
 
-    // Se o chip já está no ar, não mexe no token — evita derrubar unidade em uso.
-    if (token) {
-      try {
-        const ja = await statusSessao(token, { filial_id: f.id, nome: f.nome });
-        if (ja.loggedIn) {
-          const webhook = await garantirWebhook(token, f.id);
-          return res.json({
-            mensagem: `Chatbot “${f.nome}” já está conectado`,
-            webhook,
-            ...ja,
-            qrcode: '',
-            tem_qr: false,
-          });
-        }
-      } catch {
-        // Sessão inacessível — segue para QR / reparo
-      }
+    // Token compartilhado: cria sessão exclusiva desta unidade e NÃO desloga a outra.
+    if (token && await tokenUsadoPorOutraFilial(f.id, token)) {
+      await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+      f = await filialOuErro(req.params.id);
+      token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
     }
 
     if (!token) {
@@ -812,6 +830,32 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       return res.status(400).json({
         erro: 'Gere o token desta unidade antes de conectar (cada filial tem sua própria sessão)',
       });
+    }
+
+    // Só trata como "já conectado" se o chip for DESTA unidade.
+    try {
+      const ja = await statusSessao(token, { filial_id: f.id, nome: f.nome });
+      if (ja.loggedIn) {
+        const outro = ja.phone ? await chipUsadoPorOutraFilial(f.id, ja.phone) : null;
+        const ehChipDesta = chipsWhatsappIguais(f.whatsapp, ja.phone);
+        if (outro && !ehChipDesta) {
+          await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+          f = await filialOuErro(req.params.id);
+          token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+        } else {
+          const webhook = await garantirWebhook(token, f.id);
+          return res.json({
+            mensagem: `Chatbot “${f.nome}” já está conectado`,
+            webhook,
+            ...ja,
+            qrcode: '',
+            tem_qr: false,
+            sessao_desta_filial: true,
+          });
+        }
+      }
+    } catch {
+      // Sessão inacessível — segue para QR
     }
 
     let status;
@@ -837,6 +881,26 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
     }
 
     const webhook = await garantirWebhook(token, f.id);
+
+    if (status?.loggedIn && status.phone) {
+      const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
+      if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
+        return res.json({
+          mensagem: `A sessão ainda é do chip de ${outro.nome}. Escaneie o QR com o chip DESTA unidade.`,
+          webhook,
+          configurado: true,
+          connected: Boolean(status.qrcode),
+          loggedIn: false,
+          phone: '',
+          qrcode: status.qrcode || '',
+          tem_qr: Boolean(status.qrcode),
+          sessao_alheia: true,
+          qr_erro: status.qrcode
+            ? undefined
+            : 'Gere o QR desta unidade — o chip exibido era de outra filial.',
+        });
+      }
+    }
 
     let mensagem = `Conexão do chatbot “${f.nome}” iniciada — escaneie o QR`;
     if (status.loggedIn) {

@@ -145,14 +145,35 @@ export async function tokenWuzapiFilial(filialId, opts = {}) {
 }
 
 function nomeUsuarioWuzapiFilial(filial) {
-  const base = (filial?.codigo || filial?.nome || filial?.id || 'unidade')
+  const base = (filial?.codigo || filial?.nome || 'un')
+    .toString()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 16);
+  // Sempre inclui o id — nomes iguais faziam duas unidades herdarem o mesmo chip.
+  return `Pneu${filial.id}-${base || 'un'}`;
+}
+
+function nomesAntigosUsuarioWuzapi(filial) {
+  const codigo = (filial?.codigo || filial?.nome || '')
     .toString()
     .replace(/[^a-zA-Z0-9_-]/g, '')
     .slice(0, 24);
-  return `Pneu-${base || filial.id}`;
+  return [
+    `Pneu-${codigo}`,
+    `PneuSistemma-${filial.id}`,
+    `Pneu-${filial.id}`,
+  ].filter(Boolean);
 }
 
-async function tokenUsadoPorOutraFilial(filialId, token) {
+export function chipsWhatsappIguais(a, b) {
+  const da = limparTelefone(a);
+  const db = limparTelefone(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  return da.length >= 8 && db.length >= 8 && da.slice(-8) === db.slice(-8);
+}
+
+export async function tokenUsadoPorOutraFilial(filialId, token) {
   const t = tokenWuzapiUtil(token);
   if (!t || !filialId) return false;
   const db = getDb();
@@ -164,6 +185,19 @@ async function tokenUsadoPorOutraFilial(filialId, token) {
     LIMIT 1
   `).get(filialId, t);
   return Boolean(row);
+}
+
+/** Outra unidade já cadastrou este número como chip dela. */
+export async function chipUsadoPorOutraFilial(filialId, phone) {
+  const digits = limparTelefone(phone);
+  if (!digits || digits.length < 10 || !filialId) return null;
+  const db = getDb();
+  const rows = await db.prepare(`
+    SELECT id, nome, whatsapp FROM filiais
+    WHERE id != ? AND ativo = 1
+      AND whatsapp IS NOT NULL AND TRIM(whatsapp) != ''
+  `).all(filialId);
+  return (rows || []).find((r) => chipsWhatsappIguais(r.whatsapp, digits)) || null;
 }
 
 async function adminUsersWuzapi() {
@@ -227,20 +261,33 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     };
   }
 
-  // Preferência: usuário WuzAPI já dedicado a esta filial (mesmo nome).
+  // Nunca reaproveita usuário WuzAPI de outra unidade, nem sessão já logada
+  // com outro chip. Token compartilhado / “Gerar de novo” sempre cria usuário novo.
   let token = null;
   let origem = 'criado';
   let criadoNoWuzapi = false;
+  let nomeGravado = nomeUser;
 
-  if (!opts.forcarNovo || orfao || compartilhado) {
-    const dedicado = usersWuz.find((u) => {
-      const n = String(u.name || u.Name || '').trim();
-      return n === nomeUser || n === `PneuSistemma-${atual.id}`;
-    });
+  if (!opts.forcarNovo && !compartilhado) {
+    const nomesOk = new Set([nomeUser, ...nomesAntigosUsuarioWuzapi(atual)]);
+    const dedicado = usersWuz.find((u) => nomesOk.has(String(u.name || u.Name || '').trim()));
     const cand = tokenNaoEAdmin(dedicado?.token);
     if (cand && !(await tokenUsadoPorOutraFilial(atual.id, cand))) {
-      token = cand;
-      origem = 'existente';
+      const phoneUser = limparTelefone(
+        dedicado.jid || dedicado.JID || dedicado.phone || dedicado.Phone
+      );
+      const outroChip = phoneUser ? await chipUsadoPorOutraFilial(atual.id, phoneUser) : null;
+      const ehChipDesta = chipsWhatsappIguais(atual.whatsapp, phoneUser);
+      const ocupado = Boolean(
+        dedicado.loggedIn === true
+        || dedicado.LoggedIn === true
+        || (phoneUser && phoneUser.length >= 10)
+      );
+      if ((!outroChip || ehChipDesta) && (!ocupado || ehChipDesta)) {
+        token = cand;
+        origem = 'existente';
+        nomeGravado = String(dedicado.name || dedicado.Name || nomeUser).trim();
+      }
     }
   }
 
@@ -254,26 +301,28 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
       throw err;
     }
 
-    token = `pneu_${atual.id}_${crypto.randomBytes(8).toString('hex')}`;
-    try {
+    const postUser = async (nome, tok) => {
       const res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
         method: 'POST',
         headers: {
           Authorization: admin,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ name: nomeUser, token }),
+        body: JSON.stringify({ name: nome, token: tok }),
         signal: AbortSignal.timeout(15_000),
       });
+      const raw = await res.text();
+      return { res, raw };
+    };
+
+    token = `pneu_${atual.id}_${crypto.randomBytes(8).toString('hex')}`;
+    try {
+      let { res, raw } = await postUser(nomeUser, token);
       if (!res.ok) {
-        const raw = await res.text();
-        const users = await adminUsersWuzapi();
-        const mesmoNome = users.find((u) => String(u.name || u.Name || '').trim() === nomeUser);
-        if (mesmoNome && tokenNaoEAdmin(mesmoNome.token)
-          && !(await tokenUsadoPorOutraFilial(atual.id, mesmoNome.token))) {
-          token = tokenNaoEAdmin(mesmoNome.token);
-          origem = 'existente';
-        } else {
+        const nomeUnico = `Pneu${atual.id}-${crypto.randomBytes(3).toString('hex')}`;
+        token = `pneu_${atual.id}_${crypto.randomBytes(8).toString('hex')}`;
+        ({ res, raw } = await postUser(nomeUnico, token));
+        if (!res.ok) {
           const err = new Error(
             `Não foi possível criar usuário no WuzAPI (${res.status}). `
             + 'Confira WUZAPI_ADMIN_TOKEN no Render. '
@@ -282,10 +331,10 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
           err.status = res.status === 401 || res.status === 403 ? 502 : 502;
           throw err;
         }
-      } else {
-        criadoNoWuzapi = true;
-        origem = 'criado';
+        nomeGravado = nomeUnico;
       }
+      criadoNoWuzapi = true;
+      origem = 'criado';
     } catch (err) {
       if (err.status) throw err;
       const e = new Error(
@@ -309,7 +358,7 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     criado: criadoNoWuzapi || origem === 'criado',
     regenerado: Boolean(compartilhado || opts.forcarNovo || orfao),
     compartilhado: Boolean(compartilhado),
-    nome_wuzapi: nomeUser,
+    nome_wuzapi: nomeGravado,
     precisa_conectar: true,
     mensagem: (compartilhado || orfao)
       ? `Token exclusivo gerado para ${atual.nome}. Conecte o QR com o chip desta filial.`
