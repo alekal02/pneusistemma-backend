@@ -1358,7 +1358,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
           )
         );
         if (parear || !sessaoDestaUnidade) {
-          await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+          await garantirTokenExclusivoFilial(f);
           f = await filialOuErro(req.params.id);
           token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
         }
@@ -1451,7 +1451,7 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
               chip_salvo: chipSalvo,
             }));
           }
-          const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+          const reparo = await garantirTokenExclusivoFilial(f);
           f = await filialOuErro(req.params.id);
           token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
           if (!token) throw err;
