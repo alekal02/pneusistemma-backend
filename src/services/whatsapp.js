@@ -11,7 +11,10 @@ import { getDb } from '../database.js';
 
 export function limparTelefone(phone) {
   if (!phone) return '';
-  return String(phone).replace(/@.*$/, '').replace(/\D/g, '');
+  return String(phone)
+    .replace(/@.*$/, '')
+    .split(':')[0]
+    .replace(/\D/g, '');
 }
 
 /** Normaliza destino: número pessoal ou grupo WhatsApp */
@@ -119,7 +122,7 @@ function headersUsuarioWuzapi(token) {
 function mensagemErroWuzapi(status, msg) {
   const texto = typeof msg === 'string' ? msg : JSON.stringify(msg);
   if (ehFalhaAuthWuzapi(status, texto)) {
-    return 'Sessão WhatsApp recusada (401). Clique em Gerar token e depois Conectar / QR com o chip da unidade.';
+    return 'Sessão WhatsApp recusada. Clique em Conectar chip — se o QR não aparecer, use “Gerar QR de novo”.';
   }
   return `WuzAPI erro ${status}: ${texto}`;
 }
@@ -165,39 +168,69 @@ function nomesAntigosUsuarioWuzapi(filial) {
   ].filter(Boolean);
 }
 
-/** Sessão WhatsApp já logada desta unidade no WuzAPI (não cria usuário novo). */
-export async function sessaoVivaDaFilial(filial) {
-  if (!filial?.id) return null;
-  const users = await adminUsersWuzapi();
-  const nomesOk = new Set(
+function nomesUsuarioWuzapiFilial(filial) {
+  return new Set(
     [nomeUsuarioWuzapiFilial(filial), ...nomesAntigosUsuarioWuzapi(filial)]
       .map((n) => String(n || '').trim())
       .filter(Boolean)
   );
+}
+
+function sessaoWuzapiAtiva(u) {
+  const logged = Boolean(u?.loggedIn ?? u?.LoggedIn);
+  const connected = Boolean(u?.connected ?? u?.Connected);
+  const phone = limparTelefone(u?.jid || u?.JID || u?.phone || u?.Phone);
+  return logged || (connected && phone.length >= 10);
+}
+
+/**
+ * Encontra o usuário WuzAPI desta unidade sem criar outro.
+ * Prioridade: nome da filial → token salvo → chip já cadastrado.
+ * Usado para NÃO derrubar sessões que já estão no ar.
+ */
+export function encontrarUsuarioWuzapiDaFilial(filial, users) {
+  if (!filial?.id) return null;
+  const nomesOk = nomesUsuarioWuzapiFilial(filial);
   const prefixoId = `Pneu${filial.id}-`;
-  const chip = limparTelefone(filial.whatsapp);
-  const vivos = (users || []).filter((u) => {
-    const logged = Boolean(u.loggedIn ?? u.LoggedIn);
-    const connected = Boolean(u.connected ?? u.Connected);
+  const chipFilial = limparTelefone(filial.whatsapp);
+  const tokenFilial = tokenNaoEAdmin(filial.wuzapi_token);
+  const candidatos = (users || []).filter((u) => {
+    const name = String(u.name || u.Name || '').trim();
     const phone = limparTelefone(u.jid || u.JID || u.phone || u.Phone);
-    return logged || connected || (phone && phone.length >= 10);
+    const tokenUser = tokenNaoEAdmin(u.token || u.Token);
+    const ativa = sessaoWuzapiAtiva(u);
+    const porNome = nomesOk.has(name) || name.startsWith(prefixoId);
+    const porToken = Boolean(tokenFilial && tokenUser && tokenFilial === tokenUser);
+    const porChip = Boolean(chipFilial && phone && chipsWhatsappIguais(phone, chipFilial));
+    if (porNome && (ativa || phone.length >= 10)) return true;
+    if (porToken && ativa) return true;
+    if (porChip && (ativa || Boolean(u.loggedIn ?? u.LoggedIn) || Boolean(u.connected ?? u.Connected))) return true;
+    return false;
   });
-  const porNome = vivos.filter((u) => {
+  if (!candidatos.length) return null;
+  const porNome = candidatos.filter((u) => {
     const name = String(u.name || u.Name || '').trim();
     return nomesOk.has(name) || name.startsWith(prefixoId);
   });
-  let u = porNome.find((x) => x.loggedIn === true || x.LoggedIn === true)
-    || porNome[0];
-  if (!u && chip) {
-    u = vivos.find((x) => chipsWhatsappIguais(x.jid || x.JID || x.phone, chip));
-  }
+  const logged = (lista) => lista.find((x) => x.loggedIn === true || x.LoggedIn === true);
+  return logged(porNome) || logged(candidatos) || porNome[0] || candidatos[0];
+}
+
+/** Sessão WhatsApp já logada desta unidade no WuzAPI (não cria usuário novo). */
+export async function sessaoVivaDaFilial(filial) {
+  if (!filial?.id) return null;
+  const users = await adminUsersWuzapi();
+  const u = encontrarUsuarioWuzapiDaFilial(filial, users);
   const token = tokenNaoEAdmin(u?.token || u?.Token);
   if (!token) return null;
+  const phone = limparTelefone(u.jid || u.JID || u.phone);
+  const logged = sessaoWuzapiAtiva(u) || phone.length >= 10;
+  if (!logged) return null;
   return {
     token,
     name: u.name || u.Name || null,
     jid: u.jid || u.JID || null,
-    phone: limparTelefone(u.jid || u.JID || u.phone),
+    phone,
     loggedIn: true,
   };
 }
@@ -255,7 +288,14 @@ export async function chipUsadoPorOutraFilial(filialId, phone) {
   return (rows || []).find((r) => chipsWhatsappIguais(r.whatsapp, digits)) || null;
 }
 
-async function adminUsersWuzapi() {
+let cacheAdminUsersSvc = { at: 0, users: null };
+const ADMIN_USERS_SVC_TTL_MS = 10_000;
+
+async function adminUsersWuzapi({ forcar = false } = {}) {
+  const agora = Date.now();
+  if (!forcar && cacheAdminUsersSvc.users && (agora - cacheAdminUsersSvc.at) < ADMIN_USERS_SVC_TTL_MS) {
+    return cacheAdminUsersSvc.users;
+  }
   const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
   if (!admin || !config.wuzapiBaseUrl) return [];
   try {
@@ -265,9 +305,11 @@ async function adminUsersWuzapi() {
     });
     if (!res.ok) return [];
     const data = await res.json();
-    return Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+    const users = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+    cacheAdminUsersSvc = { at: agora, users };
+    return users;
   } catch {
-    return [];
+    return cacheAdminUsersSvc.users || [];
   }
 }
 
@@ -304,19 +346,8 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
   const usersWuz = await adminUsersWuzapi();
 
   // Se esta unidade já tem chip logado no WuzAPI, usa essa sessão.
-  // “Gerar de novo” NÃO pode criar outro usuário e derrubar o QR.
-  const nomesOk = new Set(
-    [nomeUser, ...nomesAntigosUsuarioWuzapi(atual)]
-      .map((n) => String(n || '').trim())
-      .filter(Boolean)
-  );
-  const prefixoId = `Pneu${atual.id}-`;
-  const viva = (usersWuz || []).find((u) => {
-    const name = String(u.name || u.Name || '').trim();
-    const logged = Boolean(u.loggedIn ?? u.LoggedIn) || Boolean(u.connected ?? u.Connected);
-    if (!logged) return false;
-    return nomesOk.has(name) || name.startsWith(prefixoId);
-  });
+  // Nunca cria outro usuário se o chip/token desta filial já está no ar.
+  const viva = encontrarUsuarioWuzapiDaFilial(atual, usersWuz);
   const tokenVivo = tokenNaoEAdmin(viva?.token || viva?.Token);
   if (tokenVivo) {
     await gravarTokenFilialSeDiferente(atual.id, tokenVivo);
@@ -329,12 +360,45 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
       precisa_conectar: false,
     };
   }
+  const userDoToken = tokenAtual
+    ? (usersWuz || []).find((u) => tokenNaoEAdmin(u.token || u.Token) === tokenAtual)
+    : null;
+  if (userDoToken && sessaoWuzapiAtiva(userDoToken)) {
+    const phoneToken = limparTelefone(userDoToken.jid || userDoToken.JID || userDoToken.phone);
+    const ehChipDesta = !atual.whatsapp || !phoneToken || chipsWhatsappIguais(atual.whatsapp, phoneToken);
+    if (ehChipDesta) {
+      return {
+        token: tokenAtual,
+        criado: false,
+        regenerado: false,
+        compartilhado: false,
+        nome_wuzapi: userDoToken.name || userDoToken.Name || nomeUser,
+        precisa_conectar: false,
+      };
+    }
+  }
   const tokenConhecidoNoWuzapi = Boolean(
     tokenAtual && usersWuz.some((u) => tokenNaoEAdmin(u.token) === tokenAtual)
   );
   const orfao = Boolean(tokenAtual && usersWuz.length > 0 && !tokenConhecidoNoWuzapi);
+  const chipJaCadastrado = limparTelefone(atual.whatsapp).length >= 10;
+
+  // Lista WuzAPI vazia ou chip já no cadastro: nunca inventa outro token.
+  if (tokenAtual && (usersWuz.length === 0 || (opts.forcarNovo && chipJaCadastrado && tokenConhecidoNoWuzapi))) {
+    return {
+      token: tokenAtual,
+      criado: false,
+      regenerado: false,
+      compartilhado: false,
+      nome_wuzapi: nomeUser,
+      precisa_conectar: false,
+    };
+  }
 
   let precisaNovo = opts.forcarNovo || !tokenAtual || compartilhado || orfao;
+  if (precisaNovo && chipJaCadastrado && tokenAtual && !orfao && !compartilhado) {
+    precisaNovo = false;
+  }
 
   if (!precisaNovo) {
     return {
@@ -380,9 +444,9 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
   if (!token) {
     const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
     if (!admin || !config.wuzapiBaseUrl) {
-      const err = new Error(
-        'WUZAPI_ADMIN_TOKEN ou WUZAPI_BASE_URL ausente no backend. Configure no Render e tente Gerar token de novo.'
-      );
+        const err = new Error(
+          'Servidor do WhatsApp sem configuração no backend. Avise o suporte — não é preciso gerar token na tela.'
+        );
       err.status = 503;
       throw err;
     }
@@ -426,7 +490,7 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
         const err = new Error(
           ehErroDbInternoWuzapi(ultimoRaw)
             ? 'O servidor do WhatsApp está com o banco interno fora. Nada foi apagado nas filiais. Recrie o WuzAPI no servidor dele sem apagar o volume — o token do Render não é o problema.'
-            : (`Não foi possível criar usuário no WuzAPI. `
+            : (`Não foi possível criar a sessão no servidor do WhatsApp. `
               + (ultimoRaw ? String(ultimoRaw).slice(0, 160) : 'Tente Conectar chip de novo em instantes.'))
         );
         err.status = 503;
@@ -464,8 +528,8 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     nome_wuzapi: nomeGravado,
     precisa_conectar: true,
     mensagem: (compartilhado || orfao)
-      ? `Token exclusivo gerado para ${atual.nome}. Conecte o QR com o chip desta filial.`
-      : `Token do chatbot criado para ${atual.nome}. Conecte / QR para iniciar.`,
+      ? `Sessão exclusiva pronta para ${atual.nome}. Conecte o QR com o chip desta filial.`
+      : `Sessão do chatbot pronta para ${atual.nome}. Conecte / QR para iniciar.`,
   };
 }
 
