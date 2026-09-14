@@ -383,6 +383,7 @@ export async function chipUsadoPorOutraFilial(filialId, phone) {
 
 let cacheAdminUsersSvc = { at: 0, users: null };
 const ADMIN_USERS_SVC_TTL_MS = 10_000;
+const reparoWuzapiRecente = new Map();
 
 async function adminUsersWuzapi({ forcar = false } = {}) {
   const agora = Date.now();
@@ -445,7 +446,38 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     const tok = tokenNaoEAdmin(u.token || u.Token);
     return nomesOk.has(name) || name.startsWith(prefixoId) || Boolean(tokenAtual && tok === tokenAtual);
   });
-  if (dedicado) {
+
+  if (opts.forcarNovo) {
+    const agora = Date.now();
+    const ultimo = reparoWuzapiRecente.get(atual.id) || 0;
+    if (agora - ultimo > 45_000) {
+      reparoWuzapiRecente.set(atual.id, agora);
+      const adminTok = tokenWuzapiUtil(config.wuzapiAdminToken);
+      const mortos = (usersWuz || []).filter((u) => {
+        const name = String(u.name || u.Name || '').trim();
+        const tok = tokenNaoEAdmin(u.token || u.Token);
+        const match = nomesOk.has(name) || name.startsWith(prefixoId)
+          || Boolean(tokenAtual && tok === tokenAtual);
+        if (!match) return false;
+        return !sessaoWuzapiAtiva(u);
+      });
+      for (const u of mortos) {
+        const id = u.id ?? u.Id ?? u.ID;
+        if (id == null || !adminTok) continue;
+        try {
+          await fetch(`${config.wuzapiBaseUrl}/admin/users/${id}`, {
+            method: 'DELETE',
+            headers: { Authorization: adminTok },
+            signal: AbortSignal.timeout(12_000),
+          });
+        } catch (err) {
+          console.warn('[whatsapp] apagar user WuzAPI:', err.message);
+        }
+      }
+      cacheAdminUsersSvc = { at: 0, users: null };
+      if (mortos.length) await new Promise((r) => setTimeout(r, 800));
+    }
+  } else if (dedicado) {
     const tok = tokenNaoEAdmin(dedicado.token || dedicado.Token);
     if (tok) {
       await gravarTokenFilialSeDiferente(atual.id, tok);

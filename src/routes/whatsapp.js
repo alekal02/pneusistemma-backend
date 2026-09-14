@@ -1540,7 +1540,12 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       });
     }
 
-    if (parear) iniciarBuscaQrFundo(token, f.id);
+    if (parear) {
+      const reparo = await garantirTokenExclusivoFilial(f, { forcarNovo: true });
+      f = await filialOuErro(req.params.id);
+      token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
+      iniciarBuscaQrFundo(token, f.id);
+    }
 
     try {
       status = await conectarEObterQr(token, {
