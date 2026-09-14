@@ -552,19 +552,33 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     throw err;
   }
 
+  let dataCreate = {};
+  try { dataCreate = raw ? JSON.parse(raw) : {}; } catch { dataCreate = {}; }
+  const tokCreate = tokenNaoEAdmin(
+    dataCreate?.token || dataCreate?.Token || dataCreate?.data?.token || dataCreate?.data?.Token
+  );
+
+  await new Promise((r) => setTimeout(r, 600));
+  const confirmados = await adminUsersWuzapi({ forcar: true });
+  const criadoUser = (confirmados || []).find((u) => {
+    const name = String(u.name || u.Name || '').trim();
+    return name === nomeUser || nomesOk.has(name) || name.startsWith(prefixoId);
+  });
+  const tokReal = tokenNaoEAdmin(criadoUser?.token || criadoUser?.Token) || tokCreate || token;
+
   await db.prepare(`
     UPDATE filiais SET
       wuzapi_token = ?,
       updated_at = NOW()
     WHERE id = ?
-  `).run(token, atual.id);
+  `).run(tokReal, atual.id);
 
   return {
-    token,
+    token: tokReal,
     criado: true,
     regenerado: false,
     compartilhado: false,
-    nome_wuzapi: nomeUser,
+    nome_wuzapi: criadoUser?.name || criadoUser?.Name || nomeUser,
     precisa_conectar: true,
   };
 }
