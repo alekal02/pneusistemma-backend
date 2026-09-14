@@ -103,8 +103,11 @@ function simNao(texto) {
 }
 
 async function reply(ctx, mensagem, tipo = 'link_veiculo') {
+  const tipoEnvio = (/PneuSistemma — Menu/i.test(mensagem) && tipo === 'link_veiculo')
+    ? 'menu'
+    : tipo;
   await enviarERegistrar({
-    tipo,
+    tipo: tipoEnvio,
     destinatario: ctx.destino,
     mensagem,
     filialId: ctx.filialId,

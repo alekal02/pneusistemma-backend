@@ -1491,6 +1491,9 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
           tipo_label: n.tipo === 'alerta_critico' ? 'Alerta crítico' : 'Alerta monitorar',
         };
       }
+      if (n.tipo === 'menu' || /PneuSistemma — Menu/i.test(msg)) {
+        return { categoria: 'chatbot', tipo_label: 'Chatbot (menu)' };
+      }
       if (n.tipo === 'relatorio_semanal' || /relat[oó]rio gerencial/i.test(msg)) {
         return { categoria: 'chatbot', tipo_label: 'Chatbot (relatório)' };
       }
