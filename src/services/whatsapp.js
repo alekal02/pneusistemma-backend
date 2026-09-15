@@ -321,8 +321,8 @@ export async function sessaoVivaDaFilial(filial, { forcarUsers = false } = {}) {
   const token = tokenNaoEAdmin(u?.token || u?.Token);
   if (!token) return null;
   const phone = limparTelefone(u.jid || u.JID || u.phone);
-  const logged = sessaoWuzapiAtiva(u) || phone.length >= 10;
-  if (!logged) return null;
+  // JID antigo no admin não conta: depois do logout no celular o número fica residual.
+  if (!sessaoWuzapiAtiva(u)) return null;
   return {
     token,
     name: u.name || u.Name || null,
