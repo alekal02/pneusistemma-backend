@@ -63,11 +63,10 @@ async function wuzapiAdminFetch(path, { method = 'GET', body } = {}) {
     });
   } catch (e) {
     const err = new Error(
-      `Não foi possível conectar ao WuzAPI em ${config.wuzapiBaseUrl}. `
-      + 'Suba com: npm run wuzapi:up  (ou docker compose -f docker-compose.wuzapi.yml up -d). '
-      + `(${e.message})`
+      'O servidor do WhatsApp não respondeu. Tente Conectar de novo em instantes.'
     );
     err.status = 503;
+    err.infraWuzapi = true;
     throw err;
   }
   const raw = await res.text();
@@ -127,13 +126,11 @@ async function wuzapiFetch(path, { method = 'GET', body, token, timeoutMs = 12_0
       data = { raw };
     }
   } catch (e) {
-    const cause = e?.cause?.code || e?.code || e?.name || '';
     const err = new Error(
-      `Não foi possível conectar ao WuzAPI em ${config.wuzapiBaseUrl}. `
-      + 'Verifique se o serviço está rodando (porta 8080) e se o token da filial está correto. '
-      + `(${e.message}${cause ? ` / ${cause}` : ''})`
+      'O servidor do WhatsApp não respondeu. Tente Conectar de novo em instantes.'
     );
     err.status = 503;
+    err.infraWuzapi = true;
     throw err;
   }
 
