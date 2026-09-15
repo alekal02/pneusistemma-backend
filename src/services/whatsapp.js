@@ -272,10 +272,7 @@ function nomesUsuarioWuzapiFilial(filial) {
 }
 
 function sessaoWuzapiAtiva(u) {
-  const logged = Boolean(u?.loggedIn ?? u?.LoggedIn);
-  const connected = Boolean(u?.connected ?? u?.Connected);
-  const phone = limparTelefone(u?.jid || u?.JID || u?.phone || u?.Phone);
-  return logged || (connected && phone.length >= 10);
+  return Boolean(u?.loggedIn ?? u?.LoggedIn);
 }
 
 /**

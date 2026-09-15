@@ -499,6 +499,11 @@ async function statusSessao(token, extra = {}) {
     const data = await wuzapiFetch('/session/status', { token });
     status = normalizarStatus(data, extra);
   } catch (err) {
+    // /session/status 401 é comum com chip já pareado — o admin/users desta key é a fonte fiel.
+    const extraSessao = await telefoneDaSessaoWuzapi(token);
+    if (extraSessao.loggedIn) {
+      return statusAPartirDoAdmin(extraSessao, extra);
+    }
     if (ehSessaoInexistente(err)) {
       return {
         ...normalizarStatus({}, extra),
@@ -513,6 +518,17 @@ async function statusSessao(token, extra = {}) {
     throw err;
   }
 
+  if (!status.loggedIn) {
+    const extraSessao = await telefoneDaSessaoWuzapi(token);
+    if (extraSessao.loggedIn) {
+      return statusAPartirDoAdmin(extraSessao, extra);
+    }
+  } else if (!status.phone) {
+    const extraSessao = await telefoneDaSessaoWuzapi(token);
+    if (extraSessao.phone) status.phone = extraSessao.phone;
+    if (extraSessao.jid && !status.jid) status.jid = extraSessao.jid;
+    if (extraSessao.name && !status.name) status.name = extraSessao.name;
+  }
   if (status.loggedIn) status.qrcode = '';
   return status;
 }
@@ -630,7 +646,7 @@ async function telefoneDaSessaoWuzapi(token) {
     const phone = telefoneFromJid(jid) || telefoneFromJid(u.phone || u.Phone);
     const connected = Boolean(u.connected ?? u.Connected);
     const loggedInFlag = Boolean(u.loggedIn ?? u.LoggedIn);
-    const loggedIn = loggedInFlag || Boolean(connected && phone);
+    const loggedIn = loggedInFlag;
     return {
       phone,
       jid: jid || null,
@@ -1265,16 +1281,36 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     const f = await filialOuErro(req.params.id);
     const querQr = String(req.query.qr || '') === '1';
     const chipCadastrado = String(f.whatsapp || '').replace(/\D/g, '').length >= 10;
-    const token = await tokenWuzapiFilial(f.id, { permitirEnv: false });
+    const viva = await reconectarSessaoVivaFilial(f).catch(() => null);
+    const token = viva?.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
     const extra = {
       filial_id: f.id,
       nome: f.nome,
       whatsapp: f.whatsapp,
       chip_salvo: chipCadastrado ? (limparCampoTexto(f.whatsapp) || '') : '',
       grupo_salvo: limparCampoTexto(f.whatsapp_grupo),
-      tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token)),
+      tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token) || viva?.token),
       token: Boolean(token),
     };
+    if (viva?.loggedIn) {
+      const outro = viva.phone ? await chipUsadoPorOutraFilial(f.id, viva.phone) : null;
+      if (!outro || chipsWhatsappIguais(f.whatsapp, viva.phone)) {
+        return res.json(comEstado({
+          configurado: true,
+          loggedIn: true,
+          connected: true,
+          phone: viva.phone,
+          name: viva.name,
+          jid: viva.jid,
+          qrcode: '',
+          ...extra,
+          chip_salvo: extra.chip_salvo || viva.phone || '',
+          mensagem: viva.phone
+            ? `Chip ${viva.phone} no ar. Escolha o grupo se ainda não tiver um.`
+            : 'Chip no ar. Escolha o grupo da medição.',
+        }));
+      }
+    }
     if (!token) {
       return res.json(comEstado({
         ...extra,
