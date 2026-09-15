@@ -433,9 +433,22 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
 
   const nomeUser = nomeUsuarioWuzapiFilial(atual);
   const tokenAtual = tokenNaoEAdmin(atual.wuzapi_token);
-  // Só é "compartilhado" se OUTRA filial usa o mesmo token.
-  // Igualdade com WUZAPI_TOKEN do .env é comum (primeira unidade) e NÃO
-  // deve regenerar o token — isso derrubava a sessão WhatsApp a cada status.
+  const forcarNovo = Boolean(opts.forcarNovo);
+  // Token já gravado: não consulta /admin/users nem cria outro usuário.
+  // POST /admin/users a cada Conectar derruba o WuzAPI (sqlite/disco).
+  if (tokenAtual && !forcarNovo) {
+    const compartilhado = await tokenUsadoPorOutraFilial(atual.id, tokenAtual);
+    if (!compartilhado) {
+      return {
+        token: tokenAtual,
+        criado: false,
+        regenerado: false,
+        compartilhado: false,
+        nome_wuzapi: nomeUser,
+        precisa_conectar: true,
+      };
+    }
+  }
   const compartilhado = tokenAtual
     ? await tokenUsadoPorOutraFilial(atual.id, tokenAtual)
     : false;
