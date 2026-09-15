@@ -329,10 +329,13 @@ export async function sessaoVivaDaFilial(filial, { forcarUsers = false } = {}) {
   };
 }
 
-export async function reconectarSessaoVivaFilial(filial, { forcarUsers = false } = {}) {
+const recriarLockPorFilial = new Map();
+
+export async function reconectarSessaoVivaFilial(filial, { forcarUsers = false, naoGravar = false } = {}) {
+  if (filial?.id && recriarLockPorFilial.has(Number(filial.id))) return null;
   const viva = await sessaoVivaDaFilial(filial, { forcarUsers });
   if (!viva?.token) return null;
-  await gravarTokenFilialSeDiferente(filial.id, viva.token);
+  if (!naoGravar) await gravarTokenFilialSeDiferente(filial.id, viva.token);
   return viva;
 }
 
@@ -600,6 +603,153 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     regenerado: false,
     compartilhado: false,
     nome_wuzapi: criadoUser?.name || criadoUser?.Name || nomeUser,
+    precisa_conectar: true,
+  };
+}
+
+function usuariosWuzapiDestaFilial(filial, users) {
+  const prefixoId = `Pneu${filial.id}-`;
+  const nomeAtual = nomeUsuarioWuzapiFilial(filial);
+  const tokenAtual = tokenNaoEAdmin(filial.wuzapi_token);
+  return (users || []).filter((u) => {
+    const name = String(u.name || u.Name || '').trim();
+    const tok = tokenNaoEAdmin(u.token || u.Token);
+    if (name === nomeAtual || name.startsWith(prefixoId)) return true;
+    if (tokenAtual && tok && tok === tokenAtual) return true;
+    return false;
+  });
+}
+
+async function apagarUsuarioWuzapi(idUser, admin) {
+  if (idUser == null || !admin) return false;
+  try {
+    const res = await fetch(`${config.wuzapiBaseUrl}/admin/users/${idUser}`, {
+      method: 'DELETE',
+      headers: { Authorization: admin },
+      signal: AbortSignal.timeout(12_000),
+    });
+    return res.ok || res.status === 404;
+  } catch (err) {
+    console.warn('[whatsapp] apagar usuário WuzAPI:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Apaga a sessão WuzAPI desta unidade e cria token novo.
+ * Só mexe em Pneu{id}-* desta filial — não toca Unaí/Caldas/outras.
+ */
+export async function recriarUsuarioWuzapiFilial(filial) {
+  if (!filial?.id) throw new Error('Filial inválida para token WhatsApp');
+  const existente = recriarLockPorFilial.get(Number(filial.id));
+  if (existente) return existente;
+  const p = recriarUsuarioWuzapiFilialInterno(filial).finally(() => {
+    if (recriarLockPorFilial.get(Number(filial.id)) === p) {
+      recriarLockPorFilial.delete(Number(filial.id));
+    }
+  });
+  recriarLockPorFilial.set(Number(filial.id), p);
+  return p;
+}
+
+async function recriarUsuarioWuzapiFilialInterno(filial) {
+  const db = getDb();
+  const atual = await db.prepare(`
+    SELECT id, nome, codigo, wuzapi_token FROM filiais WHERE id = ?
+  `).get(filial.id);
+  if (!atual) throw new Error('Filial não encontrada');
+
+  const admin = tokenWuzapiUtil(config.wuzapiAdminToken);
+  if (!admin || !config.wuzapiBaseUrl) {
+    const err = new Error('Servidor do WhatsApp sem configuração no backend.');
+    err.status = 503;
+    throw err;
+  }
+
+  const nomeUser = nomeUsuarioWuzapiFilial(atual);
+  for (let round = 0; round < 3; round++) {
+    const users = await adminUsersWuzapi({ forcar: true });
+    const daFilial = usuariosWuzapiDestaFilial(atual, users);
+    if (!daFilial.length) break;
+    for (const u of daFilial) {
+      await apagarUsuarioWuzapi(u.id ?? u.Id ?? u.ID, admin);
+    }
+    cacheAdminUsersSvc = { at: 0, users: null };
+    await new Promise((r) => setTimeout(r, 900));
+  }
+  const ainda = usuariosWuzapiDestaFilial(atual, await adminUsersWuzapi({ forcar: true }));
+  if (ainda.length) {
+    const err = new Error('Não consegui apagar a sessão antiga desta unidade. Tente Conectar de novo em instantes.');
+    err.status = 503;
+    throw err;
+  }
+  await new Promise((r) => setTimeout(r, 400));
+
+  const token = `pneu_${atual.id}_${crypto.randomBytes(8).toString('hex')}`;
+  let res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
+    method: 'POST',
+    headers: {
+      Authorization: admin,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: nomeUser, token }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  let raw = await res.text();
+  if (!res.ok) {
+    const usersRetry = await adminUsersWuzapi({ forcar: true });
+    const daFilialRetry = usuariosWuzapiDestaFilial(atual, usersRetry);
+    for (const u of daFilialRetry) {
+      await apagarUsuarioWuzapi(u.id ?? u.Id ?? u.ID, admin);
+    }
+    cacheAdminUsersSvc = { at: 0, users: null };
+    await new Promise((r) => setTimeout(r, 1200));
+    const nomeAlt = `${nomeUser}${Date.now().toString(36).slice(-3)}`;
+    res = await fetch(`${config.wuzapiBaseUrl}/admin/users`, {
+      method: 'POST',
+      headers: {
+        Authorization: admin,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: nomeAlt, token }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    raw = await res.text();
+  }
+  if (!res.ok) {
+    const err = new Error(
+      ehErroDbInternoWuzapi(raw)
+        ? 'O servidor do WhatsApp está com o banco interno fora. Tente de novo em instantes.'
+        : (`Não foi possível criar a sessão nova. ${raw ? String(raw).slice(0, 160) : 'Tente Conectar de novo.'}`)
+    );
+    err.status = 503;
+    err.infraWuzapi = ehErroDbInternoWuzapi(raw);
+    throw err;
+  }
+
+  let dataCreate = {};
+  try { dataCreate = raw ? JSON.parse(raw) : {}; } catch { dataCreate = {}; }
+  const tokCreate = tokenNaoEAdmin(
+    dataCreate?.token || dataCreate?.Token || dataCreate?.data?.token || dataCreate?.data?.Token
+  ) || token;
+
+  await db.prepare(`
+    UPDATE filiais SET
+      wuzapi_token = ?,
+      whatsapp = NULL,
+      whatsapp_grupo = NULL,
+      whatsapp_alerta = NULL,
+      updated_at = NOW()
+    WHERE id = ?
+  `).run(tokCreate, atual.id);
+
+  cacheAdminUsersSvc = { at: 0, users: null };
+  await new Promise((r) => setTimeout(r, 1500));
+  return {
+    token: tokCreate,
+    criado: true,
+    regenerado: true,
+    nome_wuzapi: nomeUser,
     precisa_conectar: true,
   };
 }
