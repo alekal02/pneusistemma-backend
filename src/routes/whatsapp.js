@@ -1241,18 +1241,19 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
     }
     const f = await filialOuErro(req.params.id);
     const querQr = String(req.query.qr || '') === '1';
-    const viva = await reconectarSessaoVivaFilial(f);
+    const chipCadastrado = String(f.whatsapp || '').replace(/\D/g, '').length >= 10;
+    const viva = chipCadastrado ? await reconectarSessaoVivaFilial(f) : null;
     let token = viva?.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
     const extra = {
       filial_id: f.id,
       nome: f.nome,
       whatsapp: f.whatsapp,
-      chip_salvo: limparCampoTexto(f.whatsapp) || '',
+      chip_salvo: chipCadastrado ? (limparCampoTexto(f.whatsapp) || '') : '',
       grupo_salvo: limparCampoTexto(f.whatsapp_grupo),
       tem_wuzapi_token: Boolean(tokenWuzapiUtil(f.wuzapi_token) || viva?.token),
       token: Boolean(token),
     };
-    if (viva?.loggedIn) {
+    if (viva?.loggedIn && chipCadastrado) {
       const outro = viva.phone ? await chipUsadoPorOutraFilial(f.id, viva.phone) : null;
       if (!outro || chipsWhatsappIguais(f.whatsapp, viva.phone)) {
         return res.json(comEstado({
@@ -1480,7 +1481,8 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
     let f = await filialOuErro(req.params.id);
-    const gerarQrDeNovo = Boolean(req.body?.forcar_qr);
+    const chipCadastrado = String(f.whatsapp || '').replace(/\D/g, '').length >= 10;
+    const gerarQrDeNovo = Boolean(req.body?.forcar_qr) || !chipCadastrado;
 
     // 1) Um token por unidade — só cria se ainda não existir
     let token = '';
@@ -1509,26 +1511,35 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
       });
     }
 
-    // 2) Já logada neste token? Segue o fluxo (grupo) sem outro QR
+    // 2) Já logada neste token? Confirma no /session/status — admin/users pode ficar defasado.
     if (!gerarQrDeNovo) {
       const viva = await reconectarSessaoVivaFilial(f).catch(() => null);
       if (viva?.loggedIn) {
-        const outro = viva.phone ? await chipUsadoPorOutraFilial(f.id, viva.phone) : null;
-        if (!outro || chipsWhatsappIguais(f.whatsapp, viva.phone)) {
-          const webhook = await garantirWebhook(viva.token, f.id);
-          return res.json(comEstado({
-            mensagem: `Chatbot “${f.nome}” já está conectado`,
-            webhook,
-            configurado: true,
-            loggedIn: true,
-            connected: true,
-            phone: viva.phone,
-            name: viva.name,
-            jid: viva.jid,
-            qrcode: '',
-            tem_qr: false,
-            sessao_desta_filial: true,
-          }));
+        let sessaoOk = false;
+        try {
+          const ja = await statusSessao(viva.token, { filial_id: f.id, nome: f.nome });
+          sessaoOk = Boolean(ja.loggedIn);
+        } catch {
+          sessaoOk = false;
+        }
+        if (sessaoOk) {
+          const outro = viva.phone ? await chipUsadoPorOutraFilial(f.id, viva.phone) : null;
+          if (!outro || chipsWhatsappIguais(f.whatsapp, viva.phone)) {
+            const webhook = await garantirWebhook(viva.token, f.id);
+            return res.json(comEstado({
+              mensagem: `Chatbot “${f.nome}” já está conectado`,
+              webhook,
+              configurado: true,
+              loggedIn: true,
+              connected: true,
+              phone: viva.phone,
+              name: viva.name,
+              jid: viva.jid,
+              qrcode: '',
+              tem_qr: false,
+              sessao_desta_filial: true,
+            }));
+          }
         }
       }
     }
@@ -1645,6 +1656,7 @@ router.post('/filial/:id/disconnect', requireChatbotAcesso, async (req, res) => 
       } catch {
         // logout já encerrou ou a sessão já estava morta
       }
+      await encerrarSessaoParaQr(token);
     } else {
       aviso = 'Sem token próprio — limpou só número, grupo e alertas.';
     }
