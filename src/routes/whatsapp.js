@@ -546,18 +546,37 @@ function statusAPartirDoAdmin(extraSessao, extra = {}) {
   }, extra);
 }
 
+function ehAuthWuzapi(err) {
+  const msg = typeof err === 'string' ? err : (err?.message || err?.qr_erro || '');
+  const status = err?.upstreamStatus || err?.status;
+  return status === 401 || status === 403
+    || /401|unauthor/i.test(String(msg));
+}
+
 async function statusComQr(token, extra = {}) {
+  const cached = qrDoCache(token);
   let status;
   try {
     status = await statusSessao(token, extra);
   } catch (err) {
     status = normalizarStatus({}, extra);
-    status.qr_erro = err.message;
+    if (cached) {
+      status.qrcode = cached;
+      status.connected = true;
+      status.loggedIn = false;
+    } else if (!ehAuthWuzapi(err)) {
+      status.qr_erro = err.message;
+    }
     if (err.infraWuzapi) status.infra_wuzapi = true;
   }
   if (status.loggedIn && !extra.parear && !extra.forcar_qr) {
     status.qrcode = '';
     return status;
+  }
+  if (cached && !status.qrcode) {
+    status.qrcode = cached;
+    status.qr_erro = null;
+    status.connected = true;
   }
   try {
     const qr = await buscarQr(token);
@@ -567,8 +586,9 @@ async function statusComQr(token, extra = {}) {
       status.infra_wuzapi = false;
     }
   } catch (err) {
-    if (!status.qrcode) status.qr_erro = err.message;
+    if (!status.qrcode && !ehAuthWuzapi(err)) status.qr_erro = err.message;
   }
+  if (status.qrcode) status.qr_erro = null;
   return status;
 }
 
@@ -1275,18 +1295,56 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
       }));
     }
     if (!wuzapiConfigurado(token)) {
+      try {
+        const garantia = await garantirTokenExclusivoFilial(f);
+        token = garantia.token || token;
+        extra.tem_wuzapi_token = Boolean(token);
+        extra.token = Boolean(token);
+      } catch {
+        return res.json(comEstado({
+          ...extra,
+          configurado: false,
+          connected: false,
+          loggedIn: false,
+          mensagem: 'Clique em Conectar — o sistema prepara a sessão desta unidade sozinho.',
+        }));
+      }
+    }
+    if (!wuzapiConfigurado(token)) {
       return res.json(comEstado({
         ...extra,
         configurado: false,
         connected: false,
         loggedIn: false,
-        mensagem: 'Clique em Conectar chip — o sistema prepara a sessão desta unidade sozinho.',
+        mensagem: 'Clique em Conectar — o sistema prepara a sessão desta unidade sozinho.',
       }));
     }
     try {
-      const status = querQr
-        ? await statusComQr(token, extra)
-        : await statusSessao(token, extra);
+      let status;
+      try {
+        status = querQr
+          ? await statusComQr(token, extra)
+          : await statusSessao(token, extra);
+      } catch (errAuth) {
+        if (!ehAuthWuzapi(errAuth)) throw errAuth;
+        const reparo = await garantirTokenExclusivoFilial(f);
+        token = reparo.token || token;
+        extra.tem_wuzapi_token = Boolean(token);
+        extra.token = Boolean(token);
+        status = querQr
+          ? await statusComQr(token, extra)
+          : await statusSessao(token, extra);
+      }
+      const cachedQr = querQr ? qrDoCache(token) : '';
+      if (cachedQr && !status.qrcode && !status.loggedIn) {
+        status.qrcode = cachedQr;
+        status.connected = true;
+        status.qr_erro = null;
+      }
+      if (ehAuthWuzapi(status.qr_erro) && (status.qrcode || cachedQr)) {
+        status.qrcode = status.qrcode || cachedQr;
+        status.qr_erro = null;
+      }
       if (status.loggedIn && status.phone) {
         const outro = await chipUsadoPorOutraFilial(f.id, status.phone);
         if (outro && !chipsWhatsappIguais(f.whatsapp, status.phone)) {
@@ -1353,6 +1411,46 @@ router.get('/filial/:id/status', requireChatbotAcesso, async (req, res) => {
         // mantém instavel abaixo
       }
       const infra = err.infraWuzapi || ehErroInfraWuzapi(err.message);
+      if (ehAuthWuzapi(err) || /401|unauthor/i.test(err.message || '')) {
+        const cachedQr = qrDoCache(token);
+        if (cachedQr) {
+          return res.json(comEstado({
+            ...extra,
+            configurado: true,
+            connected: true,
+            loggedIn: false,
+            qrcode: querQr ? cachedQr : '',
+            mensagem: 'QR pronto — escaneie no celular do chip.',
+          }));
+        }
+        try {
+          const reparo = await garantirTokenExclusivoFilial(f);
+          const tokNovo = reparo.token;
+          if (tokNovo && tokNovo !== token) {
+            const statusNovo = querQr
+              ? await statusComQr(tokNovo, extra)
+              : await statusSessao(tokNovo, extra);
+            return res.json(comEstado({
+              configurado: true,
+              ...statusNovo,
+              ...extra,
+              tem_wuzapi_token: true,
+              token: true,
+              qrcode: querQr ? (statusNovo.qrcode || qrDoCache(tokNovo) || '') : '',
+            }));
+          }
+        } catch {
+          // segue mensagem amigável
+        }
+        return res.json(comEstado({
+          ...extra,
+          configurado: true,
+          connected: false,
+          loggedIn: false,
+          qrcode: '',
+          mensagem: 'Clique em Conectar. O sistema cria a sessão desta unidade e mostra o QR.',
+        }));
+      }
       const chipSalvo = String(extra.chip_salvo || '').replace(/\D/g, '');
       if (chipSalvo.length >= 10) {
         return res.json(respostaChipCadastrado(extra));
