@@ -1437,13 +1437,26 @@ router.post('/filial/:id/connect', requireChatbotAcesso, async (req, res) => {
 
     pareamentoAtivo.set(Number(f.id), Date.now());
 
-    // 3) Consulta o WuzAPI neste único token e devolve o QR
-    status = await conectarEObterQr(token, {
+    const pedirQr = async (tok) => conectarEObterQr(tok, {
       filial_id: f.id,
       nome: f.nome,
       forcar_qr: gerarQrDeNovo,
       parear: gerarQrDeNovo,
     });
+
+    try {
+      status = await pedirQr(token);
+    } catch (errQr) {
+      const auth = errQr.upstreamStatus === 401 || errQr.upstreamStatus === 403
+        || errQr.status === 502
+        || /401|unauthor/i.test(errQr.message || '');
+      if (!auth) throw errQr;
+      const reparo = await garantirTokenExclusivoFilial(f);
+      f = await filialOuErro(req.params.id);
+      token = reparo.token || await tokenWuzapiFilial(f.id, { permitirEnv: false });
+      if (!token) throw errQr;
+      status = await pedirQr(token);
+    }
 
     if (status?.infra_wuzapi) {
       return res.json(comEstado({

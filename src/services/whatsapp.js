@@ -258,6 +258,8 @@ function nomesAntigosUsuarioWuzapi(filial) {
     `Pneu-${codigo}`,
     `PneuSistemma-${filial.id}`,
     `Pneu-${filial.id}`,
+    `Pneu${filial.id}`,
+    codigo,
   ].filter(Boolean);
 }
 
@@ -292,7 +294,9 @@ export function encontrarUsuarioWuzapiDaFilial(filial, users) {
     const phone = limparTelefone(u.jid || u.JID || u.phone || u.Phone);
     const tokenUser = tokenNaoEAdmin(u.token || u.Token);
     const ativa = sessaoWuzapiAtiva(u);
-    const porNome = nomesOk.has(name) || name.startsWith(prefixoId);
+    const porNome = nomesOk.has(name)
+      || name.startsWith(prefixoId)
+      || [...nomesOk].some((n) => n.toLowerCase() === name.toLowerCase());
     const porToken = Boolean(tokenFilial && tokenUser && tokenFilial === tokenUser);
     const porChip = Boolean(chipFilial && phone && chipsWhatsappIguais(phone, chipFilial));
     if (porNome) return true;
@@ -437,11 +441,16 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     : false;
 
   const nomesOk = nomesUsuarioWuzapiFilial(atual);
+  const nomesLow = new Set([...nomesOk].map((n) => n.toLowerCase()));
   const prefixoId = `Pneu${atual.id}-`;
+  const nomeSan = String(atual.nome || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
   const daMesmaFilial = (lista) => (lista || []).filter((u) => {
     const name = String(u.name || u.Name || '').trim();
     const tok = tokenNaoEAdmin(u.token || u.Token);
-    return nomesOk.has(name) || name.startsWith(prefixoId) || Boolean(tokenAtual && tok === tokenAtual);
+    if (nomesOk.has(name) || name.startsWith(prefixoId)) return true;
+    if (nomesLow.has(name.toLowerCase())) return true;
+    if (nomeSan.length >= 5 && name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() === nomeSan) return true;
+    return Boolean(tokenAtual && tok === tokenAtual);
   });
 
   let usersWuz = await adminUsersWuzapi({ forcar: true });
@@ -490,7 +499,11 @@ export async function garantirTokenExclusivoFilial(filial, opts = {}) {
     }
   }
 
-  if (tokenAtual) {
+  const tokenExisteNoWuzapi = Boolean(
+    tokenAtual && usersWuz.some((u) => tokenNaoEAdmin(u.token || u.Token) === tokenAtual)
+  );
+  // Token no cadastro sem usuário no WuzAPI = órfão (401). Não reutilizar.
+  if (tokenAtual && (tokenExisteNoWuzapi || usersWuz.length === 0) && !compartilhado) {
     return {
       token: tokenAtual,
       criado: false,
