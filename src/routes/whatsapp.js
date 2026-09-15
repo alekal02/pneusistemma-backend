@@ -1896,7 +1896,7 @@ router.get('/filial/:id/envios', requireChatbotAcesso, async (req, res, next) =>
           : (n.status === 'erro' ? 'Pendente / falha' : n.status),
         erro,
         mensagem: n.mensagem,
-        criado_em: n.criado_em,
+        criado_em: n.criado_em instanceof Date ? n.criado_em.toISOString() : n.criado_em,
         preview: String(n.mensagem || '').replace(/\s+/g, ' ').slice(0, 120),
       };
     };
