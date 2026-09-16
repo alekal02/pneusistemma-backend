@@ -54,24 +54,35 @@ export function sequenciaDoPadrao(fogo, codigo) {
 
 const RE_SO_DIGITOS = /^\d+$/;
 const RE_PREFIXO_SEQ = /^(.+)-(\d+)$/;
+const RE_PLACEHOLDER_FOGO = /^(s\/?n|sem\s*n(ume?ro)?|sem\s*fogo|n\/?a|-|null|undefined)$/i;
+
+/** S/N, vazio e similares — gera automático em vez de gravar o placeholder. */
+export function ehPlaceholderFogo(informado) {
+  const bruto = String(informado || '').trim();
+  if (!bruto) return true;
+  return RE_PLACEHOLDER_FOGO.test(bruto);
+}
 
 /**
  * Interpreta o que o usuário digitou.
- * - vazio ou só o código da unidade → null (gerar automático)
- * - só dígitos → completa com o código (0001 → 0110-0001)
+ * - vazio, S/N ou só o código da unidade → null (gerar automático)
+ * - só dígitos, unidade 100% no padrão {CODIGO}-seq → completa (0001 → 0110-0001)
+ * - só dígitos, unidade com fogos legados (planilha 1224510, 377) → mantém
  * - 0110-0001 (prefixo desta unidade) → normaliza com padding
- * - prefixo de outra unidade no mesmo formato → erro
- * - qualquer outro texto → legado (F-1001), sem alterar
+ * - qualquer outro texto → legado (F-1001, CLG0748), sem alterar
  */
-export function normalizarFogoInformado(informado, codigo) {
+export function normalizarFogoInformado(informado, codigo, { padrao_obrigatorio = false } = {}) {
   const bruto = String(informado || '').trim();
-  if (!bruto) return null;
+  if (ehPlaceholderFogo(bruto)) return null;
   const codigoOk = normalizarCodigoFilial(codigo);
   const upper = bruto.toUpperCase();
   if (upper === codigoOk) return null;
 
   if (RE_SO_DIGITOS.test(bruto)) {
-    return formatarNumeroFogo(codigoOk, Number(bruto));
+    if (padrao_obrigatorio) {
+      return formatarNumeroFogo(codigoOk, Number(bruto));
+    }
+    return bruto;
   }
 
   const m = upper.match(RE_PREFIXO_SEQ);
@@ -128,7 +139,9 @@ export async function consultarProximoFogo(db, filialId) {
 
 export async function resolverNumeroFogo(db, filialId, informado) {
   const info = await consultarProximoFogo(db, filialId);
-  const normalizado = normalizarFogoInformado(informado, info.codigo_filial);
+  const normalizado = normalizarFogoInformado(informado, info.codigo_filial, {
+    padrao_obrigatorio: info.padrao_obrigatorio,
+  });
   if (!normalizado) {
     return { ...info, numero_fogo: info.proximo, gerado: true };
   }
@@ -194,7 +207,9 @@ export async function criarGeradorNumeroFogo(db, filialId) {
   return {
     ...info,
     alocar(informado) {
-      const normalizado = normalizarFogoInformado(informado, info.codigo_filial);
+      const normalizado = normalizarFogoInformado(informado, info.codigo_filial, {
+        padrao_obrigatorio: info.padrao_obrigatorio,
+      });
       if (!normalizado) {
         const fogo = formatarNumeroFogo(info.codigo_filial, seq);
         seq += 1;

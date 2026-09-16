@@ -83,6 +83,7 @@ async function main() {
       database: 'postgresql',
       sulco_critico_mm: limites.sulco_critico_mm,
       sulco_alerta_mm: limites.sulco_alerta_mm,
+      fogo_preserva_digitos_legado: true,
     });
   });
 
