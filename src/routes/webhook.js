@@ -7,7 +7,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { getDb } from '../database.js';
 import { config } from '../config.js';
 import { enviarERegistrar, limparTelefone, normalizarDestino } from '../services/whatsapp.js';
-import { processarMensagemMenu } from '../services/whatsapp-menu.js';
+import { processarMensagemMenu, pareceFogoAvulso } from '../services/whatsapp-menu.js';
 
 const router = Router();
 
@@ -123,11 +123,8 @@ function deveIgnorarMensagemPropria(event) {
   const placa = normalizarPlacaTexto(text);
   if (/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(placa)) return false;
   if (placa.length >= 3 && placa.length <= 12 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) return false;
-  // Nº de fogo (ex.: BH-E01-215249, fogo 123)
-  const fogo = text.replace(/^fogo\s+/i, '').trim();
-  if (fogo.length >= 1 && fogo.length <= 24 && /^[A-Za-z0-9][A-Za-z0-9\-_./]*$/.test(fogo) && !/\s/.test(fogo)) {
-    return false;
-  }
+  // Nº de fogo real (0501-0042, AP1-0134) — não “fechou/rlx/flws”
+  if (pareceFogoAvulso(text)) return false;
   return true;
 }
 

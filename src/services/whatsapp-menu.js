@@ -69,25 +69,55 @@ function parecePlacaOperacional(texto) {
   return true;
 }
 
-function pareceFogoAvulso(texto) {
-  const t = String(texto || '').trim();
-  if (!t || /^[0-9]$/.test(t)) return false;
-  if (/^(menu|ajuda|help|frota|placas|lista|relatorio|report|pdf|cancelar|cancela|sair|voltar)$/i.test(norm(t))) {
-    return false;
-  }
-  const fogo = t.replace(/^fogo\s+/i, '').trim();
-  if (!fogo || /\s/.test(fogo)) return false;
-  if (fogo.length < 1 || fogo.length > 24) return false;
-  if (parecePlacaBrasil(fogo) || parecePlacaOperacional(fogo)) return false;
-  return /^[A-Za-z0-9][A-Za-z0-9\-_./]*$/.test(fogo);
-}
-
 function ehCancelar(cmd) {
   return /^(0|cancelar|cancela|sair|voltar|menu)$/i.test(cmd);
 }
 
 function ehMenu(cmd) {
   return /^(menu|ajuda|help|\?)$/i.test(cmd);
+}
+
+/** “fechou”, “rlx”, “flws” e similares — conversa, não operação. */
+const RE_CONVERSA_LIVRE = /^(ok+|okay|oki|blz|beleza|show|top|tmj|tamo|vlw+|valeu+|obg|obrigad[oa]|obgd|flw+s?|falou|falow|xau+|tchau|bye|rlx|relaxa|deboa|db|ss+|kkk+|haha+|rsrs*|uhul?|fechou+|slk|fdc|suave|tranquilo|tranq|massa|boaa*|hmm+|aham|obgg+|tmjj+|vlww*|obgdo?|fechouu*|flws|rlxx*)$/;
+
+export function ehConversaLivre(texto) {
+  const c = norm(texto);
+  if (!c) return true;
+  return RE_CONVERSA_LIVRE.test(c);
+}
+
+/**
+ * Atalho de nº de fogo só quando parece marca real (0501-0042, AP1-0134, 08251227).
+ * Palavra sem dígito (fechou, rlx, flws) não é fogo.
+ */
+export function pareceFogoAvulso(texto) {
+  const t = String(texto || '').trim();
+  if (!t || /^[0-9]$/.test(t)) return false;
+  const cmd = norm(t);
+  if (ehMenu(cmd) || ehCancelar(cmd) || ehConversaLivre(t)) return false;
+  if (/^(frota|placas|lista|relatorio|report|pdf)$/i.test(cmd)) return false;
+  const fogo = t.replace(/^fogo\s+/i, '').trim();
+  if (!fogo || /\s/.test(fogo)) return false;
+  if (fogo.length < 2 || fogo.length > 24) return false;
+  if (parecePlacaBrasil(fogo)) return false;
+  if (!/-/.test(fogo) && !/^fogo\s+/i.test(t) && parecePlacaOperacional(fogo)) return false;
+  if (!/[0-9]/.test(fogo)) return false;
+  if (!/^[A-Za-z0-9][A-Za-z0-9\-_./]*$/.test(fogo)) return false;
+  if (/^[0-9]+$/.test(fogo) && fogo.length < 3) return false;
+  return true;
+}
+
+async function recusarFogoInvalido(ctx, texto) {
+  if (ehConversaLivre(texto)) {
+    await clear(ctx);
+    await reply(ctx, 'Ok. Quando quiser, digite *menu*.');
+    return true;
+  }
+  if (!pareceFogoAvulso(texto)) {
+    await reply(ctx, 'Não entendi. Envie o *nº de fogo* (ex.: 0501-0042) ou *0* para cancelar.');
+    return true;
+  }
+  return false;
 }
 
 function soNumero(texto) {
@@ -296,6 +326,7 @@ async function passoMontarPos(ctx, sessao, texto) {
     await reply(ctx, textoMenu());
     return;
   }
+  if (await recusarFogoInvalido(ctx, texto)) return;
   const pneu = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
   if (!pneu || pneu.status_pneu !== 'estoque') {
     await reply(ctx, 'Fogo não encontrado no *estoque*. Envie outro nº ou *0*.');
@@ -418,6 +449,7 @@ async function iniciarOpcao(ctx, n) {
 }
 
 async function passoEstoque(ctx, sessao, texto) {
+  if (await recusarFogoInvalido(ctx, texto)) return;
   const pneu = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
   if (!pneu) {
     await reply(ctx, 'Pneu não encontrado. Envie o nº de fogo ou *0*.');
@@ -467,6 +499,7 @@ async function passoRecap(ctx, sessao, texto) {
     return;
   }
 
+  if (await recusarFogoInvalido(ctx, texto)) return;
   const pneu = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
   if (!pneu) {
     await reply(ctx, 'Pneu não encontrado. Envie o nº de fogo ou *0*.');
@@ -555,6 +588,7 @@ async function passoDescarte(ctx, sessao, texto) {
     return;
   }
 
+  if (await recusarFogoInvalido(ctx, texto)) return;
   const pneu = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
   if (!pneu) {
     await reply(ctx, 'Pneu não encontrado. Envie o nº de fogo ou *0*.');
