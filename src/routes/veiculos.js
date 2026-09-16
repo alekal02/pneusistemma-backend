@@ -5,6 +5,10 @@ import { TIPOS_VEICULO } from '../config.js';
 import { limitesDoVeiculo } from '../limites.js';
 import { requireAuth, requireFilial, requireGerenteOuAdmin, filialScopeId, filiaisEscopoIds, assertVeiculoDaFilial } from '../auth.js';
 import {
+  preverLimpezaExcetoCompactadores,
+  limparFrotaExcetoCompactadores,
+} from '../services/limpar-filial.js';
+import {
   POSICOES_PNEU,
   LAYOUTS_PNEU,
   LAYOUT_PADRAO,
@@ -467,6 +471,37 @@ router.get('/:id', async (req, res, next) => {
     if (!detalhe) return res.status(404).json({ erro: 'Veículo não encontrado' });
     res.json(detalhe);
   } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Remove da filial logada tudo que não é compactador.
+ * Só mexe no escopo da unidade (Aparecida não apaga Unaí/BH).
+ * Body: { confirmar: true } para executar; sem isso só simula.
+ */
+router.post('/limpar-exceto-compactadores', async (req, res, next) => {
+  try {
+    const db = getDb();
+    const filialId = filialScopeId(req);
+    const previsao = await preverLimpezaExcetoCompactadores(db, filialId);
+    const confirmar = req.body?.confirmar === true
+      || String(req.body?.confirmar || '').toLowerCase() === 'compactadores';
+    if (!confirmar) {
+      return res.json({
+        mensagem: `Simulação: manter ${previsao.manter.veiculos} compactador(es) e ${previsao.manter.pneus} pneu(s). Apagar ${previsao.apagar.veiculos} veículo(s) e ${previsao.apagar.pneus} pneu(s). Envie confirmar=true para executar.`,
+        simular: true,
+        ...previsao,
+      });
+    }
+    const resultado = await limparFrotaExcetoCompactadores(db, filialId);
+    res.json({
+      mensagem: `Unidade ${resultado.filial.nome}: restam ${resultado.depois.veiculos} compactador(es) e ${resultado.depois.pneus} pneu(s). O restante dessa filial foi excluído.`,
+      simular: false,
+      ...resultado,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });

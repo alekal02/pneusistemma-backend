@@ -89,6 +89,155 @@ export async function contarFrotaFilial(db, filialId) {
   };
 }
 
+/** Caminhão compactador: apelido/tipo/layout — a importação da Aparecida veio toda como Truck. */
+const SQL_EH_COMPACTADOR = `
+  (
+    LOWER(COALESCE(apelido, '')) LIKE '%compactador%'
+    OR LOWER(COALESCE(tipo, '')) LIKE '%compactador%'
+    OR LOWER(COALESCE(layout_pneus, '')) = 'compactador'
+  )
+`;
+
+export async function listarCompactadoresFilial(db, filialId) {
+  return db.prepare(`
+    SELECT id, placa, apelido, tipo, layout_pneus
+    FROM veiculos
+    WHERE filial_id = ?
+      AND ${SQL_EH_COMPACTADOR}
+    ORDER BY placa
+  `).all(filialId);
+}
+
+export async function preverLimpezaExcetoCompactadores(db, filialId) {
+  const { id, filial } = await filialOu404(db, filialId);
+  const compactadores = await listarCompactadoresFilial(db, id);
+  const keepSql = `SELECT id FROM veiculos WHERE filial_id = ? AND ${SQL_EH_COMPACTADOR}`;
+  const veiculosOutros = await nSafe(
+    db,
+    `SELECT COUNT(*) as c FROM veiculos WHERE filial_id = ? AND NOT ${SQL_EH_COMPACTADOR}`,
+    id
+  );
+  const pneusManter = await nSafe(
+    db,
+    `SELECT COUNT(*) as c FROM pneus
+     WHERE filial_id = ?
+       AND veiculo_id IN (${keepSql})`,
+    id,
+    id
+  );
+  const pneusApagar = await nSafe(
+    db,
+    `SELECT COUNT(*) as c FROM pneus
+     WHERE filial_id = ?
+       AND (veiculo_id IS NULL OR veiculo_id NOT IN (${keepSql}))`,
+    id,
+    id
+  );
+  return {
+    filial,
+    compactadores,
+    manter: {
+      veiculos: compactadores.length,
+      pneus: pneusManter,
+    },
+    apagar: {
+      veiculos: veiculosOutros,
+      pneus: pneusApagar,
+    },
+  };
+}
+
+/**
+ * Apaga frota da filial que NÃO é compactador.
+ * Mantém cadastro, login, WhatsApp e os compactadores + pneus montados neles.
+ */
+export async function limparFrotaExcetoCompactadores(db, filialId) {
+  const previsao = await preverLimpezaExcetoCompactadores(db, filialId);
+  const { filial } = previsao;
+  const id = filial.id;
+
+  if (!previsao.compactadores.length) {
+    const err = new Error('Nenhum compactador encontrado nesta filial. Nada foi apagado.');
+    err.status = 400;
+    throw err;
+  }
+
+  const keepSql = `SELECT id FROM veiculos WHERE filial_id = ? AND ${SQL_EH_COMPACTADOR}`;
+
+  await db.transaction(async () => {
+    await delSafe(db, `
+      DELETE FROM tokens_acesso_rapido
+      WHERE filial_id = ?
+        AND (veiculo_id IS NULL OR veiculo_id NOT IN (${keepSql}))
+    `, id, id);
+
+    await delSafe(db, `
+      DELETE FROM notificacoes_whatsapp
+      WHERE filial_id = ?
+        AND (
+          veiculo_id IS NULL
+          OR veiculo_id NOT IN (${keepSql})
+        )
+    `, id, id);
+
+    await delSafe(db, `
+      DELETE FROM alertas_posicao_vaga
+      WHERE filial_id = ?
+        AND (veiculo_id IS NULL OR veiculo_id NOT IN (${keepSql}))
+    `, id, id);
+
+    await db.prepare(`
+      DELETE FROM medicoes
+      WHERE pneu_id IN (
+        SELECT id FROM pneus
+        WHERE filial_id = ?
+          AND (veiculo_id IS NULL OR veiculo_id NOT IN (${keepSql}))
+      )
+    `).run(id, id);
+
+    await db.prepare(`
+      DELETE FROM movimentacoes
+      WHERE pneu_id IN (
+        SELECT id FROM pneus
+        WHERE filial_id = ?
+          AND (veiculo_id IS NULL OR veiculo_id NOT IN (${keepSql}))
+      )
+         OR (
+           veiculo_id IS NOT NULL
+           AND veiculo_id IN (SELECT id FROM veiculos WHERE filial_id = ? AND NOT ${SQL_EH_COMPACTADOR})
+         )
+    `).run(id, id, id);
+
+    await db.prepare(`
+      DELETE FROM pneus
+      WHERE filial_id = ?
+        AND (veiculo_id IS NULL OR veiculo_id NOT IN (${keepSql}))
+    `).run(id, id);
+
+    await db.prepare(`
+      DELETE FROM veiculos
+      WHERE filial_id = ?
+        AND NOT ${SQL_EH_COMPACTADOR}
+    `).run(id);
+
+    await db.prepare(`
+      UPDATE veiculos
+      SET tipo = 'Compactador', updated_at = NOW()
+      WHERE filial_id = ?
+        AND ${SQL_EH_COMPACTADOR}
+    `).run(id);
+  });
+
+  const compactadoresDepois = await listarCompactadoresFilial(db, id);
+  const depois = await contarFrotaFilial(db, id);
+  return {
+    filial,
+    previsao,
+    depois,
+    compactadores: compactadoresDepois,
+  };
+}
+
 async function apagarDependenciasOperacionais(db, id) {
   await delSafe(db, `
     DELETE FROM tokens_acesso_rapido WHERE filial_id = ?
