@@ -803,6 +803,18 @@ function gruposFilialIguais(a, b) {
     === db.replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
 }
 
+async function grupoWhatsappUsadoPorOutra(db, filialId, grupo) {
+  const g = limparTextoFilial(grupo);
+  if (!g) return null;
+  const rows = await db.prepare(`
+    SELECT id, nome, whatsapp_grupo FROM filiais
+    WHERE ativo = 1
+      AND whatsapp_grupo IS NOT NULL AND TRIM(whatsapp_grupo) != ''
+      AND (? IS NULL OR id != ?)
+  `).all(filialId || null, filialId || 0);
+  return (rows || []).find((r) => gruposFilialIguais(r.whatsapp_grupo, g)) || null;
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   const { nome, codigo, contrato, login, senha, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token } = req.body || {};
   if (!nome?.trim() || !codigo?.trim()) {
@@ -817,6 +829,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
   const senhaHash = hashSenha(senha);
 
   try {
+    const grupoNovo = limparTextoFilial(whatsapp_grupo);
+    if (grupoNovo) {
+      const ocupado = await grupoWhatsappUsadoPorOutra(db, null, grupoNovo);
+      if (ocupado) {
+        return res.status(409).json({
+          erro: `Esse grupo já está na unidade ${ocupado.nome}. Cada filial precisa do próprio grupo.`,
+        });
+      }
+    }
     const criado = await db.transaction(async () => {
       const filialIns = await db.prepare(`
         INSERT INTO filiais (nome, codigo, contrato, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token)
@@ -920,6 +941,14 @@ router.put('/:id', async (req, res, next) => {
     const waGrupo = whatsapp_grupo !== undefined
       ? limparTextoFilial(whatsapp_grupo)
       : atual.whatsapp_grupo;
+    if (whatsapp_grupo !== undefined && waGrupo) {
+      const ocupado = await grupoWhatsappUsadoPorOutra(db, Number(req.params.id), waGrupo);
+      if (ocupado) {
+        return res.status(409).json({
+          erro: `Esse grupo já está na unidade ${ocupado.nome}. Cada filial precisa do próprio grupo.`,
+        });
+      }
+    }
     const waAlerta = whatsapp_alerta !== undefined
       ? (limparTextoFilial(whatsapp_alerta)?.replace(/\D/g, '') || null)
       : atual.whatsapp_alerta;

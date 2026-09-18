@@ -315,14 +315,21 @@ async function resolverCanalFilial(db, chatJid, filialIdHint = null) {
   }
   const filiais = await db.prepare(sql).all(...params);
 
+  const matches = [];
   for (const f of filiais) {
     if (!f.whatsapp_grupo) continue;
     if (!jidsGrupoIguais(f.whatsapp_grupo, chatJid)) continue;
     const replyTo = normalizarDestino(f.whatsapp_grupo)?.phone
       || String(f.whatsapp_grupo).trim();
-    return { filial: f, replyTo, escopoFilialId: f.id };
+    matches.push({ filial: f, replyTo, escopoFilialId: f.id });
   }
-  return null;
+  if (matches.length > 1) {
+    console.warn('[webhook] mais de uma filial no mesmo grupo — usando a primeira', {
+      chat: chatJid,
+      filiais: matches.map((m) => m.escopoFilialId),
+    });
+  }
+  return matches[0] || null;
 }
 
 router.post('/whatsapp', async (req, res) => {

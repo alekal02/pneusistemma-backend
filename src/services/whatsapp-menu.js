@@ -188,7 +188,8 @@ async function clear(ctx) {
 async function resolverVeiculoPorTexto(filialId, texto) {
   const placaLimpa = normalizarPlaca(texto);
   if (!placaLimpa || placaLimpa.length < 3) return { ok: false, motivo: 'curta' };
-  const veiculos = await ops.buscarVeiculoPorPlaca(filialId, placaLimpa);
+  const veiculos = (await ops.buscarVeiculoPorPlaca(filialId, placaLimpa))
+    .filter((v) => Number(v.filial_id) === Number(filialId));
   if (!veiculos.length) return { ok: false, motivo: 'nao_encontrada', placa: placaLimpa };
   if (veiculos.length > 1) {
     const exatos = veiculos.filter((v) => normalizarPlaca(v.placa) === placaLimpa);
@@ -198,11 +199,15 @@ async function resolverVeiculoPorTexto(filialId, texto) {
   return { ok: true, veiculo: veiculos[0], placa: placaLimpa };
 }
 
-export async function montarMensagemMedicao(veiculo, phone, destinoEnvio) {
+export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filialIdEscopo = null) {
+  const filialId = filialIdEscopo || veiculo.filial_id;
+  if (filialIdEscopo && Number(veiculo.filial_id) !== Number(filialIdEscopo)) {
+    throw new Error('Veículo de outra unidade');
+  }
   const { link } = await gerarTokenAcessoRapido({
     tipo: 'medir',
     veiculoId: veiculo.id,
-    filialId: veiculo.filial_id,
+    filialId,
     whatsappOrigem: phone || destinoEnvio,
   });
   const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
@@ -235,12 +240,12 @@ async function fluxoMedirPlaca(ctx, texto) {
     return;
   }
   if (!r.ok) {
-    await reply(ctx, `❌ Placa *${r.placa || normalizarPlaca(texto)}* não encontrada.\n\nDigite *9* para frota ou *menu*.`);
+    await reply(ctx, `❌ Placa *${r.placa || normalizarPlaca(texto)}* não encontrada nesta unidade.\n\nDigite *9* para frota ou *menu*.`);
     await clear(ctx);
     return;
   }
   try {
-    await reply(ctx, await montarMensagemMedicao(r.veiculo, ctx.phone, ctx.destino));
+    await reply(ctx, await montarMensagemMedicao(r.veiculo, ctx.phone, ctx.destino, ctx.filialId));
   } catch (err) {
     await reply(ctx, `❌ Não consegui gerar o link: ${err.message}\n\nDigite *menu*.`);
   }
@@ -258,7 +263,7 @@ async function fluxoTrocaPlaca(ctx, texto) {
     return;
   }
   if (!r.ok) {
-    await reply(ctx, `Placa *${r.placa || normalizarPlaca(texto)}* não encontrada. *0* = cancelar.`);
+    await reply(ctx, `Placa *${r.placa || normalizarPlaca(texto)}* não encontrada nesta unidade. *0* = cancelar.`);
     return;
   }
   const { link } = await gerarTokenAcessoRapido({
