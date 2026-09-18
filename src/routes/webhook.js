@@ -26,6 +26,52 @@ function rateLimitOk(key) {
   return bucket.count <= 30;
 }
 
+/** WuzAPI/WhatsApp reenvia o mesmo evento (ID, LID e @g.us). Sem isso menu, placa e fogo saem 2–3×. */
+const mensagensVistas = new Map();
+const DEDUP_ID_MS = 120_000;
+const DEDUP_TEXTO_MS = 25_000;
+
+function limparMensagensVistas(now) {
+  if (mensagensVistas.size < 80) return;
+  for (const [chave, visto] of mensagensVistas) {
+    if (now - visto.ts > DEDUP_ID_MS) mensagensVistas.delete(chave);
+  }
+}
+
+function chaveTextoWebhook(filialId, body) {
+  const placa = normalizarPlacaTexto(body);
+  if (placa.length >= 3 && placa.length <= 12 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) {
+    return `p:${Number(filialId) || 0}|${placa}`;
+  }
+  const texto = String(body || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `t:${Number(filialId) || 0}|${texto}`;
+}
+
+/** true = já tratamos; false = primeira vez (marca na hora, antes do próximo await) */
+function mensagemDuplicada({ id, filialId, body }) {
+  const now = Date.now();
+  limparMensagensVistas(now);
+  if (id) {
+    const chaveId = `id:${id}`;
+    const prev = mensagensVistas.get(chaveId);
+    if (prev && now - prev.ts < DEDUP_ID_MS) return true;
+    mensagensVistas.set(chaveId, { ts: now });
+  }
+  const texto = String(body || '').trim();
+  if (texto) {
+    const chaveTxt = chaveTextoWebhook(filialId, texto);
+    const prev = mensagensVistas.get(chaveTxt);
+    if (prev && now - prev.ts < DEDUP_TEXTO_MS) return true;
+    mensagensVistas.set(chaveTxt, { ts: now });
+  }
+  return false;
+}
+
 function normalizarPlacaTexto(texto) {
   return String(texto || '')
     .normalize('NFKC')
@@ -135,6 +181,34 @@ function jidsGrupoIguais(a, b) {
   const da = String(a || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
   const db = String(b || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
   return Boolean(da && db && da === db);
+}
+
+export function extrairIdMensagem(event) {
+  const root = raizPayloadMensagem(event);
+  const info = root.Info || root.info || {};
+  const source = info.MessageSource || info.messageSource || {};
+  const candidates = [
+    info.ID,
+    info.Id,
+    info.id,
+    info.StanzaID,
+    info.stanzaId,
+    info.MessageID,
+    info.messageId,
+    source.ID,
+    source.Id,
+    source.id,
+    root.ID,
+    root.id,
+    event?.id,
+    event?.messageId,
+    event?.stanzaId,
+  ];
+  for (const c of candidates) {
+    const s = String(c || '').trim();
+    if (s) return s;
+  }
+  return null;
 }
 
 export function extrairChatJid(event) {
@@ -272,8 +346,12 @@ router.post('/whatsapp', async (req, res) => {
       || (event?.event && typeof event.event === 'object' && (event.event.Message || event.event.message))
     );
 
-    if (eventName && !/message/i.test(String(eventName)) && !temMensagem) {
+    // Só Message. ReadReceipt/HistorySync às vezes trazem o mesmo texto e repetem o menu.
+    if (eventName && !/^message$/i.test(String(eventName).trim())) {
       return res.status(200).json({ ok: true, ignored: true, tipo: eventName });
+    }
+    if (!eventName && !temMensagem) {
+      return res.status(200).json({ ok: true, ignored: true, tipo: '(vazio)' });
     }
 
     if (deveIgnorarMensagemPropria(event)) {
@@ -284,9 +362,11 @@ router.post('/whatsapp', async (req, res) => {
     const isGroup = ehMensagemDeGrupo(event) || Boolean(normalizarDestino(chatJid)?.isGroup);
     const phone = extrairTelefone(event);
     const body = extrairTextoMensagem(event);
+    const msgId = extrairIdMensagem(event);
 
     console.log('[webhook] msg', {
       event: eventName || '(sem nome)',
+      id: msgId,
       chat: chatJid,
       isGroup,
       phone,
@@ -313,6 +393,21 @@ router.post('/whatsapp', async (req, res) => {
         ignored: isGroup ? 'grupo_nao_selecionado' : 'somente_grupo_selecionado',
         chat: chatJid,
       });
+    }
+
+    // 3 POSTs do mesmo comando (ID repetido, LID vs telefone, placa com token diferente).
+    if (mensagemDuplicada({
+      id: msgId,
+      filialId: canal.escopoFilialId,
+      body,
+    })) {
+      console.info('[webhook] ignorado (duplicada)', {
+        id: msgId,
+        chat: chatJid,
+        filial: canal.escopoFilialId,
+        body: String(body).slice(0, 40),
+      });
+      return res.status(200).json({ ok: true, ignored: 'duplicada', id: msgId });
     }
 
     const destinoEnvio = canal.replyTo;

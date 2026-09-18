@@ -132,7 +132,7 @@ async function conectarSessaoEnvio(token) {
     await fetch(`${config.wuzapiBaseUrl}/session/connect`, {
       method: 'POST',
       headers: headersUsuarioWuzapi(t),
-      body: JSON.stringify({ Subscribe: ['Message'], Immediate: true }),
+      body: JSON.stringify({ Subscribe: ['Message'], Immediate: false }),
       signal: AbortSignal.timeout(15_000),
     });
   } catch {
@@ -292,6 +292,31 @@ function usuarioWuzapiGlobalNaLista(users, tokenPreferido = '') {
   }) || null;
 }
 
+async function silenciarWebhooksSessoesAntigas(tokenKeeper) {
+  const keeper = tokenNaoEAdmin(tokenKeeper);
+  if (!keeper || !config.wuzapiBaseUrl) return 0;
+  const users = await adminUsersWuzapi({ forcar: true });
+  let n = 0;
+  for (const u of users || []) {
+    const tok = tokenNaoEAdmin(u.token || u.Token);
+    if (!tok || tok === keeper) continue;
+    const name = String(u.name || u.Name || '').trim();
+    if (!ehUsuarioWuzapiPorFilial(name) && !/^PneuSistemma$/i.test(name)) continue;
+    try {
+      await fetch(`${config.wuzapiBaseUrl}/webhook`, {
+        method: 'DELETE',
+        headers: headersUsuarioWuzapi(tok),
+        signal: AbortSignal.timeout(8_000),
+      });
+      n += 1;
+    } catch {
+      // sessão antiga pode já estar morta
+    }
+  }
+  if (n) console.info('[whatsapp] webhooks antigos desligados', { n });
+  return n;
+}
+
 /**
  * Garante o único usuário WuzAPI do chatbot. Não cria um por filial.
  */
@@ -302,6 +327,7 @@ export async function garantirUsuarioWuzapiGlobal() {
   const tokExistente = tokenNaoEAdmin(existente?.token || existente?.Token);
   if (tokExistente) {
     await gravarTokenWhatsappGlobal(tokExistente);
+    silenciarWebhooksSessoesAntigas(tokExistente).catch(() => {});
     return {
       token: tokExistente,
       criado: false,
@@ -360,6 +386,7 @@ export async function garantirUsuarioWuzapiGlobal() {
   ) || token;
   await gravarTokenWhatsappGlobal(tokCreate);
   cacheAdminUsersSvc = { at: 0, users: null };
+  silenciarWebhooksSessoesAntigas(tokCreate).catch(() => {});
   return {
     token: tokCreate,
     criado: true,
@@ -1066,6 +1093,11 @@ export async function enviarDocumentoERegistrar({
   const dest = normalizarDestino(destinatario);
   const preview = mensagem || `📎 ${fileName || 'documento.pdf'}`;
 
+  if (dest?.phone && pularEnvioDuplicado(dest.logKey, `${fileName || ''}\n${caption || preview}`, 'doc')) {
+    console.info('[whatsapp] documento duplicado ignorado', { dest: dest.logKey, tipo });
+    return { ok: true, duplicado: true };
+  }
+
   if (!dest?.phone) {
     await registrarNotificacao({
       tipo,
@@ -1172,6 +1204,31 @@ export async function registrarNotificacao({
   );
 }
 
+const enviosRecentes = new Map();
+const ENVIO_DEDUP_MS = 20_000;
+
+function chaveConteudoEnvio(mensagem) {
+  return String(mensagem || '')
+    .replace(/https?:\/\/[^\s)]+/gi, '[link]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 280);
+}
+
+function pularEnvioDuplicado(destKey, mensagem, extra = '') {
+  const now = Date.now();
+  const chave = `${destKey}|${extra}|${chaveConteudoEnvio(mensagem)}`;
+  const prev = enviosRecentes.get(chave);
+  if (prev && now - prev < ENVIO_DEDUP_MS) return true;
+  enviosRecentes.set(chave, now);
+  if (enviosRecentes.size > 250) {
+    for (const [k, ts] of enviosRecentes) {
+      if (now - ts > ENVIO_DEDUP_MS) enviosRecentes.delete(k);
+    }
+  }
+  return false;
+}
+
 /**
  * Envia e registra; em falha grava status=erro
  * @param {{ filialId?: number, token?: string }} extra
@@ -1190,6 +1247,10 @@ export async function enviarERegistrar({
   registrar = true,
 }) {
   const dest = normalizarDestino(destinatario);
+  if (dest?.phone && pularEnvioDuplicado(dest.logKey, mensagem)) {
+    console.info('[whatsapp] envio duplicado ignorado', { dest: dest.logKey, tipo });
+    return { ok: true, duplicado: true };
+  }
   if (!dest?.phone) {
     if (registrar) {
       await registrarNotificacao({

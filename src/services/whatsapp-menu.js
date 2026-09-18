@@ -132,6 +132,31 @@ function simNao(texto) {
   return null;
 }
 
+const comandosRecentes = new Map();
+const COMANDO_DEDUP_MS = 25_000;
+
+function chaveComandoMenu(filialId, texto) {
+  const placa = normalizarPlaca(texto);
+  if (placa.length >= 3 && placa.length <= 12 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) {
+    return `p:${filialId}|${placa}`;
+  }
+  return `t:${filialId}|${norm(texto)}`;
+}
+
+function comandoDuplicado(filialId, texto) {
+  const now = Date.now();
+  if (comandosRecentes.size > 200) {
+    for (const [k, ts] of comandosRecentes) {
+      if (now - ts > COMANDO_DEDUP_MS) comandosRecentes.delete(k);
+    }
+  }
+  const chave = chaveComandoMenu(filialId, texto);
+  const prev = comandosRecentes.get(chave);
+  if (prev && now - prev < COMANDO_DEDUP_MS) return true;
+  comandosRecentes.set(chave, now);
+  return false;
+}
+
 async function reply(ctx, mensagem, tipo = 'link_veiculo') {
   const tipoEnvio = (/PneuSistemma — Menu/i.test(mensagem) && tipo === 'link_veiculo')
     ? 'menu'
@@ -668,6 +693,14 @@ export async function processarMensagemMenu(ctx) {
   if (!filialId) {
     await reply(ctx, '❌ Unidade do chat não identificada. Configure o grupo no painel WhatsApp.');
     return { handled: true };
+  }
+
+  if (comandoDuplicado(filialId, texto)) {
+    console.info('[whatsapp-menu] duplicada ignorada', {
+      filial: filialId,
+      texto: texto.slice(0, 40),
+    });
+    return { handled: true, duplicado: true };
   }
 
   if (ehCancelar(cmd) || ehMenu(cmd)) {
