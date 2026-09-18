@@ -118,10 +118,12 @@ await passo('lê sequência do padrão e ignora legado', () => {
 await passo('completa dígitos e aceita legado', () => {
   assert.equal(normalizarFogoInformado('', codigo), null);
   assert.equal(normalizarFogoInformado('0110', codigo), null);
-  assert.equal(normalizarFogoInformado('0001', codigo), '0110-0001');
-  assert.equal(normalizarFogoInformado('1', codigo), '0110-0001');
+  assert.equal(normalizarFogoInformado('0001', codigo, { padrao_obrigatorio: true }), '0110-0001');
+  assert.equal(normalizarFogoInformado('1', codigo, { padrao_obrigatorio: true }), '0110-0001');
   assert.equal(normalizarFogoInformado('0110-1', codigo), '0110-0001');
   assert.equal(normalizarFogoInformado('F-1001', codigo), 'F-1001');
+  assert.equal(normalizarFogoInformado('1224510', codigo, { padrao_obrigatorio: false }), '1224510');
+  assert.equal(normalizarFogoInformado('S/N', codigo), null);
 });
 await passo('rejeita sequência 0', () => {
   deveLancar(() => formatarNumeroFogo(codigo, 0), 400);

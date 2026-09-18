@@ -199,6 +199,27 @@ if (filial) {
       },
     });
 
+    const placaMontagem = veiculo?.placa || placa;
+    const impMontado = await checar('POST /pneus/import (placa+posicao)', 'POST', '/pneus/import', {
+      token: filial,
+      body: {
+        itens: [
+          {
+            numero_fogo: `PNM${Math.floor(Math.random() * 90000 + 10000)}`,
+            placa: placaMontagem,
+            posicao: '2EI',
+            marca: 'Smoke',
+            tipo_pneu: 'borrachudo',
+            condicao: 'novo',
+            sulco_inicial_mm: '14',
+          },
+        ],
+      },
+    });
+    if (impMontado && impMontado.montados !== 1 && impMontado.detalhes?.[0]?.status_pneu !== 'montado') {
+      console.log('FAIL import com placa não montou', JSON.stringify(impMontado).slice(0, 300));
+    }
+
     await checar('DELETE /veiculos/:id', 'DELETE', `/veiculos/${veiculoId}`, { token: filial });
   }
 }

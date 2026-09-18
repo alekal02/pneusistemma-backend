@@ -35,6 +35,8 @@ import {
   PNEU_TEMPLATE_ROWS,
   mapTipoPneu,
   mapCondicao,
+  placaDaLinha,
+  encaixarPosicaoNoLayout,
 } from '../csv-utils.js';
 import {
   trocarPorEstoque,
@@ -280,7 +282,7 @@ router.get('/import/modelo', (_req, res) => {
   res.send(csv);
 });
 
-/** Importação em massa de pneus para o estoque */
+/** Importação em massa: estoque, ou já montado se a planilha tiver placa + posição */
 router.post('/import', async (req, res, next) => {
   const filialId = filialScopeId(req);
   const db = getDb();
@@ -295,20 +297,107 @@ router.post('/import', async (req, res, next) => {
 
   const inseridos = [];
   const erros = [];
+  const avisos = [];
+  const cacheVeiculo = new Map();
+  const ocupacao = new Set();
+  const hoje = new Date().toISOString().split('T')[0];
 
-  const insert = db.prepare(`
+  const findVeiculoPlaca = db.prepare(`
+    SELECT id, placa, apelido, layout_pneus, km_atual, hr_atual
+    FROM veiculos
+    WHERE filial_id = ? AND ativo = 1 AND UPPER(TRIM(placa)) = ?
+  `);
+  const findVeiculoPlacaLimpa = db.prepare(`
+    SELECT id, placa, apelido, layout_pneus, km_atual, hr_atual
+    FROM veiculos
+    WHERE filial_id = ? AND ativo = 1
+      AND REPLACE(REPLACE(UPPER(TRIM(placa)), '-', ''), ' ', '') = ?
+  `);
+  const findOcupado = db.prepare(`
+    SELECT id, numero_fogo FROM pneus
+    WHERE veiculo_id = ? AND posicao = ? AND ativo = 1 AND status_pneu = 'montado'
+  `);
+  const insertEstoque = db.prepare(`
     INSERT INTO pneus (
       veiculo_id, posicao, filial_id, marca, modelo, medida, dot, numero_fogo,
       tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo, observacoes,
       custo, nota_fiscal
     ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1, ?, ?, ?)
   `);
+  const insertMontado = db.prepare(`
+    INSERT INTO pneus (
+      veiculo_id, posicao, filial_id, marca, modelo, medida, dot, numero_fogo,
+      tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, data_instalacao,
+      km_instalacao, ativo, observacoes, custo, nota_fiscal
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'montado', ?, ?, 1, ?, ?, ?)
+  `);
+
+  async function acharVeiculo(placa) {
+    const chave = placa.replace(/[^A-Z0-9]/g, '');
+    if (cacheVeiculo.has(chave)) return cacheVeiculo.get(chave);
+    let row = await findVeiculoPlaca.get(filialId, placa);
+    if (!row && chave) {
+      row = await findVeiculoPlacaLimpa.get(filialId, chave);
+    }
+    if (!row) return null;
+    const layout = getLayout(row.layout_pneus || LAYOUT_PADRAO);
+    const info = { ...row, layout };
+    cacheVeiculo.set(chave, info);
+    return info;
+  }
 
   try {
     await db.transaction(async () => {
       const gerador = await criarGeradorNumeroFogo(db, filialId);
       for (const raw of rows) {
         const linha = raw.__linha || '?';
+        const placa = placaDaLinha(raw);
+        const posicaoInformada = String(raw.posicao || raw.posicao_pneu || raw.slot || '').trim();
+        let veiculo = null;
+        let posicao = '';
+
+        if (placa && !posicaoInformada) {
+          erros.push({ linha, placa, erro: 'Informe a posição (ex.: 1E, 2EE) para montar neste caminhão' });
+          continue;
+        }
+        if (posicaoInformada && !placa) {
+          erros.push({ linha, erro: 'Informe a placa do veículo para montar nesta posição' });
+          continue;
+        }
+
+        if (placa) {
+          veiculo = await acharVeiculo(placa);
+          if (!veiculo) {
+            erros.push({
+              linha,
+              placa,
+              erro: `Veículo ${placa} não encontrado nesta unidade. Cadastre o caminhão antes de importar o pneu.`,
+            });
+            continue;
+          }
+          posicao = encaixarPosicaoNoLayout(posicaoInformada, veiculo.layout?.posicoes);
+          if (!posicao) {
+            erros.push({
+              linha,
+              placa,
+              erro: `Posição ${String(posicaoInformada).toUpperCase()} não existe no layout de ${veiculo.placa} (${veiculo.layout?.id || veiculo.layout_pneus}). Use: ${(veiculo.layout?.posicoes || []).join(', ')}`,
+            });
+            continue;
+          }
+          const chaveSlot = `${veiculo.id}:${posicao}`;
+          const jaBanco = ocupacao.has(chaveSlot)
+            ? { numero_fogo: 'nesta planilha' }
+            : await findOcupado.get(veiculo.id, posicao);
+          if (jaBanco) {
+            erros.push({
+              linha,
+              placa: veiculo.placa,
+              erro: `Posição ${posicao} de ${veiculo.placa} já tem pneu${jaBanco.numero_fogo ? ` (fogo ${jaBanco.numero_fogo})` : ''}`,
+            });
+            continue;
+          }
+        }
+
         let fogo;
         let gerado = false;
         try {
@@ -334,29 +423,89 @@ router.post('/import', async (req, res, next) => {
         const custo = raw.custo != null && raw.custo !== ''
           ? parseFloat(String(raw.custo).replace(',', '.'))
           : null;
+        const marca = String(raw.marca || '').trim() || null;
+        const modelo = String(raw.modelo || '').trim() || null;
+        const medida = String(raw.medida || '').trim() || null;
+        const dot = String(raw.dot || raw.dot_serie || raw.serie || '').trim() || null;
+        const obs = String(raw.observacoes || raw.observacao || '').trim() || null;
+        const custoOk = Number.isFinite(custo) ? custo : null;
+        const sulcoOk = Number.isFinite(sulco) ? sulco : null;
+        const nota = String(raw.nota_fiscal || raw.nota || '').trim() || null;
 
-        const argsBase = () => [
-          filialId,
-          String(raw.marca || '').trim() || null,
-          String(raw.modelo || '').trim() || null,
-          String(raw.medida || '').trim() || null,
-          String(raw.dot || raw.dot_serie || raw.serie || '').trim() || null,
-          fogo,
-          tipo,
-          cond,
-          vida,
-          Number.isFinite(sulco) ? sulco : null,
-          String(raw.observacoes || raw.observacao || '').trim() || null,
-          Number.isFinite(custo) ? custo : null,
-          String(raw.nota_fiscal || raw.nota || '').trim() || null,
-        ];
+        if (veiculo) {
+          const validacao = validarMontagem({ condicao: cond, tipo_pneu: tipo, posicao });
+          if (validacao.avisos?.length) {
+            avisos.push({ linha, numero_fogo: fogo, aviso: validacao.avisos.join(' ') });
+          }
+          if (!validacao.ok) {
+            avisos.push({ linha, numero_fogo: fogo, aviso: validacao.erros.join(' ') });
+          }
+        }
 
         let gravou = false;
         for (let tentativa = 0; tentativa < 8 && !gravou; tentativa++) {
           try {
             if (!gerado) await assertFogoLivre(db, filialId, fogo);
-            const result = await comSavepoint(db, () => insert.run(...argsBase()));
-            inseridos.push({ id: result.lastInsertRowid, numero_fogo: fogo, tipo_pneu: tipo, condicao: cond });
+            const result = await comSavepoint(db, async () => {
+              if (veiculo) {
+                const criado = await insertMontado.run(
+                  veiculo.id,
+                  posicao,
+                  filialId,
+                  marca,
+                  modelo,
+                  medida,
+                  dot,
+                  fogo,
+                  tipo,
+                  cond,
+                  vida,
+                  sulcoOk,
+                  hoje,
+                  veiculo.km_atual ?? 0,
+                  obs,
+                  custoOk,
+                  nota
+                );
+                await registrarMovimentacao(db, {
+                  pneuId: criado.lastInsertRowid,
+                  veiculoId: veiculo.id,
+                  tipo: 'montagem',
+                  data: hoje,
+                  km: veiculo.km_atual ?? 0,
+                  hr: veiculo.hr_atual ?? null,
+                  posicao,
+                  detalhes: `Importação — montou em ${veiculo.placa} · ${labelPosicao(posicao)}`,
+                  placa: veiculo.placa,
+                });
+                return criado;
+              }
+              return insertEstoque.run(
+                filialId,
+                marca,
+                modelo,
+                medida,
+                dot,
+                fogo,
+                tipo,
+                cond,
+                vida,
+                sulcoOk,
+                obs,
+                custoOk,
+                nota
+              );
+            });
+            if (veiculo) ocupacao.add(`${veiculo.id}:${posicao}`);
+            inseridos.push({
+              id: result.lastInsertRowid,
+              numero_fogo: fogo,
+              tipo_pneu: tipo,
+              condicao: cond,
+              status_pneu: veiculo ? 'montado' : 'estoque',
+              placa: veiculo?.placa || null,
+              posicao: veiculo ? posicao : null,
+            });
             gravou = true;
           } catch (err) {
             const colisao = ehViolacaoUnique(err) || err.status === 409;
@@ -387,11 +536,20 @@ router.post('/import', async (req, res, next) => {
     });
   }
 
+  const nMontados = inseridos.filter((x) => x.status_pneu === 'montado').length;
+  const nEstoque = inseridos.length - nMontados;
+  const partes = [];
+  if (nMontados) partes.push(`${nMontados} montado(s)`);
+  if (nEstoque) partes.push(`${nEstoque} no estoque`);
+
   res.status(201).json({
-    mensagem: `${inseridos.length} pneu(s) importado(s) no estoque`,
+    mensagem: `${inseridos.length} pneu(s) importado(s)${partes.length ? ` (${partes.join(', ')})` : ''}`,
     inseridos: inseridos.length,
+    montados: nMontados,
+    estoque: nEstoque,
     detalhes: inseridos,
     erros,
+    avisos,
   });
 });
 

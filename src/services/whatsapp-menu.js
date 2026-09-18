@@ -717,11 +717,7 @@ export async function processarMensagemMenu(ctx) {
   if (pareceFogoAvulso(texto)) {
     const ok = await atalhoFogo(ctx, texto);
     if (ok) return { handled: true };
-    await reply(
-      ctx,
-      `❌ Nº de fogo *${String(texto).replace(/^fogo\s+/i, '').trim()}* não encontrado nesta unidade.\n\nDigite *menu* ou *3* para cadastrar.`
-    );
-    return { handled: true };
+    return { handled: false };
   }
 
   return { handled: false };
