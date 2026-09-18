@@ -111,10 +111,10 @@ export function requireChatbotAcesso(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ erro: 'Não autenticado' });
   }
-  if (['admin', 'gerente'].includes(req.user.papel)) {
+  if (req.user.papel === 'admin') {
     return next();
   }
-  return res.status(403).json({ erro: 'Somente o gerente da unidade configura o chatbot' });
+  return res.status(403).json({ erro: 'Somente o administrador configura o chatbot' });
 }
 
 export function requireFilial(req, res, next) {

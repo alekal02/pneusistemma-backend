@@ -24,7 +24,6 @@ import {
   labelTipoPneu,
 } from '../pneus-layouts.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
-import { garantirTokenExclusivoFilial } from '../services/whatsapp.js';
 
 const router = Router();
 
@@ -821,7 +820,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const criado = await db.transaction(async () => {
       const filialIns = await db.prepare(`
         INSERT INTO filiais (nome, codigo, contrato, whatsapp, whatsapp_grupo, whatsapp_alerta, wuzapi_token)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, NULL)
         RETURNING id
       `).run(
         nome.trim(),
@@ -829,8 +828,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         contrato?.trim() || null,
         limparTextoFilial(whatsapp)?.replace(/\D/g, '') || null,
         limparTextoFilial(whatsapp_grupo),
-        limparTextoFilial(whatsapp_alerta)?.replace(/\D/g, '') || null,
-        limparTextoFilial(wuzapi_token)
+        limparTextoFilial(whatsapp_alerta)?.replace(/\D/g, '') || null
       );
 
       const filialId = Number(filialIns.lastInsertRowid || filialIns.rows?.[0]?.id);
@@ -877,26 +875,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
     }
 
-    // Token WuzAPI exclusivo já na criação — status nasce Desconectado até o QR
-    let chatbot = null;
-    try {
-      chatbot = await garantirTokenExclusivoFilial({
-        id: criado.filialId,
-        codigo: salvo.filial_codigo,
-        nome: salvo.filial_nome,
-      });
-    } catch (err) {
-      console.warn('[filiais] token chatbot não provisionado:', err.message);
-    }
-
     res.status(201).json({
       id: criado.filialId,
       login: salvo.login,
       usuario_id: salvo.id,
-      tem_wuzapi_token: Boolean(chatbot?.token),
-      mensagem: chatbot?.token
-        ? `Filial "${nome.trim()}" criada com login ${salvo.login}. Chatbot pronto para Conectar / QR.`
-        : `Filial "${nome.trim()}" criada com login ${salvo.login}`,
+      tem_wuzapi_token: false,
+      mensagem: `Filial "${nome.trim()}" criada com login ${salvo.login}. No WhatsApp, escolha o grupo desta unidade (o chip é único para todas).`,
     });
   } catch (err) {
     if (ehViolacaoUnique(err)) {
@@ -939,11 +923,6 @@ router.put('/:id', async (req, res, next) => {
     const waAlerta = whatsapp_alerta !== undefined
       ? (limparTextoFilial(whatsapp_alerta)?.replace(/\D/g, '') || null)
       : atual.whatsapp_alerta;
-    // Token: string vazia limpa; undefined mantém; só admin altera
-    let waToken = atual.wuzapi_token;
-    if (admin && wuzapi_token !== undefined) {
-      waToken = limparTextoFilial(wuzapi_token);
-    }
 
     if (admin) {
       await db.prepare(`
@@ -955,7 +934,7 @@ router.put('/:id', async (req, res, next) => {
           whatsapp = ?,
           whatsapp_grupo = ?,
           whatsapp_alerta = ?,
-          wuzapi_token = ?,
+          wuzapi_token = NULL,
           updated_at = NOW()
         WHERE id = ?
       `).run(
@@ -966,28 +945,18 @@ router.put('/:id', async (req, res, next) => {
         waNum,
         waGrupo,
         waAlerta,
-        waToken,
         req.params.id
       );
     } else {
-      const tokenNaoAdmin = wuzapi_token !== undefined
-        ? limparTextoFilial(wuzapi_token)
-        : atual.wuzapi_token;
       await db.prepare(`
         UPDATE filiais SET
           contrato = ?,
-          whatsapp = ?,
-          whatsapp_grupo = ?,
           whatsapp_alerta = ?,
-          wuzapi_token = ?,
           updated_at = NOW()
         WHERE id = ?
       `).run(
         contrato !== undefined ? (contrato?.trim() || null) : atual.contrato,
-        waNum,
-        waGrupo,
         waAlerta,
-        tokenNaoAdmin,
         req.params.id
       );
     }

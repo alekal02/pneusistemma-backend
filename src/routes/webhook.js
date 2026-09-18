@@ -291,7 +291,7 @@ router.post('/whatsapp', async (req, res) => {
       isGroup,
       phone,
       body: body ? String(body).slice(0, 80) : null,
-      filial_hint: Number(req.query.filial_id) || null,
+      filial_hint: null,
       from_me: ehMensagemPropria(event),
     });
 
@@ -300,14 +300,13 @@ router.post('/whatsapp', async (req, res) => {
     }
 
     const db = getDb();
-    const filialIdHint = Number(req.query.filial_id) || null;
-    const canal = await resolverCanalFilial(db, chatJid, filialIdHint);
+    const canal = await resolverCanalFilial(db, chatJid);
 
     if (!canal) {
       console.info('[webhook] ignorado (fora do grupo selecionado)', {
         chat: chatJid,
         isGroup,
-        filial_hint: filialIdHint,
+        filial_hint: null,
       });
       return res.status(200).json({
         ok: true,

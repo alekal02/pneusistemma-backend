@@ -6,6 +6,7 @@ import cors from 'cors';
 import { config } from './src/config.js';
 import { initDatabase } from './src/database.js';
 import { refreshLimitesCache, getLimites } from './src/limites.js';
+import { limparTokensChatbotAntigos } from './src/services/whatsapp.js';
 
 import authRouter from './src/routes/auth.js';
 import filiaisRouter from './src/routes/filiais.js';
@@ -24,6 +25,9 @@ import acessoRapidoRouter from './src/routes/acesso-rapido.js';
 async function main() {
   await initDatabase();
   await refreshLimitesCache();
+  await limparTokensChatbotAntigos().catch((err) => {
+    console.warn('[whatsapp] limpeza de tokens:', err.message);
+  });
 
   const app = express();
 
