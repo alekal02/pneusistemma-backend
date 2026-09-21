@@ -181,24 +181,54 @@ function drawKpi(doc, x, y, w, h, valor, label, barra) {
   txt(doc, label, x + 12, y + h - 14);
 }
 
+function dataCurta(iso) {
+  if (!iso) return '—';
+  const s = String(iso).slice(0, 10);
+  if (s.length < 10) return '—';
+  return `${s.slice(8, 10)}/${s.slice(5, 7)}`;
+}
+
+function logDoCaminhao(veiculo) {
+  return {
+    data: veiculo.ultima_medicao,
+    hora: dataCurta(veiculo.ultima_medicao),
+    placa: veiculo.apelido || veiculo.placa || '-',
+    menor_sulco: veiculo.menor_sulco,
+    status: veiculo.status_sulco || veiculo.status_label,
+  };
+}
+
+function chaveItem(item) {
+  return `${item.veiculo_id || item.placa || item.apelido || ''}|${item.posicao || ''}`;
+}
+
+function unicosPorPosicao(lista) {
+  const seen = new Set();
+  const out = [];
+  for (const item of lista || []) {
+    const key = chaveItem(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 function drawLogLinha(doc, x, y, w, item) {
   const fundo = bgStatus(item.status || item.status_sulco);
-  rrect(doc, x, y, w, 24, 3, fundo, null);
-  const hora = item.hora || (item.data ? String(item.data).slice(0, 10).split('-').reverse().join('/') : '--:--');
+  rrect(doc, x, y, w, 28, 3, fundo, null);
+  const data = item.hora || dataCurta(item.data);
   const placa = item.placa || '-';
-  const pos = item.posicao || item.pos || '-';
   const sulco = item.menor_sulco != null ? `${item.menor_sulco} mm` : (item.sulco || '-');
   const st = labelStatus(item.status || item.status_sulco);
-  doc.fillColor(C.mudo).font('Helvetica').fontSize(7);
-  txt(doc, hora, x + 6, y + 4);
+  doc.fillColor(C.mudo).font('Helvetica').fontSize(7.5);
+  txt(doc, data, x + 6, y + 6);
+  doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(8.5);
+  txt(doc, placa, x + 44, y + 6);
   doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(8);
-  txt(doc, placa, x + 42, y + 4);
-  doc.fillColor(C.mudo).font('Helvetica').fontSize(7);
-  txt(doc, pos, x + 6, y + 4, { width: w - 12, align: 'right' });
-  doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(7.5);
-  txt(doc, sulco, x + 42, y + 13);
-  doc.fillColor(fillStatus(st)).font('Helvetica-Bold').fontSize(7);
-  txt(doc, st, x + 6, y + 13, { width: w - 12, align: 'right' });
+  txt(doc, sulco, x + 6, y + 16);
+  doc.fillColor(fillStatus(st)).font('Helvetica-Bold').fontSize(8);
+  txt(doc, st, x + 6, y + 16, { width: w - 12, align: 'right' });
 }
 
 function cabecalho(doc, W, titulo, sub) {
@@ -224,6 +254,7 @@ export function desenharPaginaFrota(doc, dados, veiculos, logs, pagina, totalPag
   const W = doc.page.width;
   const H = doc.page.height;
   const margin = 12 * MM;
+  const primeira = pagina === 1;
   doc.rect(0, 0, W, H).fill(C.fundo);
 
   const filial = dados.filial?.nome || 'Unidade';
@@ -231,29 +262,33 @@ export function desenharPaginaFrota(doc, dados, veiculos, logs, pagina, totalPag
   cabecalho(
     doc,
     W,
-    'Frota visual: caminhoes lado a lado + log de medicoes',
-    `${filial}${periodo ? `  ·  Semana ${periodo}` : ''}  ·  cores = sulco  ·  log = quando mediu`,
+    primeira
+      ? 'Frota visual: caminhoes lado a lado + quando mediu'
+      : 'Frota visual — proximos caminhoes',
+    `${filial}${periodo ? `  ·  Semana ${periodo}` : ''}  ·  cores = sulco  ·  uma data por caminhao`,
   );
 
-  const r = dados.resumo || {};
-  const yKpi = 40 * MM;
-  const kpis = [
-    [r.veiculos ?? veiculos.length, 'Veiculos', C.verde],
-    [r.sulco_ok ?? 0, 'Pneus OK', C.ok],
-    [r.sulco_monitorar ?? 0, 'Em alerta', C.alerta],
-    [r.sulco_critico ?? 0, 'Criticos', C.critico],
-    [r.acao_trocar ?? 0, 'Troca sugerida', C.critico],
-  ];
-  const kw = (W - 2 * margin - 16) / 5;
-  kpis.forEach((k, i) => {
-    drawKpi(doc, margin + i * (kw + 4), yKpi, kw, 18 * MM, k[0], k[1], k[2]);
-  });
+  let y = 40 * MM;
+  if (primeira) {
+    const r = dados.resumo || {};
+    const kpis = [
+      [r.veiculos ?? veiculos.length, 'Veiculos', C.verde],
+      [r.sulco_ok ?? 0, 'Pneus OK', C.ok],
+      [r.sulco_monitorar ?? 0, 'Em alerta', C.alerta],
+      [r.sulco_critico ?? 0, 'Criticos', C.critico],
+      [r.acao_trocar ?? 0, 'Troca sugerida', C.critico],
+    ];
+    const kw = (W - 2 * margin - 16) / 5;
+    kpis.forEach((k, i) => {
+      drawKpi(doc, margin + i * (kw + 4), y, kw, 18 * MM, k[0], k[1], k[2]);
+    });
+    y += 26 * MM;
+  }
 
-  let y = yKpi + 26 * MM;
   doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(11);
-  txt(doc, 'Caminhoes da unidade', margin, y);
+  txt(doc, primeira ? 'Caminhoes da unidade' : 'Mais caminhoes', margin, y);
   doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
-  txt(doc, 'Vermelho = acao agora  ·  caminhao centralizado no card', margin + 52 * MM, y);
+  txt(doc, 'Vermelho = acao agora  ·  log = data da ultima medicao', margin + 52 * MM, y);
 
   y += 6 * MM;
   const cw = 62 * MM;
@@ -281,30 +316,32 @@ export function desenharPaginaFrota(doc, dados, veiculos, logs, pagina, totalPag
   const lw = W - margin - lx;
   rrect(doc, lx, y, lw, ch, 8, C.card, C.linha);
   doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(10);
-  txt(doc, 'Log de medicoes', lx + 8, y + 8);
+  txt(doc, 'Quando mediu', lx + 8, y + 8);
   doc.fillColor(C.mudo).font('Helvetica').fontSize(7);
-  txt(doc, 'Quando o sulco foi registrado', lx + 8, y + 22);
+  txt(doc, 'Uma data por caminhao desta pagina', lx + 8, y + 22);
 
-  const linhas = (logs || []).slice(0, 5);
+  const linhas = (logs || []).slice(0, 3);
   let yy = y + 38;
   if (!linhas.length) {
     doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
-    txt(doc, 'Sem medicoes nesta semana.', lx + 8, yy);
+    txt(doc, 'Sem medicao nestes caminhoes.', lx + 8, yy);
   } else {
     linhas.forEach((ln) => {
       drawLogLinha(doc, lx + 6, yy, lw - 12, ln);
-      yy += 26;
+      yy += 32;
     });
   }
 
-  const fy = H - 42 * MM;
-  rrect(doc, margin, fy, W - 2 * margin, 28 * MM, 8, C.card, C.linha);
-  doc.fillColor(C.verde).font('Helvetica-Bold').fontSize(9);
-  txt(doc, 'Como decidir neste relatorio', margin + 8, fy + 6);
-  doc.fillColor(C.texto).font('Helvetica').fontSize(8);
-  txt(doc, '1. Vermelho na grade = troca/recap agora.', margin + 8, fy + 18);
-  txt(doc, '2. O log a direita mostra se mediu nesta semana.', margin + 8, fy + 30);
-  txt(doc, '3. Proxima pagina: acoes a executar e diagnosticos de desgaste.', margin + 8, fy + 42);
+  if (primeira) {
+    const fy = H - 42 * MM;
+    rrect(doc, margin, fy, W - 2 * margin, 28 * MM, 8, C.card, C.linha);
+    doc.fillColor(C.verde).font('Helvetica-Bold').fontSize(9);
+    txt(doc, 'Como decidir neste relatorio', margin + 8, fy + 6);
+    doc.fillColor(C.texto).font('Helvetica').fontSize(8);
+    txt(doc, '1. Vermelho na grade = troca/recap agora.', margin + 8, fy + 18);
+    txt(doc, '2. O log a direita mostra a data da ultima medicao de cada caminhao.', margin + 8, fy + 30);
+    txt(doc, '3. Proxima pagina: acoes a executar e diagnosticos de desgaste.', margin + 8, fy + 42);
+  }
 
   doc.fillColor(C.mudo).font('Helvetica').fontSize(7);
   txt(doc, `Pneusistemma  ·  ${pagina}/${totalPaginas}`, W - margin - 120, H - 12, {
@@ -349,12 +386,15 @@ export function desenharPaginaAcoes(doc, dados) {
     'O que fazer agora  ·  causa do desgaste em cada pneu',
   );
 
-  const acoes = [
+  const acoes = unicosPorPosicao([
     ...(dados.prioridades?.troca || []),
     ...(dados.prioridades?.monitorar || []),
     ...(dados.prioridades?.rodizio || []),
-  ].slice(0, 5);
-  const diags = (dados.diagnosticos || []).slice(0, 5);
+  ]).slice(0, 5);
+  const jaNaAcao = new Set(acoes.map(chaveItem));
+  const diags = unicosPorPosicao(dados.diagnosticos || [])
+    .filter((d) => !jaNaAcao.has(chaveItem(d)))
+    .slice(0, 5);
 
   const y0 = 40 * MM;
   const colW = (W - 2 * margin - 6 * MM) / 2;
@@ -508,51 +548,15 @@ export function desenharPaginaOperacao(doc, dados) {
   return true;
 }
 
-function chaveLog(item) {
-  return `${item.veiculo_id || item.placa || item.apelido || ''}|${item.posicao || item.pos || ''}`;
-}
-
-function logsUnicos(lista) {
-  const seen = new Set();
-  const out = [];
-  for (const item of lista || []) {
-    const key = chaveLog(item);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
-}
-
-function logsDoGrupo(logs, veiculos) {
-  const keys = new Set();
-  for (const v of veiculos || []) {
-    if (v.id != null) keys.add(`#${v.id}`);
-    if (v.placa) keys.add(String(v.placa).toUpperCase());
-    if (v.apelido) keys.add(String(v.apelido).toUpperCase());
-  }
-  const doGrupo = logs.filter((l) => {
-    const placa = String(l.placa || '').toUpperCase();
-    const apelido = String(l.apelido || '').toUpperCase();
-    return keys.has(`#${l.veiculo_id}`) || keys.has(placa) || keys.has(apelido);
-  });
-  return (doGrupo.length ? doGrupo : logs).slice(0, 5);
-}
-
 export function desenharRelatorioVisual(doc, dados) {
   const veiculos = (dados.frota || []).filter((v) => v.pneus?.length);
-  const logs = logsUnicos((dados.medicoes_semana_lista || []).map((m) => ({
-    ...m,
-    hora: m.data ? String(m.data).slice(8, 10) + '/' + String(m.data).slice(5, 7) : '',
-    status: m.status,
-  })));
   const grupos = chunk(veiculos, 3);
   const total = grupos.length + 1;
   grupos.forEach((grupo, i) => {
     if (i > 0) {
       doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
     }
-    desenharPaginaFrota(doc, dados, grupo, logsDoGrupo(logs, grupo), i + 1, total);
+    desenharPaginaFrota(doc, dados, grupo, grupo.map(logDoCaminhao), i + 1, total);
   });
   doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
   desenharPaginaAcoes(doc, dados);
