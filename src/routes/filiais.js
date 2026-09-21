@@ -644,7 +644,7 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
   if (!assertFilialNoEscopo(req, req.params.id)) {
     return res.status(403).json({ erro: 'Filial fora do seu escopo' });
   }
-  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes } = req.body || {};
+  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus } = req.body || {};
   try {
     const db = getDb();
     const veiculo = await db.prepare(`
@@ -668,6 +668,7 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
         hr_atual = ?,
         observacoes = ?,
         dia_medicao = ?,
+        layout_pneus = ?,
         updated_at = NOW()
       WHERE id = ? AND filial_id = ? AND ativo = 1
     `).run(
@@ -683,6 +684,9 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
       Object.prototype.hasOwnProperty.call(req.body || {}, 'dia_medicao')
         ? normalizarDiaMedicao(req.body.dia_medicao)
         : veiculo.dia_medicao,
+      layout_pneus != null && String(layout_pneus).trim()
+        ? String(layout_pneus).trim()
+        : veiculo.layout_pneus,
       veiculo.id,
       req.params.id
     );

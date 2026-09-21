@@ -561,18 +561,21 @@ router.post('/', async (req, res, next) => {
 });
 
 router.put('/:id', async (req, res, next) => {
-  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, dia_medicao } = req.body;
+  const { placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, dia_medicao, layout_pneus } = req.body;
   try {
     const db = getDb();
     const filialId = filialScopeId(req);
     const atual = await db.prepare(`
-      SELECT id, dia_medicao FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
+      SELECT id, dia_medicao, layout_pneus FROM veiculos WHERE id = ? AND ativo = 1 AND filial_id = ?
     `).get(req.params.id, filialId);
     if (!atual) return res.status(404).json({ erro: 'Veículo não encontrado' });
 
     const diaSalvo = Object.prototype.hasOwnProperty.call(req.body || {}, 'dia_medicao')
       ? normalizarDiaMedicao(dia_medicao)
       : atual.dia_medicao;
+    const layoutSalvo = layout_pneus != null && String(layout_pneus).trim()
+      ? String(layout_pneus).trim()
+      : atual.layout_pneus;
 
     const result = await db.prepare(`
       UPDATE veiculos SET
@@ -586,6 +589,7 @@ router.put('/:id', async (req, res, next) => {
         hr_atual = COALESCE(?, hr_atual),
         observacoes = ?,
         dia_medicao = ?,
+        layout_pneus = ?,
         updated_at = NOW()
       WHERE id = ? AND ativo = 1 AND filial_id = ?
     `).run(
@@ -599,6 +603,7 @@ router.put('/:id', async (req, res, next) => {
       hr_atual != null ? hr_atual : null,
       observacoes?.trim() || null,
       diaSalvo,
+      layoutSalvo,
       req.params.id,
       filialId
     );
