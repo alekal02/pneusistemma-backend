@@ -274,6 +274,10 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       ultima_medicao: ultimaMedicaoVeiculo,
       dias_sem_medicao: diasSemMedicao,
       atrasado_semana: atrasado,
+      menor_sulco: pneusDetalhe.reduce((acc, p) => {
+        if (p.menor_sulco == null) return acc;
+        return acc == null ? p.menor_sulco : Math.min(acc, p.menor_sulco);
+      }, null),
       pneus: pneusDetalhe,
     });
   }
@@ -480,6 +484,9 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       em_recapagem: emRecapagem,
     },
     frota,
+    diagnosticos: frota.flatMap((v) => (v.pneus || [])
+      .filter((p) => p.diagnostico && !/^ok$/i.test(p.diagnostico) && !/sem dados/i.test(p.diagnostico))
+      .map((p) => ({ ...p, placa: v.placa, apelido: v.apelido }))),
     estoque,
     em_recapagem: emRecapagem,
     historico,
@@ -611,7 +618,7 @@ function createPager(doc) {
   let pageNo = 1;
 
   const addPage = () => {
-    doc.addPage();
+    doc.addPage({ size: 'A4', layout: 'landscape' });
     pageNo += 1;
   };
 
@@ -879,6 +886,186 @@ function drawVehicleBlock(doc, pager, v) {
   })));
 }
 
+const COORDS_MINI = {
+  '1E': [170, 145], '1D': [430, 145],
+  '2E': [170, 320], '2D': [430, 320],
+  '2EE': [130, 320], '2EI': [192, 320], '2DI': [408, 320], '2DE': [470, 320],
+  '3E': [170, 420], '3D': [430, 420],
+  '3EE': [130, 420], '3EI': [192, 420], '3DI': [408, 420], '3DE': [470, 420],
+  DE: [170, 145], DD: [430, 145], D: [300, 145],
+  TE: [170, 320], TD: [430, 320], T: [300, 320],
+  TEE: [130, 320], TEI: [192, 320], TDI: [408, 320], TDE: [470, 320],
+  E2EE: [130, 320], E2EI: [192, 320], E2DI: [408, 320], E2DE: [470, 320],
+  E3EE: [130, 420], E3EI: [192, 420], E3DI: [408, 420], E3DE: [470, 420],
+  ESTEPE: [300, 500],
+};
+
+function fillSulco(status) {
+  if (status === 'critico') return '#dc2626';
+  if (status === 'alerta') return '#d97706';
+  if (status === 'ok') return '#16a34a';
+  return '#94a3b8';
+}
+
+function bgSulco(status) {
+  if (status === 'critico') return COLORS.criticoBg;
+  if (status === 'alerta') return COLORS.alertaBg;
+  if (status === 'ok') return COLORS.okBg;
+  return COLORS.softAlt;
+}
+
+function drawMiniTruck(doc, x, y, w, h, v) {
+  const savedY = doc.y;
+  const savedBottom = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc.roundedRect(x, y, w, h, 6).fill(bgSulco(v.status_sulco));
+  doc.lineWidth(0.6).strokeColor(COLORS.line).roundedRect(x, y, w, h, 6).stroke();
+
+  const footer = 34;
+  const scale = Math.min((w - 18) / 600, (h - footer - 12) / 480);
+  const ox = x + (w - 600 * scale) / 2;
+  const oy = y + 6;
+  const tw = 48 * scale;
+  const th = 58 * scale;
+
+  for (const p of v.pneus || []) {
+    const xy = COORDS_MINI[p.posicao];
+    if (!xy) continue;
+    const px = ox + (xy[0] - 24) * scale;
+    const py = oy + (xy[1] - 29) * scale;
+    doc.roundedRect(px, py, tw, th, 2).fill(fillSulco(p.status_sulco));
+    absText(doc, p.posicao, px, py + 2, { width: tw, align: 'center' });
+    doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(Math.max(5, tw * 0.38));
+    doc.text(p.menor_sulco != null ? String(p.menor_sulco) : '-', px, py + th * 0.42, {
+      width: tw,
+      align: 'center',
+      lineBreak: false,
+    });
+  }
+
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(9);
+  doc.text(fitWidth(doc, v.placa, w * 0.55, 9, true), x + 8, y + h - 26, {
+    width: w * 0.55, lineBreak: false,
+  });
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7);
+  doc.text(fitWidth(doc, v.ultima_medicao ? `Med. ${formatBr(v.ultima_medicao)}` : 'Sem medicão', w * 0.55, 7), x + 8, y + h - 14, {
+    width: w * 0.55, lineBreak: false,
+  });
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(8);
+  doc.text(v.menor_sulco != null ? `${v.menor_sulco} mm` : '-', x + 8, y + h - 26, {
+    width: w - 16, align: 'right', lineBreak: false,
+  });
+  const st = statusColor(v.status_label);
+  doc.fillColor(st.fg).font('Helvetica-Bold').fontSize(7);
+  doc.text(v.status_label || '-', x + 8, y + h - 14, {
+    width: w - 16, align: 'right', lineBreak: false,
+  });
+  doc.page.margins.bottom = savedBottom;
+  doc.y = savedY;
+}
+
+function drawTruckGrid(doc, pager, veiculos) {
+  const cols = 3;
+  const gap = 8;
+  const w = contentWidth(doc);
+  const cardW = (w - gap * (cols - 1)) / cols;
+  const cardH = 158;
+  let col = 0;
+  for (const v of veiculos) {
+    if (col === 0) pager.ensureSpace(cardH + 8);
+    const x = doc.page.margins.left + col * (cardW + gap);
+    const y = doc.y;
+    drawMiniTruck(doc, x, y, cardW, cardH, v);
+    col += 1;
+    if (col >= cols) {
+      doc.y = y + cardH + 8;
+      col = 0;
+    }
+  }
+  if (col !== 0) doc.y += cardH + 8;
+}
+
+function drawDecisaoCard(doc, x, y, w, h, titulo, placa, pos, sulco, motivo, fundo, corTitulo) {
+  const savedY = doc.y;
+  const savedBottom = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc.roundedRect(x, y, w, h, 4).fill(fundo);
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(8)
+    .text(fitWidth(doc, placa, w * 0.5, 8, true), x + 6, y + 5, { width: w * 0.5, lineBreak: false });
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(8)
+    .text(sulco, x + 6, y + 5, { width: w - 12, align: 'right', lineBreak: false });
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7)
+    .text(pos, x + 6, y + 16, { width: w * 0.4, lineBreak: false });
+  doc.fillColor(corTitulo).font('Helvetica-Bold').fontSize(7.5)
+    .text(fitWidth(doc, titulo, w * 0.5, 7.5, true), x + 6, y + 16, {
+      width: w - 12, align: 'right', lineBreak: false,
+    });
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(6.5)
+    .text(clip(motivo, 78), x + 6, y + 28, { width: w - 12, lineBreak: false });
+  doc.page.margins.bottom = savedBottom;
+  doc.y = savedY;
+}
+
+function drawAcoesDiagnosticos(doc, pager, acoes, diags) {
+  const gap = 10;
+  const colW = (contentWidth(doc) - gap) / 2;
+  const cardH = 42;
+  const x0 = doc.page.margins.left;
+  pager.ensureSpace(56);
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(10)
+    .text('Acoes', x0, doc.y, { lineBreak: false });
+  doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(10)
+    .text('Diagnosticos', x0 + colW + gap, doc.y, { lineBreak: false });
+  doc.y += 14;
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5)
+    .text(`${acoes.length} pendentes — trocar, recapar, mudar posicao ou acompanhar`, x0, doc.y, {
+      width: colW, lineBreak: false,
+    });
+  doc.text(`${diags.length} irregularidades — causa do desgaste`, x0 + colW + gap, doc.y, {
+    width: colW, lineBreak: false,
+  });
+  doc.y += 14;
+
+  const max = Math.max(acoes.length, diags.length, 0);
+  if (!max) {
+    mutedLine(doc, pager, 'Nenhuma acao nem diagnostico irregular nesta unidade.');
+    return;
+  }
+  for (let i = 0; i < max; i += 1) {
+    pager.ensureSpace(cardH + 6);
+    const y = doc.y;
+    if (acoes[i]) {
+      const a = acoes[i];
+      const st = statusColor(a.acao || a.status_label);
+      drawDecisaoCard(
+        doc, x0, y, colW, cardH,
+        a.acao || a.status_label,
+        a.placa || a.apelido || '-',
+        a.posicao || '-',
+        mm(a.menor_sulco),
+        a.motivo || a.diagnostico || '',
+        st.bg,
+        st.fg,
+      );
+    }
+    if (diags[i]) {
+      const d = diags[i];
+      const st = statusColor(d.status_label || d.diagnostico);
+      drawDecisaoCard(
+        doc, x0 + colW + gap, y, colW, cardH,
+        labelDiagPdf(d.diagnostico),
+        d.placa || d.apelido || '-',
+        d.posicao || '-',
+        mm(d.menor_sulco),
+        d.motivo || d.diagnostico || '',
+        st.bg,
+        st.fg,
+      );
+    }
+    doc.y = y + cardH + 6;
+  }
+}
+
 /**
  * Gera Buffer PDF a partir dos dados montados.
  */
@@ -886,7 +1073,8 @@ export function gerarPdfRelatorioSemanal(dados) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size: 'A4',
-      margins: { top: 40, bottom: 40, left: 36, right: 36 },
+      layout: 'landscape',
+      margins: { top: 36, bottom: 36, left: 32, right: 32 },
       bufferPages: true,
       autoFirstPage: true,
       info: {
@@ -910,7 +1098,7 @@ export function gerarPdfRelatorioSemanal(dados) {
     doc.rect(0, 0, doc.page.width, 72).fill(COLORS.brand);
     doc.page.margins.bottom = 0;
     doc.fillColor(COLORS.white).font('Helvetica-Bold').fontSize(16)
-      .text('Relatorio semanal gerencial', x0, 16, { width: w, lineBreak: false });
+      .text('Relatorio da frota — visual + acoes + diagnosticos', x0, 16, { width: w, lineBreak: false });
     doc.font('Helvetica').fontSize(8).fillColor('#99f6e4')
       .text('Controle de desgaste de pneus - apoio a decisao do gerente', x0, 38, {
         width: w,
@@ -964,79 +1152,15 @@ export function gerarPdfRelatorioSemanal(dados) {
       { label: 'CUSTO ESTOQUE+RECAP', value: formatMoney(r.custo_estoque), accent: COLORS.ink, bg: COLORS.softAlt },
     ]);
 
-    // ── 2. Prioridades ─────────────────────────────────
-    sectionTitle(doc, pager, '2', 'Prioridades da semana - decisao');
-
-    const colsPrio = [
-      { key: 'veiculo', label: 'Veiculo', w: 0.14 },
-      { key: 'pos', label: 'Pos.', w: 0.08 },
-      { key: 'fogo', label: 'Fogo', w: 0.12 },
-      { key: 'menor', label: 'Sulco', w: 0.10, bold: true },
-      { key: 'status', label: 'Status', w: 0.12, colorize: true },
-      { key: 'acao', label: 'Acao', w: 0.12, colorize: true },
-      { key: 'diag', label: 'Diagnostico', w: 0.32 },
-    ];
-    const mapPrio = (i) => ({
-      veiculo: i.placa || i.apelido || '-',
-      pos: i.posicao,
-      fogo: labelFogoPdf(i.fogo),
-      menor: mm(i.menor_sulco),
-      status: i.status_label,
-      acao: i.acao,
-      diag: labelDiagPdf(i.diagnostico),
-    });
-
-    subTitle(doc, pager, `Trocar / critico (${dados.prioridades.troca.length})`, COLORS.critico);
-    drawTable(doc, pager, colsPrio, dados.prioridades.troca.map(mapPrio), {
-      emptyText: 'Nenhum pneu critico / troca no momento.',
-    });
-
-    subTitle(doc, pager, `Monitorar / recap sugerido (${dados.prioridades.monitorar.length})`, COLORS.alerta);
-    drawTable(doc, pager, colsPrio, dados.prioridades.monitorar.map(mapPrio), {
-      emptyText: 'Nenhum pneu em monitorar / recap.',
-    });
-
-    subTitle(doc, pager, `Em processo de recapagem (${(dados.em_recapagem || []).length})`, COLORS.alerta);
-    drawTable(doc, pager, [
-      { key: 'fogo', label: 'Fogo', w: 0.16 },
-      { key: 'desc', label: 'Marca / modelo', w: 0.28 },
-      { key: 'vida', label: 'Vida', w: 0.12 },
-      { key: 'sulco', label: 'Sulco', w: 0.12, bold: true },
-      { key: 'origem', label: 'Origem', w: 0.16 },
-      { key: 'envio', label: 'Envio', w: 0.16 },
-    ], (dados.em_recapagem || []).map((p) => ({
-      fogo: labelFogoPdf(p.fogo),
-      desc: [p.marca, p.modelo].filter(Boolean).join(' ') || '-',
-      vida: p.vida,
-      sulco: mm(p.sulco),
-      origem: p.placa_origem || '-',
-      envio: formatBr(p.data_medicao),
-    })), { emptyText: 'Nenhum pneu em recapagem no momento.' });
-
-    subTitle(doc, pager, `Rodizio (${dados.prioridades.rodizio.length})`, COLORS.brand);
-    drawTable(doc, pager, colsPrio, dados.prioridades.rodizio.map(mapPrio), {
-      emptyText: 'Nenhum rodizio sugerido.',
-    });
-
-    subTitle(doc, pager, `Descarte aguardando destino (${dados.prioridades.descarte_pendente.length})`, COLORS.critico);
-    drawTable(doc, pager, [
-      { key: 'fogo', label: 'Fogo', w: 0.15 },
-      { key: 'marca', label: 'Marca / modelo', w: 0.45 },
-      { key: 'tratamento', label: 'Tratamento', w: 0.40, colorize: true },
-    ], dados.prioridades.descarte_pendente.map((p) => ({
-      fogo: labelFogoPdf(p.fogo),
-      marca: [p.marca, p.modelo].filter(Boolean).join(' ') || '-',
-      tratamento: p.tratamento,
-    })), { emptyText: 'Nenhum descarte pendente de tratamento.' });
-
-    // ── 3. Frota ───────────────────────────────────────
-    sectionTitle(doc, pager, '3', 'Frota - veiculo a veiculo');
+    // ── 2. Frota visual ────────────────────────────────
+    sectionTitle(doc, pager, '2', 'Frota visual — caminhões lado a lado');
+    mutedLine(doc, pager, 'Cores = sulco (verde OK, amarelo alerta, vermelho critico). Clique no painel para o desenho completo.');
     const comPneus = (dados.frota || []).filter((v) => v.pneus?.length);
     const semPneus = (dados.frota || []).filter((v) => !v.pneus?.length);
-
     if (!dados.frota?.length) {
       mutedLine(doc, pager, 'Nenhum veiculo ativo nesta unidade.');
     } else {
+      if (comPneus.length) drawTruckGrid(doc, pager, comPneus);
       if (semPneus.length) {
         subTitle(doc, pager, `Veiculos sem pneus montados (${semPneus.length})`, COLORS.muted);
         drawTable(doc, pager, [
@@ -1051,11 +1175,34 @@ export function gerarPdfRelatorioSemanal(dados) {
           km: formatNum(v.km_atual),
         })));
       }
+    }
 
-      if (comPneus.length) {
-        subTitle(doc, pager, `Veiculos com pneus (${comPneus.length})`, COLORS.brand);
-        comPneus.forEach((v) => drawVehicleBlock(doc, pager, v));
-      }
+    // ── 3. Acoes e diagnosticos ────────────────────────
+    sectionTitle(doc, pager, '3', 'Acoes e diagnosticos');
+    const acoesPdf = [
+      ...(dados.prioridades?.troca || []),
+      ...(dados.prioridades?.monitorar || []),
+      ...(dados.prioridades?.rodizio || []),
+    ];
+    drawAcoesDiagnosticos(doc, pager, acoesPdf, dados.diagnosticos || []);
+
+    if ((dados.em_recapagem || []).length) {
+      subTitle(doc, pager, `Em recapagem (${dados.em_recapagem.length})`, COLORS.alerta);
+      drawTable(doc, pager, [
+        { key: 'fogo', label: 'Fogo', w: 0.16 },
+        { key: 'desc', label: 'Marca / modelo', w: 0.28 },
+        { key: 'vida', label: 'Vida', w: 0.12 },
+        { key: 'sulco', label: 'Sulco', w: 0.12, bold: true },
+        { key: 'origem', label: 'Origem', w: 0.16 },
+        { key: 'envio', label: 'Envio', w: 0.16 },
+      ], dados.em_recapagem.map((p) => ({
+        fogo: labelFogoPdf(p.fogo),
+        desc: [p.marca, p.modelo].filter(Boolean).join(' ') || '-',
+        vida: p.vida,
+        sulco: mm(p.sulco),
+        origem: p.placa_origem || '-',
+        envio: formatBr(p.data_medicao),
+      })));
     }
 
     // ── 4. Estoque ─────────────────────────────────────

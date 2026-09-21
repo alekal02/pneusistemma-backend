@@ -30,8 +30,8 @@ export function textoMenu() {
     '5️⃣ Enviar pneu → estoque (nº fogo)',
     '6️⃣ Enviar pneu → recap (nº fogo)',
     '7️⃣ Enviar pneu → descarte (nº fogo)',
-    '8️⃣ Relatório gerencial (PDF)',
-    '9️⃣ Frota (lista de placas)',
+    '8️⃣ Relatório da frota (PDF visual)',
+    '9️⃣ Frota (placas + sulco)',
     '',
     '0️⃣ Cancelar / voltar ao menu',
     '',
@@ -388,7 +388,7 @@ async function enviarRelatorio(ctx) {
     });
     const resumo = dados?.resumo || {};
     const caption = [
-      `📊 *Relatório gerencial* — ${dados.filial?.nome || 'Unidade'}`,
+      `📊 *Relatório visual da frota* — ${dados.filial?.nome || 'Unidade'}`,
       dados.periodo?.label ? `Semana: ${dados.periodo.label}` : null,
       `Montados: ${resumo.pneus_montados ?? 0} · Estoque: ${resumo.pneus_estoque ?? 0} · Em recap: ${resumo.pneus_em_recapagem ?? 0}`,
       `Críticos: ${resumo.sulco_critico ?? 0} · Monitorar: ${resumo.sulco_monitorar ?? 0} · Mov. na semana: ${resumo.movimentacoes_semana ?? 0}`,
@@ -403,7 +403,7 @@ async function enviarRelatorio(ctx) {
       buffer,
       fileName: filename,
       mensagem: caption,
-      caption: `📊 Relatório — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
+      caption: `📊 Frota visual — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
       filialId: ctx.filialId,
       fallbackDestinatario: ctx.phone,
     });
@@ -430,9 +430,10 @@ async function enviarFrota(ctx) {
   }
   const linhas = rows.map((v) => {
     const apelido = v.apelido ? ` — ${v.apelido}` : '';
-    return `• *${v.placa}*${apelido} (${v.tipo})`;
+    const sulco = v.menor_sulco != null ? `${v.menor_sulco} mm` : 'sem medicao';
+    return `• *${v.placa}*${apelido} — ${sulco} · ${v.status_label || '-'}`;
   });
-  await reply(ctx, `📋 *Frota* (${rows.length}):\n${linhas.join('\n')}\n\nEnvie a *placa* para medir, ou *menu*.`);
+  await reply(ctx, `🚛 *Frota visual* (${rows.length}):\n${linhas.join('\n')}\n\nEnvie a *placa* para medir, *8* para o PDF visual, ou *menu*.`);
 }
 
 async function iniciarOpcao(ctx, n) {

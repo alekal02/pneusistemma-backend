@@ -3,7 +3,7 @@
  */
 import { getDb } from '../database.js';
 import { ehViolacaoUnique } from '../db-utils.js';
-import { getLimites } from '../limites.js';
+import { getLimites, classificarSulco, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { comRetryFogoUnico } from '../numero-fogo.js';
 import {
@@ -57,12 +57,36 @@ export async function buscarVeiculoPorPlaca(filialId, placaLimpa) {
 
 export async function listarFrota(filialId) {
   const db = getDb();
-  return db.prepare(`
+  const rows = await db.prepare(`
     SELECT id, placa, apelido, tipo, layout_pneus
     FROM veiculos
     WHERE ativo = 1 AND filial_id = ?
     ORDER BY placa
   `).all(filialId);
+  const out = [];
+  for (const v of rows || []) {
+    const pneus = await db.prepare(`
+      SELECT
+        m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar
+      FROM pneus p
+      LEFT JOIN medicoes m ON m.pneu_id = p.id
+        AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
+      WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
+    `).all(v.id);
+    let menor = null;
+    for (const p of pneus || []) {
+      const m = menorSulco(p);
+      if (m != null) menor = menor == null ? m : Math.min(menor, m);
+    }
+    const status = classificarSulco(menor, limitesDoVeiculo(v));
+    out.push({
+      ...v,
+      menor_sulco: menor,
+      status_sulco: status,
+      status_label: ({ ok: 'OK', alerta: 'Alerta', critico: 'Critico', sem_dado: 'Sem medicao' })[status] || status,
+    });
+  }
+  return out;
 }
 
 export async function criarVeiculo(filialId, {
