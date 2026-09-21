@@ -349,3 +349,68 @@ export async function excluirFilialCompleta(db, filialId) {
     removidos: { ...antes, usuarios },
   };
 }
+
+/** Apaga um caminhão da unidade e os pneus ainda ligados a ele (medições e histórico inclusive). */
+export async function excluirVeiculoCompleto(db, filialId, veiculoId) {
+  const fid = Number(filialId);
+  const vid = Number(veiculoId);
+  if (!fid || !vid) {
+    const err = new Error('Filial e veículo são obrigatórios');
+    err.status = 400;
+    throw err;
+  }
+
+  const veiculo = await db.prepare(`
+    SELECT id, placa, apelido, ativo, filial_id
+    FROM veiculos
+    WHERE id = ? AND filial_id = ?
+  `).get(vid, fid);
+  if (!veiculo) {
+    const err = new Error('Veículo não encontrado nesta unidade');
+    err.status = 404;
+    throw err;
+  }
+
+  const pneus = await db.prepare(`
+    SELECT id FROM pneus WHERE veiculo_id = ?
+  `).all(vid);
+  const nPneus = pneus.length;
+
+  await db.transaction(async () => {
+    await delSafe(db, `DELETE FROM tokens_acesso_rapido WHERE veiculo_id = ?`, vid);
+    await delSafe(db, `
+      DELETE FROM notificacoes_whatsapp
+      WHERE veiculo_id = ?
+         OR medicao_id IN (
+           SELECT m.id FROM medicoes m
+           JOIN pneus p ON p.id = m.pneu_id
+           WHERE p.veiculo_id = ?
+         )
+    `, vid, vid);
+    await delSafe(db, `DELETE FROM alertas_posicao_vaga WHERE veiculo_id = ?`, vid);
+    await delSafe(db, `
+      DELETE FROM medicoes
+      WHERE pneu_id IN (SELECT id FROM pneus WHERE veiculo_id = ?)
+    `, vid);
+    await delSafe(db, `
+      DELETE FROM movimentacoes
+      WHERE pneu_id IN (SELECT id FROM pneus WHERE veiculo_id = ?)
+         OR veiculo_id = ?
+    `, vid, vid);
+    await db.prepare(`DELETE FROM pneus WHERE veiculo_id = ?`).run(vid);
+    const result = await db.prepare(`
+      DELETE FROM veiculos WHERE id = ? AND filial_id = ?
+    `).run(vid, fid);
+    if (!result.changes) {
+      const err = new Error('Não foi possível excluir o veículo');
+      err.status = 409;
+      throw err;
+    }
+  });
+
+  return {
+    placa: veiculo.placa,
+    apelido: veiculo.apelido,
+    pneus_apagados: nPneus,
+  };
+}

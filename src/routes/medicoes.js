@@ -235,6 +235,7 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
   let prazoDias;
   let dataLimiteRecap = null;
   let diasRestantes = null;
+  let reaproveitar = false;
 
   try {
     let candidatos = [];
@@ -289,6 +290,19 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
     const data = data_medicao || new Date().toISOString().split('T')[0];
     const responsavelFinal = responsavel?.trim()
       || (req.acessoRapido ? `WhatsApp ${req.acessoRapido.whatsapp_origem || 'acesso-rapido'}` : null);
+    const mesmoNumero = (a, b) => {
+      if (a == null && b == null) return true;
+      if (a == null || b == null) return false;
+      return Number(a) === Number(b);
+    };
+    reaproveitar = Boolean(
+      anterior
+      && String(anterior.data_medicao) === String(data)
+      && mesmoNumero(anterior.sulco_externo, sulco_externo)
+      && mesmoNumero(anterior.sulco_central, sulco_central)
+      && mesmoNumero(anterior.sulco_interno, sulco_interno)
+      && mesmoNumero(anterior.sulco_auxiliar, sulco_auxiliar)
+    );
 
     // Prazo de 15 dias para iniciar recap quando entra em monitorar
     if (statusSulco === 'alerta') {
@@ -303,33 +317,62 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
     veiculo = await db.prepare(`SELECT * FROM veiculos WHERE id = ?`).get(pneu.veiculo_id);
     placa = veiculo?.placa || pneu.placa || null;
 
-    const result = await db.prepare(`
-      INSERT INTO medicoes (
-        pneu_id, data_medicao, km_veiculo, hr_veiculo,
-        sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
-        pressao_psi, responsavel, observacoes, marcacao_json,
-        diagnostico, acao_sugerida, desgaste_mm_km, veiculo_placa
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      pneu_id,
-      data,
-      km_veiculo || null,
-      hr_veiculo ?? null,
-      sulco_externo ?? null,
-      sulco_central ?? null,
-      sulco_interno ?? null,
-      sulco_auxiliar ?? null,
-      pressao_psi ?? null,
-      responsavelFinal,
-      observacoes?.trim() || null,
-      marcacao_json ? JSON.stringify(marcacao_json) : null,
-      diag.codigo,
-      acao.codigo,
-      desgaste,
-      placa
-    );
-
-    medicaoId = result.lastInsertRowid;
+    if (reaproveitar) {
+      await db.prepare(`
+        UPDATE medicoes SET
+          km_veiculo = ?,
+          hr_veiculo = ?,
+          pressao_psi = ?,
+          responsavel = ?,
+          observacoes = ?,
+          marcacao_json = ?,
+          diagnostico = ?,
+          acao_sugerida = ?,
+          desgaste_mm_km = ?,
+          veiculo_placa = ?
+        WHERE id = ?
+      `).run(
+        km_veiculo || null,
+        hr_veiculo ?? null,
+        pressao_psi ?? null,
+        responsavelFinal,
+        observacoes?.trim() || null,
+        marcacao_json ? JSON.stringify(marcacao_json) : null,
+        diag.codigo,
+        acao.codigo,
+        desgaste,
+        placa,
+        anterior.id
+      );
+      medicaoId = anterior.id;
+    } else {
+      const result = await db.prepare(`
+        INSERT INTO medicoes (
+          pneu_id, data_medicao, km_veiculo, hr_veiculo,
+          sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
+          pressao_psi, responsavel, observacoes, marcacao_json,
+          diagnostico, acao_sugerida, desgaste_mm_km, veiculo_placa
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        pneu_id,
+        data,
+        km_veiculo || null,
+        hr_veiculo ?? null,
+        sulco_externo ?? null,
+        sulco_central ?? null,
+        sulco_interno ?? null,
+        sulco_auxiliar ?? null,
+        pressao_psi ?? null,
+        responsavelFinal,
+        observacoes?.trim() || null,
+        marcacao_json ? JSON.stringify(marcacao_json) : null,
+        diag.codigo,
+        acao.codigo,
+        desgaste,
+        placa
+      );
+      medicaoId = result.lastInsertRowid;
+    }
 
     if (km_veiculo && pneu.veiculo_id) {
       await db.prepare(`
@@ -362,15 +405,17 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
 
   let notificacao = null;
   try {
-    notificacao = await notificarGerentesAposMedicao({
-      statusSulco,
-      diagnosticoLabel: diag.label,
-      acaoLabel: acao.label,
-      menorSulco: menor,
-      veiculo,
-      pneu,
-      medicaoId,
-    });
+    if (!reaproveitar) {
+      notificacao = await notificarGerentesAposMedicao({
+        statusSulco,
+        diagnosticoLabel: diag.label,
+        acaoLabel: acao.label,
+        menorSulco: menor,
+        veiculo,
+        pneu,
+        medicaoId,
+      });
+    }
   } catch (err) {
     console.error('[medicoes] Falha ao notificar gerentes:', err);
   }

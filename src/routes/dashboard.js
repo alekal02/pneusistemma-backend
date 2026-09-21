@@ -5,7 +5,7 @@ import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
 import { papelPosicao } from '../pneus-layouts.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
 import { normalizarDiaMedicao, labelDiaMedicao, semanaMedicaoBrasil } from '../dia-medicao.js';
-import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
+import { SQL_LATERAL_ULTIMA_MEDICAO, SQL_LOGS_MEDICAO_FILIAL } from '../sql-ultima-medicao.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 
 const router = Router();
@@ -62,30 +62,7 @@ function compactarPneusPorVeiculo(pneus) {
 }
 
 async function logsMedicaoFilial(db, filialId, limite = 40) {
-  const rows = await db.prepare(`
-    SELECT
-      m.id,
-      m.data_medicao,
-      m.created_at,
-      LEAST(
-        COALESCE(m.sulco_externo, 999),
-        COALESCE(m.sulco_central, 999),
-        COALESCE(m.sulco_interno, 999),
-        COALESCE(m.sulco_auxiliar, 999)
-      ) as menor_raw,
-      p.posicao,
-      p.numero_fogo,
-      v.id as veiculo_id,
-      v.placa,
-      v.apelido,
-      v.tipo,
-      v.layout_pneus
-    FROM medicoes m
-    JOIN pneus p ON p.id = m.pneu_id
-    JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
-    ORDER BY COALESCE(m.created_at, m.data_medicao::timestamp) DESC, m.id DESC
-    LIMIT ?
-  `).all(filialId, limite);
+  const rows = await db.prepare(SQL_LOGS_MEDICAO_FILIAL).all(filialId, limite);
   return (rows || []).map((r) => {
     const menor = r.menor_raw == null || Number(r.menor_raw) >= 999 ? null : Number(r.menor_raw);
     return {

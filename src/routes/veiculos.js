@@ -34,6 +34,7 @@ import {
   montarDetalheVeiculo,
 } from '../services/acesso-rapido.js';
 import { consultarProximoFogo, comRetryFogoUnico } from '../numero-fogo.js';
+import { excluirVeiculoCompleto } from '../services/limpar-filial.js';
 
 const router = Router();
 
@@ -252,6 +253,43 @@ router.put('/:id/layout', requireGerenteOuAdmin, async (req, res, next) => {
       mensagem: `Configuração atualizada — ${posicoes.length} posições (monte pneus do estoque)`,
     });
   } catch (err) {
+    next(err);
+  }
+});
+
+/** Gerente/admin: exclui caminhão + pneus. Filial: só desativa. */
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const db = getDb();
+    const papel = req.user?.papel;
+    if (papel === 'admin' || papel === 'gerente') {
+      const veiculo = await db.prepare('SELECT id, filial_id FROM veiculos WHERE id = ?').get(req.params.id);
+      if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
+      const escopo = filiaisEscopoIds(req);
+      if (escopo !== null && !escopo.includes(Number(veiculo.filial_id))) {
+        return res.status(403).json({ erro: 'Veículo fora do seu escopo' });
+      }
+      const result = await excluirVeiculoCompleto(db, veiculo.filial_id, veiculo.id);
+      const n = result.pneus_apagados || 0;
+      return res.json({
+        mensagem: n
+          ? `Caminhão ${result.placa} excluído com ${n} pneu(s)`
+          : `Caminhão ${result.placa} excluído`,
+        ...result,
+      });
+    }
+    if (papel === 'filial') {
+      const filialId = filialScopeId(req);
+      const result = await db.prepare(`
+        UPDATE veiculos SET ativo = 0, updated_at = NOW()
+        WHERE id = ? AND filial_id = ?
+      `).run(req.params.id, filialId);
+      if (result.changes === 0) return res.status(404).json({ erro: 'Veículo não encontrado' });
+      return res.json({ mensagem: 'Veículo desativado' });
+    }
+    return res.status(403).json({ erro: 'Sem permissão para excluir veículo' });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });
@@ -566,22 +604,6 @@ router.put('/:id', async (req, res, next) => {
 
     if (result.changes === 0) return res.status(404).json({ erro: 'Veículo não encontrado' });
     res.json({ mensagem: 'Veículo atualizado' });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.delete('/:id', async (req, res, next) => {
-  try {
-    const db = getDb();
-    const filialId = filialScopeId(req);
-    const result = await db.prepare(`
-      UPDATE veiculos SET ativo = 0, updated_at = NOW()
-      WHERE id = ? AND filial_id = ?
-    `).run(req.params.id, filialId);
-
-    if (result.changes === 0) return res.status(404).json({ erro: 'Veículo não encontrado' });
-    res.json({ mensagem: 'Veículo desativado' });
   } catch (err) {
     next(err);
   }

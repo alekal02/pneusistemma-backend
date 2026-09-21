@@ -508,20 +508,51 @@ export function desenharPaginaOperacao(doc, dados) {
   return true;
 }
 
+function chaveLog(item) {
+  return `${item.veiculo_id || item.placa || item.apelido || ''}|${item.posicao || item.pos || ''}`;
+}
+
+function logsUnicos(lista) {
+  const seen = new Set();
+  const out = [];
+  for (const item of lista || []) {
+    const key = chaveLog(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function logsDoGrupo(logs, veiculos) {
+  const keys = new Set();
+  for (const v of veiculos || []) {
+    if (v.id != null) keys.add(`#${v.id}`);
+    if (v.placa) keys.add(String(v.placa).toUpperCase());
+    if (v.apelido) keys.add(String(v.apelido).toUpperCase());
+  }
+  const doGrupo = logs.filter((l) => {
+    const placa = String(l.placa || '').toUpperCase();
+    const apelido = String(l.apelido || '').toUpperCase();
+    return keys.has(`#${l.veiculo_id}`) || keys.has(placa) || keys.has(apelido);
+  });
+  return (doGrupo.length ? doGrupo : logs).slice(0, 5);
+}
+
 export function desenharRelatorioVisual(doc, dados) {
   const veiculos = (dados.frota || []).filter((v) => v.pneus?.length);
-  const logs = (dados.medicoes_semana_lista || []).map((m) => ({
+  const logs = logsUnicos((dados.medicoes_semana_lista || []).map((m) => ({
     ...m,
     hora: m.data ? String(m.data).slice(8, 10) + '/' + String(m.data).slice(5, 7) : '',
     status: m.status,
-  }));
+  })));
   const grupos = chunk(veiculos, 3);
   const total = grupos.length + 1;
   grupos.forEach((grupo, i) => {
     if (i > 0) {
       doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
     }
-    desenharPaginaFrota(doc, dados, grupo, logs, i + 1, total);
+    desenharPaginaFrota(doc, dados, grupo, logsDoGrupo(logs, grupo), i + 1, total);
   });
   doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
   desenharPaginaAcoes(doc, dados);

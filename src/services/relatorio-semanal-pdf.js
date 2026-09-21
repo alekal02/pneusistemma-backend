@@ -12,6 +12,7 @@ import {
   sqlOrderPosicao,
 } from '../pneus-layouts.js';
 import { desenharRelatorioVisual } from './relatorio-frota-visual-pdf.js';
+import { SQL_LOGS_MEDICAO_SEMANA } from '../sql-ultima-medicao.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -403,28 +404,19 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     status_atual: m.status_pneu,
   }));
 
-  const medicoesDetalheSemana = await db.prepare(`
-    SELECT
-      m.data_medicao, m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
-      m.diagnostico, m.acao_sugerida, m.veiculo_placa, m.responsavel, m.observacoes,
-      p.numero_fogo, p.posicao, p.status_pneu,
-      v.tipo, v.layout_pneus
-    FROM medicoes m
-    JOIN pneus p ON p.id = m.pneu_id
-    LEFT JOIN veiculos v ON v.id = p.veiculo_id
-    WHERE p.filial_id = ?
-      AND m.data_medicao >= ?
-      AND m.data_medicao <= ?
-    ORDER BY m.data_medicao DESC, m.id DESC
-    LIMIT 80
-  `).all(filialId, periodo.inicio, periodo.fim);
+  const medicoesDetalheSemana = await db.prepare(SQL_LOGS_MEDICAO_SEMANA)
+    .all(filialId, periodo.inicio, periodo.fim);
 
   const medicoesLista = medicoesDetalheSemana.map((m) => {
     const menor = menorSulco(m);
     return {
+      id: m.id,
       data: m.data_medicao,
+      created_at: m.created_at,
       fogo: m.numero_fogo || '—',
-      placa: m.veiculo_placa || (m.status_pneu === 'estoque' ? 'Estoque' : m.status_pneu === 'recapagem' ? 'Recap' : '—'),
+      veiculo_id: m.veiculo_id,
+      placa: m.placa || m.veiculo_placa || (m.status_pneu === 'estoque' ? 'Estoque' : m.status_pneu === 'recapagem' ? 'Recap' : '—'),
+      apelido: m.apelido || '',
       posicao: m.posicao || '—',
       menor_sulco: menor,
       status: labelStatusSulco(classificarSulco(menor, limitesDoVeiculo(m))),

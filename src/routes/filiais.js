@@ -10,9 +10,9 @@ import {
   filiaisEscopoIds,
   isAdmin,
 } from '../auth.js';
-import { excluirFilialCompleta } from '../services/limpar-filial.js';
+import { excluirFilialCompleta, excluirVeiculoCompleto } from '../services/limpar-filial.js';
 import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
-import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
+import { SQL_LATERAL_ULTIMA_MEDICAO, SQL_LOGS_MEDICAO_FILIAL } from '../sql-ultima-medicao.js';
 import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
 import {
   labelPosicao,
@@ -453,23 +453,7 @@ router.get('/:id', async (req, res, next) => {
       v.pneus = pneusPorV.get(Number(v.id)) || [];
     }
 
-    const logsMedicao = await db.prepare(`
-      SELECT
-        m.id, m.data_medicao, m.created_at,
-        LEAST(
-          COALESCE(m.sulco_externo, 999),
-          COALESCE(m.sulco_central, 999),
-          COALESCE(m.sulco_interno, 999),
-          COALESCE(m.sulco_auxiliar, 999)
-        ) as menor_raw,
-        p.posicao, p.numero_fogo,
-        v.id as veiculo_id, v.placa, v.apelido, v.tipo, v.layout_pneus
-      FROM medicoes m
-      JOIN pneus p ON p.id = m.pneu_id
-      JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
-      ORDER BY COALESCE(m.created_at, m.data_medicao::timestamp) DESC, m.id DESC
-      LIMIT 40
-    `).all(f.id);
+    const logsMedicao = await db.prepare(SQL_LOGS_MEDICAO_FILIAL).all(f.id, 40);
 
     res.json({
       ...f,
@@ -709,6 +693,27 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Já existe um veículo com esta placa' });
     }
+    next(err);
+  }
+});
+
+/** Admin/gerente: exclui o caminhão e os pneus ainda montados nele */
+router.delete('/:id/veiculos/:veiculoId', async (req, res, next) => {
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  try {
+    const db = getDb();
+    const result = await excluirVeiculoCompleto(db, req.params.id, req.params.veiculoId);
+    const n = result.pneus_apagados || 0;
+    res.json({
+      mensagem: n
+        ? `Caminhão ${result.placa} excluído com ${n} pneu(s)`
+        : `Caminhão ${result.placa} excluído`,
+      ...result,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });
