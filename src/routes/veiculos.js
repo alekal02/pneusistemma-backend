@@ -210,6 +210,19 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
 
 router.use(requireAuth);
 
+/** Catálogo de layouts — admin/gerente também editam caminhão da unidade */
+router.get('/meta', (_req, res) => {
+  res.json({
+    posicoes: POSICOES_PNEU,
+    papeis: PAPEL_POSICAO,
+    tipos: TIPOS_VEICULO,
+    layouts: Object.values(LAYOUTS_PNEU),
+    layout_padrao: LAYOUT_PADRAO,
+    tipos_pneu: TIPOS_PNEU,
+    condicoes_pneu: CONDICOES_PNEU,
+  });
+});
+
 /** Layout do veículo — só gerente/admin (operador não altera estrutura) */
 router.put('/:id/layout', requireGerenteOuAdmin, async (req, res, next) => {
   const { layout_pneus, posicoes_custom } = req.body;
@@ -295,18 +308,6 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 router.use(requireFilial);
-
-router.get('/meta', (_req, res) => {
-  res.json({
-    posicoes: POSICOES_PNEU,
-    papeis: PAPEL_POSICAO,
-    tipos: TIPOS_VEICULO,
-    layouts: Object.values(LAYOUTS_PNEU),
-    layout_padrao: LAYOUT_PADRAO,
-    tipos_pneu: TIPOS_PNEU,
-    condicoes_pneu: CONDICOES_PNEU,
-  });
-});
 
 /** Planilha-modelo de veículos (CSV Excel BR) */
 router.get('/import/modelo', (_req, res) => {
