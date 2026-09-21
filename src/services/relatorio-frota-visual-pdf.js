@@ -101,6 +101,7 @@ function pneusPorPos(pneus = []) {
 }
 
 function txt(doc, str, x, y, opts = {}) {
+  if (y > doc.page.height) return;
   const savedY = doc.y;
   const savedB = doc.page.margins.bottom;
   doc.page.margins.bottom = 0;
@@ -448,11 +449,12 @@ export function desenharPaginaAcoes(doc, dados) {
 }
 
 function temOperacaoExtra(dados) {
+  const r = dados.resumo || {};
   return Boolean(
-    (dados.estoque || []).length
-    || (dados.em_recapagem || []).length
+    (r.pneus_estoque || dados.estoque_resumo?.total || (dados.estoque || []).length)
+    || (r.pneus_em_recapagem || (dados.em_recapagem || []).length)
     || (dados.historico || []).length
-    || (dados.descarte || []).length
+    || (r.pneus_descarte || (dados.descarte || []).length)
   );
 }
 
@@ -465,19 +467,59 @@ function drawLinhaOp(doc, x, y, w, cols) {
   });
 }
 
+const MAX_LINHAS_LISTA = 8;
+
 function drawBlocoLista(doc, x, y, w, titulo, hint, linhas, colunas) {
-  const h = 22 + linhas.length * 16 + 12;
+  const todas = linhas || [];
+  const visiveis = todas.slice(0, MAX_LINHAS_LISTA);
+  const extra = Math.max(0, todas.length - visiveis.length);
+  const hintFinal = extra ? `${hint}  ·  +${extra} omitidos` : hint;
+  const h = 22 + visiveis.length * 16 + 12;
   rrect(doc, x, y, w, h, 8, C.card, C.linha);
   doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(11);
   txt(doc, titulo, x + 10, y + 8);
   doc.fillColor(C.mudo).font('Helvetica').fontSize(7.5);
-  txt(doc, hint, x + 10, y + 8, { width: w - 20, align: 'right' });
+  txt(doc, hintFinal, x + 10, y + 8, { width: w - 20, align: 'right' });
   let yy = y + 26;
-  linhas.forEach((ln, i) => {
+  visiveis.forEach((ln, i) => {
+    if (yy + 16 > doc.page.height - 16) return;
     if (i % 2 === 0) rrect(doc, x + 6, yy - 2, w - 12, 15, 3, '#f8faf8', null);
     drawLinhaOp(doc, x + 10, yy, w - 20, colunas(ln));
     yy += 16;
   });
+  return h + 8;
+}
+
+function moneyBr(v) {
+  if (v == null || Number.isNaN(Number(v))) return '-';
+  return `R$ ${Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`;
+}
+
+function drawResumoEstoque(doc, x, y, w, dados) {
+  const r = dados.estoque_resumo || {};
+  const n = Number(dados.resumo?.pneus_estoque ?? r.total ?? 0);
+  if (!n) return 0;
+  const padroes = Object.entries(r.por_padrao || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([nome, qtd]) => `${nome}: ${qtd}`)
+    .join('  |  ');
+  const h = 58;
+  rrect(doc, x, y, w, h, 8, C.card, C.linha);
+  doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(11);
+  txt(doc, 'Estoque — resumo (lista completa na aba Pneus)', x + 10, y + 8);
+  doc.fillColor(C.mudo).font('Helvetica').fontSize(7.5);
+  txt(doc, `${n} pneu(s) parados`, x + 10, y + 8, { width: w - 20, align: 'right' });
+  doc.fillColor(C.texto).font('Helvetica').fontSize(8.5);
+  txt(
+    doc,
+    `${n} no estoque  ·  ${r.novos ?? 0} novos  ·  ${r.recapados ?? 0} recapados  ·  custo ${moneyBr(dados.resumo?.custo_estoque)}`,
+    x + 10,
+    y + 26,
+    { width: w - 20 },
+  );
+  doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
+  const sulcoLinha = `${r.criticos ?? 0} sulco critico  ·  ${r.alerta ?? 0} em alerta  ·  ${r.sem_medicao ?? 0} sem medicao`;
+  txt(doc, padroes ? `${sulcoLinha}  ·  ${padroes}` : sulcoLinha, x + 10, y + 42, { width: w - 20 });
   return h + 8;
 }
 
@@ -495,14 +537,15 @@ export function desenharPaginaOperacao(doc, dados) {
     doc,
     W,
     'Operacao da semana — o que ainda nao apareceu',
-    'Estoque, recap, movimentacao e descarte. Medicoes, acoes e diagnosticos ja estao nas paginas anteriores.',
+    'Estoque em resumo (sem listar milhares de pneus), recap, movimentacao e descarte.',
   );
 
   let y = 40 * MM;
   const full = W - 2 * margin;
 
   if ((dados.em_recapagem || []).length) {
-    y += drawBlocoLista(doc, margin, y, full, 'Em recapagem', `${dados.em_recapagem.length} pneu(s)`, dados.em_recapagem, (p) => [
+    const nRecap = dados.resumo?.pneus_em_recapagem || dados.em_recapagem.length;
+    y += drawBlocoLista(doc, margin, y, full, 'Em recapagem', `${nRecap} pneu(s)`, dados.em_recapagem, (p) => [
       { txt: p.fogo || '-', w: 90, bold: true },
       { txt: [p.marca, p.modelo].filter(Boolean).join(' ') || '-', w: 180 },
       { txt: p.vida || '-', w: 80 },
@@ -511,17 +554,28 @@ export function desenharPaginaOperacao(doc, dados) {
     ]);
   }
 
+  y += drawResumoEstoque(doc, margin, y, full, dados);
   if ((dados.estoque || []).length) {
-    y += drawBlocoLista(doc, margin, y, full, 'Estoque pronto para montar', `${dados.estoque.length} pneu(s)`, dados.estoque, (p) => [
-      { txt: p.fogo || '-', w: 90, bold: true },
-      { txt: [p.marca, p.modelo, p.medida].filter(Boolean).join(' ') || '-', w: 200 },
-      { txt: p.padrao || '-', w: 90 },
-      { txt: p.vida || '-', w: 70 },
-      { txt: p.sulco != null ? `${p.sulco} mm` : '-', w: 70, bold: true },
-    ]);
+    const nEstoque = dados.resumo?.pneus_estoque || dados.estoque_resumo?.total || dados.estoque.length;
+    y += drawBlocoLista(
+      doc,
+      margin,
+      y,
+      full,
+      'Menor sulco no estoque — prioridade de montagem',
+      `${dados.estoque.length} de ${nEstoque}`,
+      dados.estoque,
+      (p) => [
+        { txt: p.fogo || '-', w: 90, bold: true },
+        { txt: [p.marca, p.modelo, p.medida].filter(Boolean).join(' ') || '-', w: 200 },
+        { txt: p.padrao || '-', w: 90 },
+        { txt: p.vida || '-', w: 70 },
+        { txt: p.sulco != null ? `${p.sulco} mm` : '-', w: 70, bold: true },
+      ],
+    );
   }
 
-  if ((dados.historico || []).length) {
+  if ((dados.historico || []).length && y < H - 80) {
     y += drawBlocoLista(doc, margin, y, full, 'Movimentacoes da semana', `${dados.historico.length} evento(s)`, dados.historico.slice(0, 12), (h) => [
       { txt: h.data ? String(h.data).slice(0, 10).split('-').reverse().join('/') : '-', w: 70 },
       { txt: h.tipo_label || h.tipo || '-', w: 110, bold: true },
@@ -532,8 +586,9 @@ export function desenharPaginaOperacao(doc, dados) {
     ]);
   }
 
-  if ((dados.descarte || []).length) {
-    y += drawBlocoLista(doc, margin, y, full, 'Descarte', `${dados.descarte.length} pneu(s)`, dados.descarte, (p) => [
+  if ((dados.descarte || []).length && y < H - 80) {
+    const nDesc = dados.resumo?.pneus_descarte || dados.descarte.length;
+    y += drawBlocoLista(doc, margin, y, full, 'Descarte', `${nDesc} pneu(s)`, dados.descarte, (p) => [
       { txt: p.fogo || '-', w: 90, bold: true },
       { txt: [p.marca, p.modelo].filter(Boolean).join(' ') || '-', w: 180 },
       { txt: p.tratamento || '-', w: 160 },

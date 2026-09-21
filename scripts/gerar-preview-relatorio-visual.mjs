@@ -119,6 +119,15 @@ const dados = {
     { fogo: '8821', marca: 'Michelin', modelo: 'XZE2', medida: '295/80', padrao: 'Misto', vida: 'Novo', sulco: 14 },
     { fogo: '8822', marca: 'Goodyear', modelo: 'KMAX', medida: '295/80', padrao: 'Direcional', vida: '1a recap', sulco: 11 },
   ],
+  estoque_resumo: {
+    total: 4,
+    novos: 3,
+    recapados: 1,
+    criticos: 0,
+    alerta: 0,
+    sem_medicao: 0,
+    por_padrao: { Misto: 2, Direcional: 2 },
+  },
   em_recapagem: [
     { fogo: '7704', marca: 'Pirelli', modelo: 'FH01', vida: '1a recap', sulco: 3.2, placa_origem: 'BH1A23' },
   ],
