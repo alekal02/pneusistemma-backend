@@ -230,6 +230,7 @@ async function pendenciasFilial(db, filialId, limites) {
       data_medicao: p.data_medicao,
       diagnostico: diag.codigo,
       diagnostico_label: diag.label,
+      diagnostico_desc: diag.descricao || '',
       acao_sugerida: acao.codigo,
       acao_label: acao.label,
       acao_motivo: acao.motivo,
@@ -250,12 +251,20 @@ async function pendenciasFilial(db, filialId, limites) {
     i.acao_sugerida === 'monitorar' || i.acao_sugerida === 'rodizio'
   );
   const todos = [...troca, ...emRecapagem, ...monitorar];
+  const ordemDiag = {
+    critico: 0, falta_calib: 1, excesso_calib: 2, irregular: 3, desgaste_progressivo: 4,
+  };
+  const diagnosticos = itens
+    .filter((i) => i.diagnostico && i.diagnostico !== 'ok' && i.diagnostico !== 'sem_dado')
+    .sort((a, b) => (ordemDiag[a.diagnostico] ?? 9) - (ordemDiag[b.diagnostico] ?? 9)
+      || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
 
   return {
     troca,
     recap: emRecapagem,
     monitorar,
     todos,
+    diagnosticos,
   };
 }
 
@@ -417,7 +426,50 @@ router.get('/:id', async (req, res, next) => {
       pendencias_troca: pendencias.troca.filter((p) => p.veiculo_id === v.id).length,
       pendencias_recap: pendencias.recap.filter((p) => p.veiculo_id === v.id).length,
       pendencias_monitorar: pendencias.monitorar.filter((p) => p.veiculo_id === v.id).length,
+      pneus: [],
     }));
+
+    const pneusRows = await db.prepare(`
+      SELECT p.id, p.veiculo_id, p.posicao,
+        um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar
+      FROM pneus p
+      JOIN veiculos v ON v.id = p.veiculo_id AND v.filial_id = ? AND v.ativo = 1
+      ${SQL_LATERAL_ULTIMA_MEDICAO}
+      WHERE p.ativo = 1 AND p.status_pneu = 'montado'
+    `).all(f.id);
+    const pneusPorV = new Map();
+    for (const p of pneusRows || []) {
+      const vid = Number(p.veiculo_id);
+      if (!pneusPorV.has(vid)) pneusPorV.set(vid, []);
+      const menor = menorSulco(p);
+      pneusPorV.get(vid).push({
+        id: p.id,
+        posicao: p.posicao,
+        menor_sulco: menor,
+        status_sulco: classificarSulco(menor, limitesDoVeiculo(p)),
+      });
+    }
+    for (const v of veiculosComStatus) {
+      v.pneus = pneusPorV.get(Number(v.id)) || [];
+    }
+
+    const logsMedicao = await db.prepare(`
+      SELECT
+        m.id, m.data_medicao, m.created_at,
+        LEAST(
+          COALESCE(m.sulco_externo, 999),
+          COALESCE(m.sulco_central, 999),
+          COALESCE(m.sulco_interno, 999),
+          COALESCE(m.sulco_auxiliar, 999)
+        ) as menor_raw,
+        p.posicao, p.numero_fogo,
+        v.id as veiculo_id, v.placa, v.apelido, v.tipo, v.layout_pneus
+      FROM medicoes m
+      JOIN pneus p ON p.id = m.pneu_id
+      JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
+      ORDER BY COALESCE(m.created_at, m.data_medicao::timestamp) DESC, m.id DESC
+      LIMIT 40
+    `).all(f.id);
 
     res.json({
       ...f,
@@ -430,6 +482,21 @@ router.get('/:id', async (req, res, next) => {
       pendencias,
       compras: resumo.compras,
       veiculos: veiculosComStatus,
+      logs_medicao: (logsMedicao || []).map((r) => {
+        const menor = r.menor_raw == null || Number(r.menor_raw) >= 999 ? null : Number(r.menor_raw);
+        return {
+          id: r.id,
+          data_medicao: r.data_medicao,
+          created_at: r.created_at,
+          menor_sulco: menor,
+          status_sulco: classificarSulco(menor, limitesDoVeiculo(r)),
+          posicao: r.posicao,
+          numero_fogo: r.numero_fogo,
+          veiculo_id: r.veiculo_id,
+          placa: r.placa,
+          apelido: r.apelido,
+        };
+      }),
       limites,
     });
   } catch (err) {

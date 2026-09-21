@@ -45,6 +45,64 @@ function statsPorVeiculo(pneus) {
   return acc;
 }
 
+function compactarPneusPorVeiculo(pneus) {
+  const map = new Map();
+  for (const p of pneus) {
+    const vid = Number(p.veiculo_id);
+    if (!map.has(vid)) map.set(vid, []);
+    const menor = menorSulco(p);
+    map.get(vid).push({
+      id: p.id,
+      posicao: p.posicao,
+      menor_sulco: menor,
+      status_sulco: classificarSulco(menor, limitesDoVeiculo(p)),
+    });
+  }
+  return map;
+}
+
+async function logsMedicaoFilial(db, filialId, limite = 40) {
+  const rows = await db.prepare(`
+    SELECT
+      m.id,
+      m.data_medicao,
+      m.created_at,
+      LEAST(
+        COALESCE(m.sulco_externo, 999),
+        COALESCE(m.sulco_central, 999),
+        COALESCE(m.sulco_interno, 999),
+        COALESCE(m.sulco_auxiliar, 999)
+      ) as menor_raw,
+      p.posicao,
+      p.numero_fogo,
+      v.id as veiculo_id,
+      v.placa,
+      v.apelido,
+      v.tipo,
+      v.layout_pneus
+    FROM medicoes m
+    JOIN pneus p ON p.id = m.pneu_id
+    JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
+    ORDER BY COALESCE(m.created_at, m.data_medicao::timestamp) DESC, m.id DESC
+    LIMIT ?
+  `).all(filialId, limite);
+  return (rows || []).map((r) => {
+    const menor = r.menor_raw == null || Number(r.menor_raw) >= 999 ? null : Number(r.menor_raw);
+    return {
+      id: r.id,
+      data_medicao: r.data_medicao,
+      created_at: r.created_at,
+      menor_sulco: menor,
+      status_sulco: classificarSulco(menor, limitesDoVeiculo(r)),
+      posicao: r.posicao,
+      numero_fogo: r.numero_fogo,
+      veiculo_id: r.veiculo_id,
+      placa: r.placa,
+      apelido: r.apelido,
+    };
+  });
+}
+
 router.get('/resumo', async (req, res, next) => {
   try {
     const db = getDb();
@@ -80,6 +138,8 @@ router.get('/resumo', async (req, res, next) => {
     let monitorar = 0;
     let rodizio = 0;
     const diagnosticos = {};
+    const acoesItens = [];
+    const diagnosticosItens = [];
 
     for (const p of pneus) {
       const menor = menorSulco(p);
@@ -98,6 +158,20 @@ router.get('/resumo', async (req, res, next) => {
       else if (acao.codigo === 'recap') recap += 1;
       else if (acao.codigo === 'monitorar') monitorar += 1;
       else if (acao.codigo === 'rodizio') rodizio += 1;
+      if (acao.codigo && acao.codigo !== 'ok') {
+        acoesItens.push({
+          pneu_id: p.id,
+          veiculo_id: p.veiculo_id,
+          placa: p.placa,
+          apelido: p.apelido,
+          posicao: p.posicao,
+          menor_sulco: menor,
+          status_sulco: status,
+          acao_sugerida: acao.codigo,
+          acao_label: acao.label,
+          acao_motivo: acao.motivo,
+        });
+      }
 
       const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm, {
         papel: p.posicao ? papelPosicao(p.posicao) : null,
@@ -105,10 +179,33 @@ router.get('/resumo', async (req, res, next) => {
       });
       if (diag.codigo !== 'sem_dado' && diag.codigo !== 'ok') {
         diagnosticos[diag.codigo] = (diagnosticos[diag.codigo] || 0) + 1;
+        diagnosticosItens.push({
+          pneu_id: p.id,
+          veiculo_id: p.veiculo_id,
+          placa: p.placa,
+          apelido: p.apelido,
+          posicao: p.posicao,
+          menor_sulco: menor,
+          status_sulco: status,
+          diagnostico: diag.codigo,
+          diagnostico_label: diag.label,
+          diagnostico_desc: diag.descricao || '',
+        });
       }
     }
 
+    const ordemAcao = { troca: 0, recap: 1, rodizio: 2, monitorar: 3 };
+    acoesItens.sort((a, b) => (ordemAcao[a.acao_sugerida] ?? 9) - (ordemAcao[b.acao_sugerida] ?? 9)
+      || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
+    const ordemDiag = {
+      critico: 0, falta_calib: 1, excesso_calib: 2, irregular: 3, desgaste_progressivo: 4,
+    };
+    diagnosticosItens.sort((a, b) => (ordemDiag[a.diagnostico] ?? 9) - (ordemDiag[b.diagnostico] ?? 9)
+      || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
+
     const porVeiculo = statsPorVeiculo(pneus);
+    const pneusMap = compactarPneusPorVeiculo(pneus);
+    const logsMedicao = await logsMedicaoFilial(db, filialId);
     const veiculos = veiculosRows.map((v) => {
       const tipo = normalizarTipoVeiculo(v.tipo);
       const a = porVeiculo.get(Number(v.id)) || {
@@ -128,6 +225,7 @@ router.get('/resumo', async (req, res, next) => {
         ultima_medicao: a.ultima_medicao,
         ultima_atualizacao: a.ultima_atualizacao,
         dia_medicao: normalizarDiaMedicao(v.dia_medicao),
+        pneus: pneusMap.get(Number(v.id)) || [],
       };
     });
 
@@ -141,13 +239,16 @@ router.get('/resumo', async (req, res, next) => {
       pneus_critico: critico,
       pneus_sem_dado: semDado,
       acoes: { troca, recap, monitorar, rodizio },
+      acoes_itens: acoesItens,
       diagnosticos,
+      diagnosticos_itens: diagnosticosItens,
       limites,
       filial_id: filialId,
       dia_medicao: normalizarDiaMedicao(filial?.dia_medicao),
       dia_medicao_label: labelDiaMedicao(filial?.dia_medicao),
       semana,
       veiculos,
+      logs_medicao: logsMedicao,
     });
   } catch (err) {
     next(err);
