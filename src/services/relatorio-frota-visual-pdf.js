@@ -372,30 +372,35 @@ function drawItemDecisao(doc, x, y, w, h, item, tipo) {
   txt(doc, motivo, x + 8, y + 34, { width: w - 16 });
 }
 
+const ACOES_POR_PAGINA = 5;
+
+function listarAcoesRelatorio(dados) {
+  return unicosPorPosicao([
+    ...(dados.prioridades?.troca || []),
+    ...(dados.prioridades?.monitorar || []),
+    ...(dados.prioridades?.rodizio || []),
+  ]);
+}
+
+function listarDiagnosticosRelatorio(dados) {
+  return unicosPorPosicao(dados.diagnosticos || []);
+}
+
 /**
- * Página de ações + diagnósticos, igual ao preview.
+ * Uma página de ações + diagnósticos (5 por coluna). Quem chama pagina o restante.
  */
-export function desenharPaginaAcoes(doc, dados) {
+export function desenharPaginaAcoes(doc, dados, loteAcoes, loteDiags, totalAcoes, totalDiags, indice = 0, totalLotes = 1) {
   const W = doc.page.width;
   const H = doc.page.height;
   const margin = 12 * MM;
   doc.rect(0, 0, W, H).fill(C.fundo);
+  const pagTxt = totalLotes > 1 ? `  ·  ${indice + 1}/${totalLotes}` : '';
   cabecalho(
     doc,
     W,
-    'Acoes e diagnosticos — abaixo da grade da frota',
-    'O que fazer agora  ·  causa do desgaste em cada pneu',
+    `Acoes e diagnosticos — lista completa${pagTxt}`,
+    'Todas as acoes e todos os diagnosticos da unidade  ·  5 por pagina',
   );
-
-  const acoes = unicosPorPosicao([
-    ...(dados.prioridades?.troca || []),
-    ...(dados.prioridades?.monitorar || []),
-    ...(dados.prioridades?.rodizio || []),
-  ]).slice(0, 5);
-  const jaNaAcao = new Set(acoes.map(chaveItem));
-  const diags = unicosPorPosicao(dados.diagnosticos || [])
-    .filter((d) => !jaNaAcao.has(chaveItem(d)))
-    .slice(0, 5);
 
   const y0 = 40 * MM;
   const colW = (W - 2 * margin - 6 * MM) / 2;
@@ -406,17 +411,17 @@ export function desenharPaginaAcoes(doc, dados) {
   doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(12);
   txt(doc, 'Acoes', margin + 10, y0 + 10);
   doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
-  txt(doc, `${acoes.length} pendentes`, margin + 10, y0 + 10, { width: colW - 20, align: 'right' });
+  txt(doc, `${totalAcoes} pendentes`, margin + 10, y0 + 10, { width: colW - 20, align: 'right' });
   doc.fontSize(7.5);
   txt(doc, 'Trocar, recapar, mudar posicao ou acompanhar', margin + 10, y0 + 26);
 
   const ih = 22 * MM;
   let yy = y0 + 42;
-  if (!acoes.length) {
+  if (!loteAcoes.length) {
     doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
-    txt(doc, 'Nenhuma acao pendente.', margin + 10, yy);
+    txt(doc, totalAcoes ? 'Continuacao nas outras paginas.' : 'Nenhuma acao pendente.', margin + 10, yy);
   } else {
-    acoes.forEach((a) => {
+    loteAcoes.forEach((a) => {
       drawItemDecisao(doc, margin + 8, yy, colW - 16, ih, a, 'acao');
       yy += ih + 3 * MM;
     });
@@ -427,16 +432,16 @@ export function desenharPaginaAcoes(doc, dados) {
   doc.fillColor(C.texto).font('Helvetica-Bold').fontSize(12);
   txt(doc, 'Diagnosticos', dx + 10, y0 + 10);
   doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
-  txt(doc, `${diags.length} irregularidades`, dx + 10, y0 + 10, { width: colW - 20, align: 'right' });
+  txt(doc, `${totalDiags} irregularidades`, dx + 10, y0 + 10, { width: colW - 20, align: 'right' });
   doc.fontSize(7.5);
   txt(doc, 'Causa do desgaste: calibragem, perfil ou critico', dx + 10, y0 + 26);
 
   yy = y0 + 42;
-  if (!diags.length) {
+  if (!loteDiags.length) {
     doc.fillColor(C.mudo).font('Helvetica').fontSize(8);
-    txt(doc, 'Nenhum diagnostico irregular.', dx + 10, yy);
+    txt(doc, totalDiags ? 'Continuacao nas outras paginas.' : 'Nenhum diagnostico irregular.', dx + 10, yy);
   } else {
-    diags.forEach((d) => {
+    loteDiags.forEach((d) => {
       drawItemDecisao(doc, dx + 8, yy, colW - 16, ih, d, 'diag');
       yy += ih + 3 * MM;
     });
@@ -606,17 +611,36 @@ export function desenharPaginaOperacao(doc, dados) {
 export function desenharRelatorioVisual(doc, dados) {
   const veiculos = (dados.frota || []).filter((v) => v.pneus?.length);
   const grupos = chunk(veiculos, 3);
-  const total = grupos.length + 1;
+  const acoes = listarAcoesRelatorio(dados);
+  const diags = listarDiagnosticosRelatorio(dados);
+  const acoesPag = chunk(acoes, ACOES_POR_PAGINA);
+  const diagsPag = chunk(diags, ACOES_POR_PAGINA);
+  const nAcoesPag = Math.max(acoesPag.length, diagsPag.length, 1);
+  const extraOp = temOperacaoExtra(dados) ? 1 : 0;
+  const total = grupos.length + nAcoesPag + extraOp;
+  const novaPagina = () => {
+    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+  };
+
   grupos.forEach((grupo, i) => {
-    if (i > 0) {
-      doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
-    }
+    if (i > 0) novaPagina();
     desenharPaginaFrota(doc, dados, grupo, grupo.map(logDoCaminhao), i + 1, total);
   });
-  doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
-  desenharPaginaAcoes(doc, dados);
+  for (let i = 0; i < nAcoesPag; i += 1) {
+    novaPagina();
+    desenharPaginaAcoes(
+      doc,
+      dados,
+      acoesPag[i] || [],
+      diagsPag[i] || [],
+      acoes.length,
+      diags.length,
+      i,
+      nAcoesPag,
+    );
+  }
   if (temOperacaoExtra(dados)) {
-    doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+    novaPagina();
     desenharPaginaOperacao(doc, dados);
   }
 }
