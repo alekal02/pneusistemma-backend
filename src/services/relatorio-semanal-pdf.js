@@ -95,43 +95,6 @@ function mm(v) {
   return v == null ? '—' : `${Number(v)} mm`;
 }
 
-/** No PDF só entra um recorte curto — a lista completa polui a decisão (ex.: 1000+ no estoque). */
-const MAX_ITENS_LISTA_PDF = 8;
-
-function resumirEstoqueParaPdf(estoque, limites) {
-  const criticoMm = Number(limites?.sulco_critico_mm) || 3;
-  const alertaMm = Number(limites?.sulco_alerta_mm) || 6;
-  const porPadrao = {};
-  let novos = 0;
-  let recapados = 0;
-  let criticos = 0;
-  let alerta = 0;
-  let semMedicao = 0;
-  for (const p of estoque) {
-    const pad = String(p.padrao || 'Outros').trim() || 'Outros';
-    porPadrao[pad] = (porPadrao[pad] || 0) + 1;
-    if (/^novo$/i.test(String(p.vida || ''))) novos += 1;
-    else recapados += 1;
-    if (p.sulco == null) semMedicao += 1;
-    else if (p.sulco <= criticoMm) criticos += 1;
-    else if (p.sulco <= alertaMm) alerta += 1;
-  }
-  const destaques = [...estoque]
-    .filter((p) => p.sulco != null)
-    .sort((a, b) => a.sulco - b.sulco)
-    .slice(0, MAX_ITENS_LISTA_PDF);
-  return {
-    total: estoque.length,
-    novos,
-    recapados,
-    criticos,
-    alerta,
-    sem_medicao: semMedicao,
-    por_padrao: porPadrao,
-    destaques,
-  };
-}
-
 /**
  * Monta o snapshot gerencial da filial para a semana corrente.
  */
@@ -376,13 +339,11 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     };
   };
 
-  const estoqueCompleto = estoqueRows.map(mapInventario);
+  const estoque = estoqueRows.map(mapInventario);
   const emRecapagem = emRecapagemRows.map(mapInventario);
-  const estoqueResumo = resumirEstoqueParaPdf(estoqueCompleto, limites);
-  const estoque = estoqueResumo.destaques;
 
   let custoEstoque = 0;
-  for (const p of [...estoqueCompleto, ...emRecapagem]) {
+  for (const p of [...estoque, ...emRecapagem]) {
     if (p.custo != null) custoEstoque += Number(p.custo);
   }
 
@@ -484,7 +445,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     resumo: {
       veiculos: veiculos.length,
       pneus_montados: totMontados,
-      pneus_estoque: estoqueCompleto.length,
+      pneus_estoque: estoque.length,
       pneus_em_recapagem: emRecapagem.length,
       pneus_descarte: descarte.length,
       sulco_ok: totOk,
@@ -506,33 +467,24 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       troca: prioridadesTroca,
       monitorar: prioridadesMonitorar,
       rodizio: prioridadesRodizio,
-      descarte_pendente: descartePendentes.slice(0, MAX_ITENS_LISTA_PDF).map((p) => ({
+      descarte_pendente: descartePendentes.map((p) => ({
         fogo: p.numero_fogo || `ID ${p.id}`,
         marca: p.marca,
         modelo: p.modelo,
         tratamento: labelTratamentoDescarte(p.tratamento_descarte || 'pendente'),
         obs: p.tratamento_descarte_obs,
       })),
-      em_recapagem: emRecapagem.slice(0, MAX_ITENS_LISTA_PDF),
+      em_recapagem: emRecapagem,
     },
     frota,
     diagnosticos: frota.flatMap((v) => (v.pneus || [])
       .filter((p) => p.diagnostico && !/^ok$/i.test(p.diagnostico) && !/sem dados/i.test(p.diagnostico))
       .map((p) => ({ ...p, placa: v.placa, apelido: v.apelido }))),
     estoque,
-    estoque_resumo: {
-      total: estoqueResumo.total,
-      novos: estoqueResumo.novos,
-      recapados: estoqueResumo.recapados,
-      criticos: estoqueResumo.criticos,
-      alerta: estoqueResumo.alerta,
-      sem_medicao: estoqueResumo.sem_medicao,
-      por_padrao: estoqueResumo.por_padrao,
-    },
-    em_recapagem: emRecapagem.slice(0, MAX_ITENS_LISTA_PDF),
-    historico: historico.slice(0, 12),
+    em_recapagem: emRecapagem,
+    historico,
     medicoes_semana_lista: medicoesLista,
-    descarte: descarte.slice(0, MAX_ITENS_LISTA_PDF).map((p) => ({
+    descarte: descarte.map((p) => ({
       fogo: p.numero_fogo || `ID ${p.id}`,
       marca: p.marca,
       modelo: p.modelo,

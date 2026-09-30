@@ -32,8 +32,10 @@ import {
   validarTokenAcessoRapido,
   marcarTokenUsado,
   montarDetalheVeiculo,
+  listarEstoqueFilial,
 } from '../services/acesso-rapido.js';
 import { consultarProximoFogo, comRetryFogoUnico } from '../numero-fogo.js';
+import { montarPneu } from '../services/whatsapp-ops.js';
 import { excluirVeiculoCompleto } from '../services/limpar-filial.js';
 
 const router = Router();
@@ -59,10 +61,12 @@ router.get('/acesso-rapido', async (req, res, next) => {
       return res.status(404).json({ erro: 'Veículo não encontrado' });
     }
 
+    const estoque = await listarEstoqueFilial(tokenRow.filial_id, 150).catch(() => []);
     res.json({
       ...detalhe,
       acesso_rapido: true,
       token_acesso: tokenRow.token,
+      estoque,
       proximo_fogo: await consultarProximoFogo(getDb(), tokenRow.filial_id).catch(() => null),
     });
   } catch (err) {
@@ -204,6 +208,49 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
     if (ehViolacaoUnique(err)) {
       return res.status(409).json({ erro: 'Nº de fogo já existe nesta filial' });
     }
+    next(err);
+  }
+});
+
+/**
+ * Público (token WhatsApp): monta um pneu já cadastrado no estoque na posição vazia.
+ */
+router.post('/acesso-rapido/montar-estoque', async (req, res, next) => {
+  const { token, posicao, pneu_id, montar_pneu_id } = req.body || {};
+  const pneuId = parseInt(pneu_id || montar_pneu_id, 10);
+  if (!token) return res.status(400).json({ erro: 'Token obrigatório' });
+  if (!posicao) return res.status(400).json({ erro: 'Informe a posição' });
+  if (!pneuId) return res.status(400).json({ erro: 'Selecione o pneu do estoque' });
+
+  try {
+    const tokenRow = await validarTokenAcessoRapido(String(token), ['medir', 'troca']);
+    if (!tokenRow) {
+      return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+    if (!tokenRow.veiculo_id) {
+      return res.status(400).json({ erro: 'Token sem veículo — use o link correto do menu' });
+    }
+    const filialId = tokenRow.filial_id;
+    const veiculo = await assertVeiculoDaFilial(tokenRow.veiculo_id, filialId);
+    if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
+
+    const montagem = await montarPneu({
+      filialId,
+      pneuId,
+      veiculoId: veiculo.id,
+      posicao: String(posicao).trim().toUpperCase(),
+    });
+    await marcarTokenUsado(tokenRow.id);
+    const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
+    const estoque = await listarEstoqueFilial(filialId, 150).catch(() => []);
+    res.json({
+      mensagem: `Fogo ${montagem.fogo || pneuId} montado em ${montagem.label || posicao}`,
+      veiculo: { ...detalhe, estoque },
+      token_acesso: tokenRow.token,
+      acesso_rapido: true,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });

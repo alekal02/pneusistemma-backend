@@ -77,6 +77,7 @@ router.get('/', async (req, res, next) => {
 
     // medir (compatível com GET /veiculos/acesso-rapido)
     const proximo_fogo = await consultarProximoFogo(db, row.filial_id).catch(() => null);
+    const estoque = await listarEstoqueFilial(row.filial_id, 150).catch(() => []);
     res.json({
       ...veiculo,
       tipo_token: 'medir',
@@ -84,6 +85,7 @@ router.get('/', async (req, res, next) => {
       token_acesso: row.token,
       token_valido: true,
       filial,
+      estoque,
       proximo_fogo,
     });
   } catch (err) {
@@ -174,7 +176,7 @@ router.get('/frota', async (req, res, next) => {
   try {
     const row = await tokenOuErro(req.query.token, ['medir', 'troca']);
     const frota = await ops.listarFrota(row.filial_id);
-    const estoque = await listarEstoqueFilial(row.filial_id, 80);
+    const estoque = await listarEstoqueFilial(row.filial_id, 150);
     res.json({
       filial_id: row.filial_id,
       veiculo_token_id: row.veiculo_id,
@@ -225,7 +227,7 @@ router.get('/veiculo-posicoes', async (req, res, next) => {
 
 /**
  * Ações do pneu no link de medição (token medir/troca).
- * acao: estoque | recap | descarte | reposicionar | troca_estoque | mover_frota
+ * acao: estoque | recap | descarte | reposicionar | troca_estoque | montar_estoque | mover_frota
  */
 router.post('/pneu-acao', async (req, res, next) => {
   try {
@@ -239,7 +241,11 @@ router.post('/pneu-acao', async (req, res, next) => {
       motivo,
     } = req.body || {};
     const row = await tokenOuErro(token, ['medir', 'troca']);
-    const pneuId = parseInt(pneu_id, 10);
+    const acaoNorm = String(acao || '');
+    const pneuId = parseInt(
+      acaoNorm === 'montar_estoque' ? (montar_pneu_id || pneu_id) : pneu_id,
+      10,
+    );
     if (!pneuId) return res.status(400).json({ erro: 'Informe pneu_id' });
     if (!acao) return res.status(400).json({ erro: 'Informe a ação' });
 
@@ -256,7 +262,7 @@ router.post('/pneu-acao', async (req, res, next) => {
     }
 
     let result;
-    switch (String(acao)) {
+    switch (acaoNorm) {
       case 'estoque':
         result = await ops.desmontarPneu({ filialId, pneuId });
         result = { mensagem: `Fogo ${result.fogo} enviado ao estoque`, ...result };
@@ -294,6 +300,26 @@ router.post('/pneu-acao', async (req, res, next) => {
           pneuEstoqueId: parseInt(montar_pneu_id, 10),
         });
         break;
+      case 'montar_estoque': {
+        if (!posicao) return res.status(400).json({ erro: 'Informe a posição vazia' });
+        if (pneu.status_pneu !== 'estoque') {
+          return res.status(400).json({ erro: 'Esse pneu não está no estoque' });
+        }
+        if (!row.veiculo_id) {
+          return res.status(400).json({ erro: 'Token sem veículo vinculado' });
+        }
+        result = await ops.montarPneu({
+          filialId,
+          pneuId,
+          veiculoId: row.veiculo_id,
+          posicao: String(posicao).trim().toUpperCase(),
+        });
+        result = {
+          mensagem: `Fogo ${result.fogo || pneu.numero_fogo} montado em ${result.label || posicao}`,
+          ...result,
+        };
+        break;
+      }
       case 'mover_frota':
         if (!veiculo_destino_id || !posicao) {
           return res.status(400).json({ erro: 'Informe veículo e posição de destino' });
@@ -308,7 +334,7 @@ router.post('/pneu-acao', async (req, res, next) => {
         break;
       default:
         return res.status(400).json({
-          erro: 'acao inválida (estoque, recap, descarte, reposicionar, troca_estoque, mover_frota)',
+          erro: 'acao inválida (estoque, recap, descarte, reposicionar, troca_estoque, montar_estoque, mover_frota)',
         });
     }
 
