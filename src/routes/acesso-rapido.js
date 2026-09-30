@@ -7,6 +7,7 @@ import {
   marcarTokenUsado,
   montarDetalheVeiculo,
   listarEstoqueFilial,
+  contarEstoqueFilial,
 } from '../services/acesso-rapido.js';
 import * as ops from '../services/whatsapp-ops.js';
 import { getDb } from '../database.js';
@@ -66,7 +67,7 @@ router.get('/', async (req, res, next) => {
     if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
 
     if (row.tipo === 'troca') {
-      const estoque = await listarEstoqueFilial(row.filial_id, 50);
+      const estoque = await listarEstoqueFilial(row.filial_id, 4000, req.query.q);
       return res.json({
         ...payload,
         veiculo,
@@ -77,7 +78,7 @@ router.get('/', async (req, res, next) => {
 
     // medir (compatível com GET /veiculos/acesso-rapido)
     const proximo_fogo = await consultarProximoFogo(db, row.filial_id).catch(() => null);
-    const estoque = await listarEstoqueFilial(row.filial_id, 150).catch(() => []);
+    const estoque = await listarEstoqueFilial(row.filial_id, 4000, req.query.q).catch(() => []);
     res.json({
       ...veiculo,
       tipo_token: 'medir',
@@ -176,12 +177,35 @@ router.get('/frota', async (req, res, next) => {
   try {
     const row = await tokenOuErro(req.query.token, ['medir', 'troca']);
     const frota = await ops.listarFrota(row.filial_id);
-    const estoque = await listarEstoqueFilial(row.filial_id, 150);
+    const estoque = await listarEstoqueFilial(row.filial_id, 4000, req.query.q);
+    const total_estoque = await contarEstoqueFilial(row.filial_id).catch(() => estoque.length);
     res.json({
       filial_id: row.filial_id,
       veiculo_token_id: row.veiculo_id,
       frota,
       estoque,
+      total_estoque,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
+/**
+ * Estoque da filial do token, com busca por fogo/marca (ex.: 5316 acha LD1-5316).
+ */
+router.get('/estoque', async (req, res, next) => {
+  try {
+    const row = await tokenOuErro(req.query.token, ['medir', 'troca']);
+    const q = String(req.query.q || '').trim();
+    const estoque = await listarEstoqueFilial(row.filial_id, 4000, q);
+    const total = await contarEstoqueFilial(row.filial_id).catch(() => estoque.length);
+    res.json({
+      filial_id: row.filial_id,
+      estoque,
+      total,
+      busca: q,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });

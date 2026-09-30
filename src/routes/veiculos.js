@@ -61,7 +61,7 @@ router.get('/acesso-rapido', async (req, res, next) => {
       return res.status(404).json({ erro: 'Veículo não encontrado' });
     }
 
-    const estoque = await listarEstoqueFilial(tokenRow.filial_id, 150).catch(() => []);
+    const estoque = await listarEstoqueFilial(tokenRow.filial_id, 4000).catch(() => []);
     res.json({
       ...detalhe,
       acesso_rapido: true,
@@ -242,7 +242,7 @@ router.post('/acesso-rapido/montar-estoque', async (req, res, next) => {
     });
     await marcarTokenUsado(tokenRow.id);
     const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
-    const estoque = await listarEstoqueFilial(filialId, 150).catch(() => []);
+    const estoque = await listarEstoqueFilial(filialId, 4000).catch(() => []);
     res.json({
       mensagem: `Fogo ${montagem.fogo || pneuId} montado em ${montagem.label || posicao}`,
       veiculo: { ...detalhe, estoque },

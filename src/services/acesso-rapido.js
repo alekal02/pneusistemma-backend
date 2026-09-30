@@ -90,15 +90,50 @@ export async function marcarTokenUsado(tokenId) {
   `).run(tokenId);
 }
 
-export async function listarEstoqueFilial(filialId, limite = 40) {
+function sanitizarBuscaEstoque(busca) {
+  return String(busca || '').trim().replace(/[%_\\]/g, '').slice(0, 40);
+}
+
+export async function contarEstoqueFilial(filialId) {
   const db = getDb();
+  const row = await db.prepare(`
+    SELECT COUNT(*) as n FROM pneus
+    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+  `).get(filialId);
+  return Number(row?.n || 0);
+}
+
+/**
+ * Estoque da filial. Sem busca limita a lista; com busca acha fogo parcial (ex.: 5316 → LD1-5316).
+ */
+export async function listarEstoqueFilial(filialId, limite = 4000, busca = '') {
+  const db = getDb();
+  const cap = Math.min(Math.max(parseInt(limite, 10) || 4000, 1), 4000);
+  const q = sanitizarBuscaEstoque(busca);
+  const params = [filialId];
+  let filtro = '';
+  if (q) {
+    const like = `%${q}%`;
+    const compacto = q.replace(/[^a-zA-Z0-9]/g, '');
+    filtro = `
+      AND (
+        COALESCE(numero_fogo, '') ILIKE ?
+        OR COALESCE(marca, '') ILIKE ?
+        OR COALESCE(modelo, '') ILIKE ?
+        OR CAST(id AS TEXT) LIKE ?
+        ${compacto ? "OR regexp_replace(COALESCE(numero_fogo, ''), '[^0-9A-Za-z]', '', 'g') ILIKE ?" : ''}
+      )`;
+    params.push(like, like, like, like);
+    if (compacto) params.push(`%${compacto}%`);
+  }
   return db.prepare(`
     SELECT id, numero_fogo, marca, modelo, tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu
     FROM pneus
     WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+    ${filtro}
     ORDER BY LOWER(COALESCE(numero_fogo, '')), id
     LIMIT ?
-  `).all(filialId, limite);
+  `).all(...params, cap);
 }
 
 /** Mesmo payload de GET /veiculos/:id */
