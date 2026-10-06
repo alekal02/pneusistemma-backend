@@ -22,6 +22,7 @@ import {
 } from '../pneus-layouts.js';
 import { resolverTipoEquipamento, EQUIPAMENTO_TIPOS } from '../equipamento-tipos.js';
 import { desenharRelatorioVisual } from './relatorio-frota-visual-pdf.js';
+import { carregarEvolucaoDesgaste } from './pneu-ciclo.js';
 import { SQL_LOGS_MEDICAO_SEMANA } from '../sql-ultima-medicao.js';
 
 function pad2(n) {
@@ -443,7 +444,9 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
     desmontagem: 'Desmontagem',
     mudanca_posicao: 'Rodizio / reposicao',
     recap: 'Envio a recap',
+    enviar_recap: 'Envio a recap',
     retorno_recap: 'Retorno de recap',
+    entrada_estoque: 'Entrada no estoque',
     descarte: 'Descarte',
   };
 
@@ -494,6 +497,8 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
       obs: m.observacoes || m.responsavel || '',
     };
   });
+
+  const evolucaoDesgaste = await carregarEvolucaoDesgaste(db, filialId);
 
   totOk = acc.ok;
   totAlerta = acc.monitorar;
@@ -576,6 +581,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
     em_recapagem: emRecapagem,
     historico: historico.slice(0, 12),
     medicoes_semana_lista: medicoesLista,
+    evolucao_desgaste: evolucaoDesgaste,
     descarte: descarte.map((p) => ({
       fogo: p.numero_fogo || `ID ${p.id}`,
       marca: p.marca,

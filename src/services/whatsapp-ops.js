@@ -2,6 +2,7 @@
  * Operações de frota usadas pelo menu WhatsApp (escopo por filial_id).
  */
 import { getDb } from '../database.js';
+import { registrarMovimentacao, travarPneu } from './pneu-movimentacao.js';
 import { ehViolacaoUnique } from '../db-utils.js';
 import { getLimites, menorSulco } from '../limites.js';
 import { avaliarAlertaPerfil, pesoAlerta, rotuloAlerta } from '../medicao-perfil.js';
@@ -21,20 +22,6 @@ import {
 
 function hojeIso() {
   return new Date().toISOString().split('T')[0];
-}
-
-async function registrarMovimentacao(db, {
-  pneuId, veiculoId, tipo, data, km, hr, posicao, detalhes = null, placa = null,
-}) {
-  await db.prepare(`
-    INSERT INTO movimentacoes (
-      pneu_id, veiculo_id, tipo, data_evento, km_veiculo, hr_veiculo,
-      posicao, detalhes, veiculo_placa
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    pneuId, veiculoId, tipo, data,
-    km ?? null, hr ?? null, posicao ?? null, detalhes, placa
-  );
 }
 
 export async function buscarVeiculoPorPlaca(filialId, placaLimpa) {
@@ -356,6 +343,14 @@ export async function registrarRecap({ filialId, pneuId }) {
     placa = veiculo?.placa || null;
   }
   await db.transaction(async () => {
+    const locked = await travarPneu(db, pneuId);
+    if (!locked || locked.status_pneu === 'recapagem' || locked.status_pneu === 'descarte') {
+      throw Object.assign(new Error('Pneu já está em recapagem'), { status: 400 });
+    }
+    const vida = (locked.vida_recap || 0) + 1;
+    if (vida > (limites.max_recaps || 6)) {
+      throw Object.assign(new Error(`Limite de recaps atingido (${limites.max_recaps})`), { status: 400 });
+    }
     if (estavaMontado) {
       const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
       await registrarMovimentacao(db, {
@@ -374,8 +369,8 @@ export async function registrarRecap({ filialId, pneuId }) {
       UPDATE pneus SET
         veiculo_id = NULL, posicao = NULL, status_pneu = 'recapagem',
         vida_recap = ?, condicao = 'recapado', data_instalacao = NULL
-      WHERE id = ?
-    `).run(novaVida, pneuId);
+      WHERE id = ? AND status_pneu IS DISTINCT FROM 'recapagem'
+    `).run(vida, pneuId);
     await registrarMovimentacao(db, {
       pneuId,
       veiculoId: estavaMontado ? veiculoId : null,
@@ -388,11 +383,12 @@ export async function registrarRecap({ filialId, pneuId }) {
         ? `WhatsApp · enviou à recap (${novaVida}ª vida) · origem ${placa || ''} ${posicao || ''}`.trim()
         : `WhatsApp · enviou à recap (${novaVida}ª vida) · origem estoque`,
       placa,
+      ciclo: locked.vida_recap || 0,
     });
   });
   return {
     fogo: pneu.numero_fogo,
-    vida: novaVida,
+    vida: (pneu.vida_recap || 0) + 1,
     estava_montado: Boolean(estavaMontado),
     veiculo_id: veiculoId,
     posicao,
@@ -412,6 +408,10 @@ export async function devolverRecapAoEstoque({ filialId, pneuId }) {
   }
   const data = hojeIso();
   await db.transaction(async () => {
+    const locked = await travarPneu(db, pneuId);
+    if (!locked || locked.status_pneu !== 'recapagem') {
+      throw Object.assign(new Error('Pneu não está em recapagem'), { status: 400 });
+    }
     await db.prepare(`
       UPDATE pneus SET
         status_pneu = 'estoque',
@@ -419,7 +419,7 @@ export async function devolverRecapAoEstoque({ filialId, pneuId }) {
         veiculo_id = NULL,
         posicao = NULL,
         data_instalacao = NULL
-      WHERE id = ?
+      WHERE id = ? AND status_pneu = 'recapagem'
     `).run(pneuId);
     await registrarMovimentacao(db, {
       pneuId,
@@ -431,6 +431,7 @@ export async function devolverRecapAoEstoque({ filialId, pneuId }) {
       posicao: null,
       detalhes: `WhatsApp · recap concluído · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
       placa: null,
+      ciclo: pneu.vida_recap || 0,
     });
   });
   return {
@@ -692,6 +693,8 @@ export async function registrarDescarte({ filialId, pneuId, motivo = null }) {
       posicao: estavaMontado ? posicao : null,
       detalhes: motivo?.trim() || 'WhatsApp · enviou ao descarte',
       placa: pneu.placa || null,
+      ciclo: pneu.vida_recap || 0,
+      motivo: motivo?.trim() || null,
     });
   });
   return {

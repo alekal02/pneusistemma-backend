@@ -3,7 +3,7 @@
  * Ex.: "pneu fogo 08251227 enviado para recap Bandag 26/08/2026"
  */
 import { getLimites } from '../limites.js';
-import { registrarMovimentacao, atualizarKmHrVeiculo } from './pneu-movimentacao.js';
+import { registrarMovimentacao, atualizarKmHrVeiculo, travarPneu } from './pneu-movimentacao.js';
 import { capturarVagaDoPneu, abrirAlertaPosicaoVaga } from './alerta-posicao-vaga.js';
 
 export const AJUDA_RECAP = [
@@ -227,36 +227,49 @@ export async function enviarPneuParaRecap(db, {
   const vaga = await capturarVagaDoPneu(db, pneu);
 
   await db.transaction(async () => {
-    const veiculo = await veiculoDoPneu(db, pneu);
+    const locked = await travarPneu(db, pneu.id);
+    if (!locked || locked.status_pneu === 'recapagem' || locked.status_pneu === 'descarte' || locked.ativo === 0) {
+      throw recapErro(
+        locked?.status_pneu === 'descarte' || locked?.ativo === 0
+          ? 'Pneu em descarte não pode ir para recap'
+          : 'Este pneu já está em recapagem'
+      );
+    }
+    const veiculo = await veiculoDoPneu(db, locked);
     const km = km_veiculo != null ? parseInt(km_veiculo, 10) : (veiculo?.km_atual ?? null);
     const hr = hr_veiculo != null ? parseFloat(hr_veiculo) : (veiculo?.hr_atual ?? null);
 
-    if (pneu.status_pneu === 'montado' && pneu.veiculo_id) {
+    if (locked.status_pneu === 'montado' && locked.veiculo_id) {
       await registrarMovimentacao(db, {
-        pneuId: pneu.id,
-        veiculoId: pneu.veiculo_id,
+        pneuId: locked.id,
+        veiculoId: locked.veiculo_id,
         tipo: 'retirada',
         data: dataIso,
         km,
         hr,
-        posicao: pneu.posicao,
+        posicao: locked.posicao,
         detalhes: 'Retirou para enviar à recap',
         placa: veiculo?.placa || null,
+        apelido: veiculo?.apelido || null,
+        ciclo: locked.vida_recap || 0,
       });
-      await atualizarKmHrVeiculo(db, pneu.veiculo_id, filialId, km, hr);
+      await atualizarKmHrVeiculo(db, locked.veiculo_id, filialId, km, hr);
     }
 
     await registrarMovimentacao(db, {
-      pneuId: pneu.id,
-      veiculoId: pneu.veiculo_id || null,
+      pneuId: locked.id,
+      veiculoId: locked.veiculo_id || null,
       tipo: 'enviar_recap',
       data: dataIso,
       km,
       hr,
-      posicao: pneu.posicao || null,
+      posicao: locked.posicao || null,
       sulcoMm: sulco_mm != null ? parseFloat(sulco_mm) : null,
+      sulcoAntes: sulco_mm != null ? parseFloat(sulco_mm) : null,
       detalhes,
       placa: veiculo?.placa || null,
+      apelido: veiculo?.apelido || null,
+      ciclo: locked.vida_recap || 0,
     });
 
     await db.prepare(`
@@ -329,21 +342,33 @@ export async function receberRecapPneu(db, {
   ].filter(Boolean).join(' — ');
 
   await db.transaction(async () => {
-    const veiculo = await veiculoDoPneu(db, pneu);
+    const locked = await travarPneu(db, pneu.id);
+    if (!locked || locked.status_pneu !== 'recapagem') {
+      throw recapErro('Este pneu não está em recapagem');
+    }
+    const vidaNova = (locked.vida_recap || 0) + 1;
+    if (vidaNova > (limites.max_recaps || 6)) {
+      throw recapErro(`Limite de recaps atingido (${limites.max_recaps}). Indique troca/descarte.`);
+    }
+    const veiculo = await veiculoDoPneu(db, locked);
     const km = km_veiculo != null ? parseInt(km_veiculo, 10) : (veiculo?.km_atual ?? null);
     const hr = hr_veiculo != null ? parseFloat(hr_veiculo) : (veiculo?.hr_atual ?? null);
+    const sulcoInformado = sulco_mm != null && sulco_mm !== '' ? parseFloat(sulco_mm) : null;
 
     await registrarMovimentacao(db, {
-      pneuId: pneu.id,
-      veiculoId: pneu.veiculo_id || null,
+      pneuId: locked.id,
+      veiculoId: locked.veiculo_id || null,
       tipo: 'recap',
       data: dataIso,
       km,
       hr,
-      posicao: pneu.posicao || null,
-      sulcoMm: sulco_mm != null ? parseFloat(sulco_mm) : (limites.sulco_novo_mm || null),
+      posicao: locked.posicao || null,
+      sulcoMm: Number.isFinite(sulcoInformado) ? sulcoInformado : null,
+      sulcoDepois: Number.isFinite(sulcoInformado) ? sulcoInformado : null,
       detalhes,
       placa: veiculo?.placa || null,
+      apelido: veiculo?.apelido || null,
+      ciclo: vidaNova,
     });
 
     await db.prepare(`
@@ -359,12 +384,12 @@ export async function receberRecapPneu(db, {
         data_alerta_monitorar = NULL,
         recap_fornecedor = NULL,
         recap_enviado_em = NULL
-      WHERE id = ?
+      WHERE id = ? AND status_pneu = 'recapagem'
     `).run(
-      novaVida,
-      sulco_mm != null ? parseFloat(sulco_mm) : limites.sulco_novo_mm,
+      vidaNova,
+      Number.isFinite(sulcoInformado) ? sulcoInformado : null,
       km_veiculo != null ? parseInt(km_veiculo, 10) : null,
-      pneu.id
+      locked.id
     );
   });
 

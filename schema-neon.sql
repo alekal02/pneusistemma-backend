@@ -94,13 +94,15 @@ CREATE TABLE IF NOT EXISTS pneus (
   tratamento_descarte TEXT,
   tratamento_descarte_obs TEXT,
   tratamento_descarte_em TEXT,
+  recap_fornecedor TEXT,
+  recap_enviado_em TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (veiculo_id, posicao)
 );
 
 CREATE TABLE IF NOT EXISTS medicoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
   data_medicao TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
   km_veiculo INTEGER,
   hr_veiculo DOUBLE PRECISION,
@@ -119,12 +121,16 @@ CREATE TABLE IF NOT EXISTS medicoes (
   sulco_mm DOUBLE PRECISION,
   inspecao_danos TEXT,
   veiculo_placa TEXT,
+  veiculo_id BIGINT,
+  veiculo_apelido TEXT,
+  posicao TEXT,
+  ciclo INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS movimentacoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
   veiculo_id BIGINT REFERENCES veiculos(id) ON DELETE SET NULL,
   tipo TEXT NOT NULL,
   data_evento TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
@@ -137,6 +143,13 @@ CREATE TABLE IF NOT EXISTS movimentacoes (
   km_rodado INTEGER,
   hr_rodado DOUBLE PRECISION,
   veiculo_placa TEXT,
+  veiculo_apelido TEXT,
+  ciclo INTEGER,
+  usuario TEXT,
+  custo DOUBLE PRECISION,
+  sulco_antes DOUBLE PRECISION,
+  sulco_depois DOUBLE PRECISION,
+  motivo TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -188,6 +201,11 @@ CREATE INDEX IF NOT EXISTS idx_medicoes_pneu ON medicoes(pneu_id);
 CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_recente ON medicoes(pneu_id, data_medicao DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_medicoes_data ON medicoes(data_medicao);
 CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu ON movimentacoes(pneu_id);
+CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_data ON movimentacoes(pneu_id, data_evento, id);
+CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_ciclo ON medicoes(pneu_id, ciclo);
+CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_ciclo ON movimentacoes(pneu_id, ciclo);
+CREATE INDEX IF NOT EXISTS idx_movimentacoes_veiculo_periodo ON movimentacoes(veiculo_id, data_evento);
+CREATE INDEX IF NOT EXISTS idx_medicoes_veiculo_periodo ON medicoes(veiculo_id, data_medicao);
 CREATE INDEX IF NOT EXISTS idx_veiculos_filial ON veiculos(filial_id);
 CREATE INDEX IF NOT EXISTS idx_usuarios_filial ON usuarios(filial_id);
 CREATE INDEX IF NOT EXISTS idx_notif_whatsapp_medicao ON notificacoes_whatsapp(medicao_id);

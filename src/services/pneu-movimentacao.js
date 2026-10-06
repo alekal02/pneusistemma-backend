@@ -27,6 +27,10 @@ function deltaKmHr(anterior, kmAtual, hrAtual) {
   return { kmRodado, hrRodado };
 }
 
+export async function travarPneu(db, pneuId) {
+  return db.prepare(`SELECT * FROM pneus WHERE id = ? FOR UPDATE`).get(pneuId);
+}
+
 export async function registrarMovimentacao(db, {
   pneuId,
   veiculoId,
@@ -39,22 +43,43 @@ export async function registrarMovimentacao(db, {
   detalhes = null,
   sulcoMm = null,
   placa = null,
+  apelido = null,
+  ciclo = undefined,
+  usuario = null,
+  custo = null,
+  sulcoAntes = null,
+  sulcoDepois = null,
+  motivo = null,
 }) {
   const anterior = veiculoId
     ? await ultimaMovimentacaoVeiculo(db, pneuId, veiculoId)
     : null;
-  const { kmRodado, hrRodado } = deltaKmHr(anterior, km, hr);
+  const stintEncerrado = anterior && ['retirada', 'desmontagem'].includes(anterior.tipo);
+  const abreStint = tipo === 'montagem' || tipo === 'entrada_estoque';
+  const { kmRodado, hrRodado } = (stintEncerrado || abreStint)
+    ? { kmRodado: null, hrRodado: null }
+    : deltaKmHr(anterior, km, hr);
+
   let placaFinal = placa || null;
-  if (!placaFinal && veiculoId) {
-    const v = await db.prepare('SELECT placa FROM veiculos WHERE id = ?').get(veiculoId);
-    placaFinal = v?.placa || null;
+  let apelidoFinal = apelido || null;
+  if (veiculoId && (!placaFinal || !apelidoFinal)) {
+    const v = await db.prepare('SELECT placa, apelido FROM veiculos WHERE id = ?').get(veiculoId);
+    if (!placaFinal) placaFinal = v?.placa || null;
+    if (!apelidoFinal) apelidoFinal = v?.apelido || null;
+  }
+
+  let cicloFinal = ciclo;
+  if (cicloFinal === undefined && pneuId) {
+    const p = await db.prepare('SELECT vida_recap FROM pneus WHERE id = ?').get(pneuId);
+    cicloFinal = p?.vida_recap ?? null;
   }
 
   return db.prepare(`
     INSERT INTO movimentacoes (
       pneu_id, veiculo_id, tipo, data_evento, km_veiculo, hr_veiculo,
-      posicao, posicao_anterior, sulco_mm, detalhes, km_rodado, hr_rodado, veiculo_placa
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      posicao, posicao_anterior, sulco_mm, detalhes, km_rodado, hr_rodado, veiculo_placa,
+      veiculo_apelido, ciclo, usuario, custo, sulco_antes, sulco_depois, motivo
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     pneuId,
     veiculoId,
@@ -68,7 +93,14 @@ export async function registrarMovimentacao(db, {
     detalhes,
     kmRodado,
     hrRodado,
-    placaFinal
+    placaFinal,
+    apelidoFinal,
+    cicloFinal ?? null,
+    usuario || null,
+    custo != null && Number.isFinite(Number(custo)) ? Number(custo) : null,
+    sulcoAntes != null && Number.isFinite(Number(sulcoAntes)) ? Number(sulcoAntes) : null,
+    sulcoDepois != null && Number.isFinite(Number(sulcoDepois)) ? Number(sulcoDepois) : null,
+    motivo || null
   );
 }
 

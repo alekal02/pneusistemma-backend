@@ -2,6 +2,7 @@
  * Zera frota operacional de UMA filial: veículos, pneus, medições, movimentações.
  * Mantém o cadastro da filial, logins e configuração WhatsApp.
  */
+import { comSavepoint } from '../db-utils.js';
 export async function localizarFilialBh(db, filtro = '') {
   const q = String(filtro || '').trim();
   const filiais = await db.prepare(`
@@ -62,7 +63,7 @@ async function nSafe(db, sql, ...p) {
 
 async function delSafe(db, sql, ...p) {
   try {
-    return await db.prepare(sql).run(...p);
+    return await comSavepoint(db, () => db.prepare(sql).run(...p));
   } catch (err) {
     if (/does not exist|undefined_table/i.test(String(err.message || ''))) return { changes: 0 };
     throw err;
@@ -388,16 +389,14 @@ export async function excluirVeiculoCompleto(db, filialId, veiculoId) {
          )
     `, vid, vid);
     await delSafe(db, `DELETE FROM alertas_posicao_vaga WHERE veiculo_id = ?`, vid);
-    await delSafe(db, `
-      DELETE FROM medicoes
-      WHERE pneu_id IN (SELECT id FROM pneus WHERE veiculo_id = ?)
-    `, vid);
-    await delSafe(db, `
-      DELETE FROM movimentacoes
-      WHERE pneu_id IN (SELECT id FROM pneus WHERE veiculo_id = ?)
-         OR veiculo_id = ?
-    `, vid, vid);
-    await db.prepare(`DELETE FROM pneus WHERE veiculo_id = ?`).run(vid);
+    await db.prepare(`
+      UPDATE pneus SET
+        veiculo_id = NULL,
+        posicao = NULL,
+        status_pneu = CASE WHEN status_pneu = 'montado' THEN 'estoque' ELSE status_pneu END,
+        data_instalacao = CASE WHEN status_pneu = 'montado' THEN NULL ELSE data_instalacao END
+      WHERE veiculo_id = ?
+    `).run(vid);
     const result = await db.prepare(`
       DELETE FROM veiculos WHERE id = ? AND filial_id = ?
     `).run(vid, fid);
@@ -411,6 +410,7 @@ export async function excluirVeiculoCompleto(db, filialId, veiculoId) {
   return {
     placa: veiculo.placa,
     apelido: veiculo.apelido,
-    pneus_apagados: nPneus,
+    pneus_apagados: 0,
+    pneus_desvinculados: nPneus,
   };
 }

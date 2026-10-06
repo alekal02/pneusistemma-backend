@@ -489,6 +489,61 @@ function colunasDecisao() {
   ];
 }
 
+function txtUso(row) {
+  const partes = [];
+  if (row.km != null) partes.push(`${row.km} km`);
+  if (row.horas != null) partes.push(`${row.horas} h`);
+  return partes.join(' / ') || '-';
+}
+
+function txtRend(row) {
+  if (row.rendimento == null) return '-';
+  return `${row.rendimento} ${row.rendimento_unidade || ''}`.trim();
+}
+
+function desenharEvolucaoDesgaste(doc, dados) {
+  const bloco = dados.evolucao_desgaste;
+  const linhas = bloco?.linhas || [];
+  if (!linhas.length) return;
+  const res = bloco.resumo || {};
+  const partes = [`${res.ciclos || linhas.length} ciclos com desgaste medido`];
+  if (res.mediana_km_mm != null) partes.push(`mediana ${res.mediana_km_mm} km/mm`);
+  if (res.mediana_h_mm != null) partes.push(`mediana ${res.mediana_h_mm} h/mm`);
+  if (res.omitidos) partes.push(`${res.omitidos} fora desta pagina`);
+  const sub = partes.join('  ·  ');
+  novaPagina(doc);
+  const y = abrirPagina(doc, 'EVOLUÇÃO DO DESGASTE', sub);
+  desenharTabela(doc, {
+    y,
+    pageTitle: 'EVOLUÇÃO DO DESGASTE',
+    pageSub: sub,
+    section: 'Por ciclo da banda. Periodo em estoque nao entra no KM/horas.',
+    rowH: 14,
+    columns: [
+      { key: 'pneu', label: 'PNEU', w: 0.11, bold: true },
+      { key: 'veiculo', label: 'VEICULO/APELIDO', w: 0.18 },
+      { key: 'posicao', label: 'POSICAO', w: 0.08 },
+      { key: 'ciclo', label: 'CICLO', w: 0.09, bold: true },
+      { key: 'inicial', label: 'INICIAL', w: 0.09 },
+      { key: 'atual', label: 'ATUAL', w: 0.09 },
+      { key: 'consumido', label: 'CONSUMIDO', w: 0.10 },
+      { key: 'uso', label: 'KM/HORAS', w: 0.14 },
+      { key: 'rendimento', label: 'RENDIMENTO', w: 0.12, bold: true },
+    ],
+    rows: linhas.map((l) => ({
+      pneu: l.fogo || '-',
+      veiculo: l.veiculo || '-',
+      posicao: l.posicao || '-',
+      ciclo: l.ciclo || '-',
+      inicial: l.inicial != null ? `${l.inicial}` : '-',
+      atual: l.atual != null ? `${l.atual}` : '-',
+      consumido: l.consumido != null ? `${l.consumido}` : '-',
+      uso: txtUso(l),
+      rendimento: txtRend(l),
+    })),
+  });
+}
+
 function desenharDecisao(doc, dados) {
   const rows = linhasDecisao(dados);
   if (!rows.length) return false;
@@ -685,6 +740,7 @@ export function desenharRelatorioVisual(doc, dados) {
   }
 
   desenharDecisao(doc, dados);
+  desenharEvolucaoDesgaste(doc, dados);
 
   const recap = itensRelevantes(dados.em_recapagem);
   const descarte = itensRelevantes(dados.descarte);

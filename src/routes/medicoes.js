@@ -271,7 +271,11 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
 
     const data = data_medicao || new Date().toISOString().split('T')[0];
     const responsavelFinal = responsavel?.trim()
+      || req.user?.login
       || (req.acessoRapido ? `WhatsApp ${req.acessoRapido.whatsapp_origem || 'acesso-rapido'}` : null);
+    const cicloMedicao = pneu.vida_recap || 0;
+    const posicaoMedicao = pneu.posicao || null;
+    const veiculoIdMedicao = pneu.veiculo_id || null;
     const mesmoNumero = (a, b) => {
       if (a == null && b == null) return true;
       if (a == null || b == null) return false;
@@ -297,82 +301,62 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
     }
 
     veiculo = await db.prepare(`SELECT * FROM veiculos WHERE id = ?`).get(pneu.veiculo_id);
-    placa = veiculo?.placa || pneu.placa || null;
+    placa = veiculo?.placa || null;
+    const apelidoMedicao = veiculo?.apelido || null;
 
     if (reaproveitar) {
       await db.prepare(`
         UPDATE medicoes SET
-          km_veiculo = ?,
-          hr_veiculo = ?,
-          sulco_externo = ?,
-          sulco_central = ?,
-          sulco_interno = ?,
-          sulco_auxiliar = ?,
-          sulco_mm = ?,
-          inspecao_danos = ?,
-          pressao_psi = ?,
-          responsavel = ?,
-          observacoes = ?,
-          marcacao_json = ?,
-          diagnostico = ?,
-          acao_sugerida = ?,
-          desgaste_mm_km = ?,
-          desgaste_mm_hora = ?,
-          veiculo_placa = ?
+          veiculo_placa = COALESCE(veiculo_placa, ?),
+          veiculo_id = COALESCE(veiculo_id, ?),
+          veiculo_apelido = COALESCE(veiculo_apelido, ?),
+          posicao = COALESCE(posicao, ?),
+          ciclo = COALESCE(ciclo, ?)
         WHERE id = ?
       `).run(
-        prep.km_veiculo,
-        prep.hr_veiculo,
-        prep.sulco_externo,
-        prep.sulco_central,
-        prep.sulco_interno,
-        prep.sulco_auxiliar,
-        prep.sulco_mm,
-        inspecaoJson,
-        prep.pressao_psi,
-        responsavelFinal,
-        observacoes?.trim() || null,
-        marcacaoJson,
-        diag.codigo,
-        acao.codigo,
-        prep.desgaste_mm_km,
-        prep.desgaste_mm_hora,
         placa,
+        veiculoIdMedicao,
+        apelidoMedicao,
+        posicaoMedicao,
+        cicloMedicao,
         anterior.id
       );
-      medicaoId = anterior.id;
-    } else {
-      const result = await db.prepare(`
-        INSERT INTO medicoes (
-          pneu_id, data_medicao, km_veiculo, hr_veiculo,
-          sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
-          pressao_psi, responsavel, observacoes, marcacao_json,
-          diagnostico, acao_sugerida, desgaste_mm_km, veiculo_placa,
-          sulco_mm, inspecao_danos, desgaste_mm_hora
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        pneu_id,
-        data,
-        prep.km_veiculo,
-        prep.hr_veiculo,
-        prep.sulco_externo,
-        prep.sulco_central,
-        prep.sulco_interno,
-        prep.sulco_auxiliar,
-        prep.pressao_psi,
-        responsavelFinal,
-        observacoes?.trim() || null,
-        marcacaoJson,
-        diag.codigo,
-        acao.codigo,
-        prep.desgaste_mm_km,
-        placa,
-        prep.sulco_mm,
-        inspecaoJson,
-        prep.desgaste_mm_hora
-      );
-      medicaoId = result.lastInsertRowid;
     }
+    const result = await db.prepare(`
+      INSERT INTO medicoes (
+        pneu_id, data_medicao, km_veiculo, hr_veiculo,
+        sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
+        pressao_psi, responsavel, observacoes, marcacao_json,
+        diagnostico, acao_sugerida, desgaste_mm_km, veiculo_placa,
+        sulco_mm, inspecao_danos, desgaste_mm_hora,
+        veiculo_id, veiculo_apelido, posicao, ciclo
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      pneu_id,
+      data,
+      prep.km_veiculo,
+      prep.hr_veiculo,
+      prep.sulco_externo,
+      prep.sulco_central,
+      prep.sulco_interno,
+      prep.sulco_auxiliar,
+      prep.pressao_psi,
+      responsavelFinal,
+      observacoes?.trim() || null,
+      marcacaoJson,
+      diag.codigo,
+      acao.codigo,
+      prep.desgaste_mm_km,
+      placa,
+      prep.sulco_mm,
+      inspecaoJson,
+      prep.desgaste_mm_hora,
+      veiculoIdMedicao,
+      apelidoMedicao,
+      posicaoMedicao,
+      cicloMedicao
+    );
+    medicaoId = result.lastInsertRowid;
 
     if (prep.km_veiculo && pneu.veiculo_id) {
       await db.prepare(`
