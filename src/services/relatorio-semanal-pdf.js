@@ -8,13 +8,11 @@ import {
   acumularAlerta,
   avaliarPneuPainel,
   contarAcaoLegada,
-  filtroTipoAtivo,
   indicadoresUso,
   novoAcumulador,
   piorStatus,
   statusPainel,
   unidadeUsoVeiculo,
-  veiculoCombinaTipo,
 } from './indicadores-frota.js';
 import {
   labelPosicao,
@@ -22,6 +20,7 @@ import {
   labelTratamentoDescarte,
   sqlOrderPosicao,
 } from '../pneus-layouts.js';
+import { resolverTipoEquipamento, EQUIPAMENTO_TIPOS } from '../equipamento-tipos.js';
 import { desenharRelatorioVisual } from './relatorio-frota-visual-pdf.js';
 import { SQL_LOGS_MEDICAO_SEMANA } from '../sql-ultima-medicao.js';
 
@@ -106,8 +105,45 @@ function mm(v) {
   return v == null ? '—' : `${Number(v)} mm`;
 }
 
-/** No PDF só entra um recorte curto — a lista completa polui a decisão (ex.: 1000+ no estoque). */
-const MAX_ITENS_LISTA_PDF = 8;
+const FILTROS_RELATORIO = {
+  todos: { id: 'todos', label: 'Todos os equipamentos', codigos: null },
+  caminhao_compactador: {
+    id: 'caminhao_compactador',
+    label: 'Caminhao/Compactador',
+    codigos: ['compactador', 'truck_tracao', 'toco_mini', 'utilitario'],
+  },
+  trator: { id: 'trator', label: 'Trator', codigos: ['trator'] },
+  mini_carregadeira: { id: 'mini_carregadeira', label: 'Mini carregadeira', codigos: ['mini_carregadeira'] },
+  giro_zero: { id: 'giro_zero', label: 'Giro zero', codigos: ['giro_zero'] },
+};
+
+export function resolverFiltroRelatorio(tipo) {
+  const bruto = String(tipo || '').trim().toLowerCase();
+  if (!bruto || bruto === 'todos' || bruto === 'todas') return FILTROS_RELATORIO.todos;
+  if (FILTROS_RELATORIO[bruto]) return FILTROS_RELATORIO[bruto];
+  if (/caminh|compact/.test(bruto)) return FILTROS_RELATORIO.caminhao_compactador;
+  const cat = resolverTipoEquipamento(bruto);
+  if (cat && FILTROS_RELATORIO[cat.codigo]) return FILTROS_RELATORIO[cat.codigo];
+  if (cat) {
+    return { id: cat.codigo, label: cat.label, codigos: [cat.codigo] };
+  }
+  return FILTROS_RELATORIO.todos;
+}
+
+function unidadeDoFiltro(filtro) {
+  if (!filtro?.codigos?.length) return 'misto';
+  const uns = new Set(
+    filtro.codigos.map((c) => EQUIPAMENTO_TIPOS.find((t) => t.codigo === c)?.unidade_uso || 'km'),
+  );
+  if (uns.size !== 1) return 'misto';
+  return [...uns][0] === 'horas' ? 'horas' : 'km';
+}
+
+function veiculoNoFiltro(veiculo, filtro) {
+  if (!filtro?.codigos?.length) return true;
+  const codigo = veiculo.tipo_codigo || resolverTipoEquipamento(veiculo.tipo)?.codigo || '';
+  return filtro.codigos.includes(codigo);
+}
 
 function resumirEstoqueParaPdf(estoque, limites) {
   const criticoMm = Number(limites?.sulco_critico_mm) || 3;
@@ -127,10 +163,6 @@ function resumirEstoqueParaPdf(estoque, limites) {
     else if (p.sulco <= criticoMm) criticos += 1;
     else if (p.sulco <= alertaMm) alerta += 1;
   }
-  const destaques = [...estoque]
-    .filter((p) => p.sulco != null)
-    .sort((a, b) => a.sulco - b.sulco)
-    .slice(0, MAX_ITENS_LISTA_PDF);
   return {
     total: estoque.length,
     novos,
@@ -139,7 +171,6 @@ function resumirEstoqueParaPdf(estoque, limites) {
     alerta,
     sem_medicao: semMedicao,
     por_padrao: porPadrao,
-    destaques,
   };
 }
 
@@ -160,14 +191,15 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
     throw err;
   }
 
-  const tipoFiltro = filtroTipoAtivo(tipo);
+  const filtro = resolverFiltroRelatorio(tipo);
+  const tipoFiltro = filtro.id === 'todos' ? null : filtro.id;
   const veiculos = (await db.prepare(`
-    SELECT id, placa, apelido, tipo, marca, modelo, ano, layout_pneus,
+    SELECT id, placa, apelido, tipo, tipo_codigo, marca, modelo, ano, layout_pneus,
            km_atual, hr_atual, ativo
     FROM veiculos
     WHERE filial_id = ? AND ativo = 1
     ORDER BY placa
-  `).all(filialId)).filter((v) => veiculoCombinaTipo(v.tipo, tipoFiltro));
+  `).all(filialId)).filter((v) => veiculoNoFiltro(v, filtro));
 
   const orderPos = sqlOrderPosicao('p.posicao');
 
@@ -377,7 +409,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
   const estoqueCompleto = estoqueRows.map(mapInventario);
   const emRecapagem = emRecapagemRows.map(mapInventario);
   const estoqueResumo = resumirEstoqueParaPdf(estoqueCompleto, limites);
-  const estoque = estoqueResumo.destaques;
+  const estoque = estoqueCompleto;
 
   let custoEstoque = 0;
   for (const p of [...estoqueCompleto, ...emRecapagem]) {
@@ -474,8 +506,10 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
   const indicadores_uso = indicadoresUso(veiculos, accKm, accHoras);
 
   return {
-    titulo: 'Relatório semanal gerencial — Controle de Pneus',
+    titulo: `Relatorio semanal - ${filtro.label}`,
     filtro_tipo: tipoFiltro,
+    filtro_label: filtro.label,
+    unidade_relatorio: unidadeDoFiltro(filtro),
     gerado_em: new Date().toISOString(),
     gerado_por: geradoPor,
     periodo,
@@ -516,14 +550,14 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
       troca: prioridadesTroca,
       monitorar: prioridadesMonitorar,
       rodizio: prioridadesRodizio,
-      descarte_pendente: descartePendentes.slice(0, MAX_ITENS_LISTA_PDF).map((p) => ({
+      descarte_pendente: descartePendentes.map((p) => ({
         fogo: p.numero_fogo || `ID ${p.id}`,
         marca: p.marca,
         modelo: p.modelo,
         tratamento: labelTratamentoDescarte(p.tratamento_descarte || 'pendente'),
         obs: p.tratamento_descarte_obs,
       })),
-      em_recapagem: emRecapagem.slice(0, MAX_ITENS_LISTA_PDF),
+      em_recapagem: emRecapagem,
     },
     frota,
     diagnosticos: frota.flatMap((v) => (v.pneus || [])
@@ -539,10 +573,10 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, 
       sem_medicao: estoqueResumo.sem_medicao,
       por_padrao: estoqueResumo.por_padrao,
     },
-    em_recapagem: emRecapagem.slice(0, MAX_ITENS_LISTA_PDF),
+    em_recapagem: emRecapagem,
     historico: historico.slice(0, 12),
     medicoes_semana_lista: medicoesLista,
-    descarte: descarte.slice(0, MAX_ITENS_LISTA_PDF).map((p) => ({
+    descarte: descarte.map((p) => ({
       fogo: p.numero_fogo || `ID ${p.id}`,
       marca: p.marca,
       modelo: p.modelo,
