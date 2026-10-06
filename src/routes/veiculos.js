@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { getDb, classificarSulco } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { TIPOS_VEICULO } from '../config.js';
+import { camposTipoVeiculo, metaTiposEquipamento } from '../equipamento-tipos.js';
+import { especificacaoMedicao, INSPECOES_DANO } from '../medicao-perfil.js';
 import { limitesDoVeiculo } from '../limites.js';
 import { requireAuth, requireFilial, requireGerenteOuAdmin, filialScopeId, filiaisEscopoIds, assertVeiculoDaFilial } from '../auth.js';
 import {
@@ -16,6 +18,8 @@ import {
   aplicarLayoutPneus,
   validarMontagem,
   getLayout,
+  layoutParaNovoVeiculo,
+  layoutNaEdicao,
 } from '../pneus-layouts.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
@@ -32,10 +36,8 @@ import {
   validarTokenAcessoRapido,
   marcarTokenUsado,
   montarDetalheVeiculo,
-  listarEstoqueFilial,
 } from '../services/acesso-rapido.js';
 import { consultarProximoFogo, comRetryFogoUnico } from '../numero-fogo.js';
-import { montarPneu } from '../services/whatsapp-ops.js';
 import { excluirVeiculoCompleto } from '../services/limpar-filial.js';
 
 const router = Router();
@@ -61,12 +63,10 @@ router.get('/acesso-rapido', async (req, res, next) => {
       return res.status(404).json({ erro: 'Veículo não encontrado' });
     }
 
-    const estoque = await listarEstoqueFilial(tokenRow.filial_id, 4000).catch(() => []);
     res.json({
       ...detalhe,
       acesso_rapido: true,
       token_acesso: tokenRow.token,
-      estoque,
       proximo_fogo: await consultarProximoFogo(getDb(), tokenRow.filial_id).catch(() => null),
     });
   } catch (err) {
@@ -212,57 +212,21 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
   }
 });
 
-/**
- * Público (token WhatsApp): monta um pneu já cadastrado no estoque na posição vazia.
- */
-router.post('/acesso-rapido/montar-estoque', async (req, res, next) => {
-  const { token, posicao, pneu_id, montar_pneu_id } = req.body || {};
-  const pneuId = parseInt(pneu_id || montar_pneu_id, 10);
-  if (!token) return res.status(400).json({ erro: 'Token obrigatório' });
-  if (!posicao) return res.status(400).json({ erro: 'Informe a posição' });
-  if (!pneuId) return res.status(400).json({ erro: 'Selecione o pneu do estoque' });
-
-  try {
-    const tokenRow = await validarTokenAcessoRapido(String(token), ['medir', 'troca']);
-    if (!tokenRow) {
-      return res.status(401).json({ erro: 'Token inválido ou expirado' });
-    }
-    if (!tokenRow.veiculo_id) {
-      return res.status(400).json({ erro: 'Token sem veículo — use o link correto do menu' });
-    }
-    const filialId = tokenRow.filial_id;
-    const veiculo = await assertVeiculoDaFilial(tokenRow.veiculo_id, filialId);
-    if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
-
-    const montagem = await montarPneu({
-      filialId,
-      pneuId,
-      veiculoId: veiculo.id,
-      posicao: String(posicao).trim().toUpperCase(),
-    });
-    await marcarTokenUsado(tokenRow.id);
-    const detalhe = await montarDetalheVeiculo(veiculo.id, filialId);
-    const estoque = await listarEstoqueFilial(filialId, 4000).catch(() => []);
-    res.json({
-      mensagem: `Fogo ${montagem.fogo || pneuId} montado em ${montagem.label || posicao}`,
-      veiculo: { ...detalhe, estoque },
-      token_acesso: tokenRow.token,
-      acesso_rapido: true,
-    });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ erro: err.message });
-    next(err);
-  }
-});
-
 router.use(requireAuth);
 
 /** Catálogo de layouts — admin/gerente também editam caminhão da unidade */
 router.get('/meta', (_req, res) => {
+  const cat = metaTiposEquipamento();
   res.json({
     posicoes: POSICOES_PNEU,
     papeis: PAPEL_POSICAO,
-    tipos: TIPOS_VEICULO,
+    tipos: cat.tipos,
+    tipos_equipamento: cat.tipos_equipamento.map((t) => ({
+      ...t,
+      medicao: especificacaoMedicao(t.codigo),
+    })),
+    inspecoes_dano: INSPECOES_DANO,
+    layout_padrao_por_tipo: cat.layout_padrao_por_tipo,
     layouts: Object.values(LAYOUTS_PNEU),
     layout_padrao: LAYOUT_PADRAO,
     tipos_pneu: TIPOS_PNEU,
@@ -382,8 +346,8 @@ router.post('/import', async (req, res, next) => {
   const avisos = [];
 
   const insert = db.prepare(`
-    INSERT INTO veiculos (placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO veiculos (placa, apelido, tipo, tipo_codigo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   try {
@@ -396,7 +360,8 @@ router.post('/import', async (req, res, next) => {
           continue;
         }
 
-        const tipo = normalizarTipoVeiculo(raw.tipo) || 'Truck / Tração';
+        const tipoCampos = camposTipoVeiculo(normalizarTipoVeiculo(raw.tipo) || 'Truck / Tração');
+        const tipo = tipoCampos.tipo;
         const layoutId = mapLayoutId(raw.layout_pneus || raw.layout, tipo);
         if (!LAYOUTS_PNEU[layoutId]) {
           erros.push({ linha, placa, erro: `Layout inválido: ${raw.layout_pneus || raw.layout}` });
@@ -413,6 +378,7 @@ router.post('/import', async (req, res, next) => {
               placa,
               String(raw.apelido || '').trim() || null,
               tipo,
+              tipoCampos.tipo_codigo,
               String(raw.marca || '').trim() || null,
               String(raw.modelo || '').trim() || null,
               Number.isFinite(ano) ? ano : null,
@@ -484,10 +450,12 @@ router.get('/', async (req, res, next) => {
           COALESCE(um.sulco_externo, 999),
           COALESCE(um.sulco_central, 999),
           COALESCE(um.sulco_interno, 999),
-          COALESCE(um.sulco_auxiliar, 999)
+          COALESCE(um.sulco_auxiliar, 999),
+          COALESCE(um.sulco_mm, 999)
         )) FILTER (WHERE um.id IS NOT NULL AND (
           um.sulco_externo IS NOT NULL OR um.sulco_central IS NOT NULL
           OR um.sulco_interno IS NOT NULL OR um.sulco_auxiliar IS NOT NULL
+          OR um.sulco_mm IS NOT NULL
         )) as menor_sulco,
         MAX(um.data_medicao) as ultima_medicao,
         MAX(um.created_at) as ultima_atualizacao,
@@ -568,14 +536,18 @@ router.post('/', async (req, res, next) => {
   const db = getDb();
   const filialId = filialScopeId(req);
   try {
-    const layoutId = layout_pneus || LAYOUT_PADRAO;
+    const tipoCampos = camposTipoVeiculo(normalizarTipoVeiculo(tipo) || 'Truck / Tração');
+    const layoutId = layoutParaNovoVeiculo(tipoCampos.tipo, layout_pneus, {
+      posicoesCustom: posicoes_custom,
+    });
     const result = await db.prepare(`
-      INSERT INTO veiculos (placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id, dia_medicao)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO veiculos (placa, apelido, tipo, tipo_codigo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id, dia_medicao)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       placa.trim().toUpperCase(),
       apelido?.trim() || null,
-      normalizarTipoVeiculo(tipo) || 'Truck / Tração',
+      tipoCampos.tipo,
+      tipoCampos.tipo_codigo,
       marca?.trim() || null,
       modelo?.trim() || null,
       ano || null,
@@ -620,15 +592,15 @@ router.put('/:id', async (req, res, next) => {
     const diaSalvo = Object.prototype.hasOwnProperty.call(req.body || {}, 'dia_medicao')
       ? normalizarDiaMedicao(dia_medicao)
       : atual.dia_medicao;
-    const layoutSalvo = layout_pneus != null && String(layout_pneus).trim()
-      ? String(layout_pneus).trim()
-      : atual.layout_pneus;
+    const layoutSalvo = layoutNaEdicao(atual.layout_pneus, layout_pneus);
 
+    const tipoCampos = tipo != null ? camposTipoVeiculo(normalizarTipoVeiculo(tipo)) : null;
     const result = await db.prepare(`
       UPDATE veiculos SET
         placa = COALESCE(?, placa),
         apelido = ?,
         tipo = COALESCE(?, tipo),
+        tipo_codigo = COALESCE(?, tipo_codigo),
         marca = ?,
         modelo = ?,
         ano = ?,
@@ -642,7 +614,8 @@ router.put('/:id', async (req, res, next) => {
     `).run(
       placa?.trim().toUpperCase() || null,
       apelido?.trim() || null,
-      tipo != null ? normalizarTipoVeiculo(tipo) : null,
+      tipoCampos ? tipoCampos.tipo : null,
+      tipoCampos ? tipoCampos.tipo_codigo : null,
       marca?.trim() || null,
       modelo?.trim() || null,
       ano || null,

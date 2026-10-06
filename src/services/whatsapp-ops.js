@@ -3,8 +3,10 @@
  */
 import { getDb } from '../database.js';
 import { ehViolacaoUnique } from '../db-utils.js';
-import { getLimites, classificarSulco, limitesDoVeiculo, menorSulco } from '../limites.js';
+import { getLimites, menorSulco } from '../limites.js';
+import { avaliarAlertaPerfil, pesoAlerta, rotuloAlerta } from '../medicao-perfil.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
+import { camposTipoVeiculo } from '../equipamento-tipos.js';
 import { comRetryFogoUnico } from '../numero-fogo.js';
 import {
   LAYOUT_PADRAO,
@@ -14,7 +16,7 @@ import {
   labelPosicao,
   validarMontagem,
   aplicarLayoutPneus,
-  layoutPadraoPorTipo,
+  layoutParaNovoVeiculo,
 } from '../pneus-layouts.js';
 
 function hojeIso() {
@@ -67,43 +69,60 @@ export async function listarFrota(filialId) {
   for (const v of rows || []) {
     const pneus = await db.prepare(`
       SELECT
-        m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar
+        m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar, m.sulco_mm,
+        m.inspecao_danos, m.hr_veiculo
       FROM pneus p
       LEFT JOIN medicoes m ON m.pneu_id = p.id
         AND m.id = (SELECT id FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1)
       WHERE p.veiculo_id = ? AND p.ativo = 1 AND p.status_pneu = 'montado'
     `).all(v.id);
     let menor = null;
+    let pior = null;
+    let temMedicao = false;
     for (const p of pneus || []) {
       const m = menorSulco(p);
-      if (m != null) menor = menor == null ? m : Math.min(menor, m);
+      if (m != null) {
+        menor = menor == null ? m : Math.min(menor, m);
+        temMedicao = true;
+      }
+      if (p.inspecao_danos) temMedicao = true;
+      const aval = avaliarAlertaPerfil(p, {
+        tipo: v.tipo,
+        layout: v.layout_pneus,
+        hr_veiculo: p.hr_veiculo,
+      });
+      if (!pior || pesoAlerta(aval) < pesoAlerta(pior)) pior = aval;
     }
-    const status = classificarSulco(menor, limitesDoVeiculo(v));
     out.push({
       ...v,
       menor_sulco: menor,
-      status_sulco: status,
-      status_label: ({ ok: 'OK', alerta: 'Alerta', critico: 'Critico', sem_dado: 'Sem medicao' })[status] || status,
+      status_sulco: pior?.status_sulco ?? null,
+      status_label: rotuloAlerta(pior, temMedicao),
+      acao_sugerida: pior?.acao?.codigo || null,
+      acao_label: pior?.acao?.label || null,
     });
   }
   return out;
 }
 
 export async function criarVeiculo(filialId, {
-  placa, apelido = null, tipo = 'Truck / Tração', km_atual = 0, layout_pneus = null,
+  placa, apelido = null, tipo = 'Truck / Tração', km_atual = 0, hr_atual = 0, layout_pneus = null,
 }) {
   const db = getDb();
-  const layoutId = layout_pneus || layoutPadraoPorTipo(tipo);
+  const layoutId = layoutParaNovoVeiculo(tipo, layout_pneus);
+  const tipoCampos = camposTipoVeiculo(normalizarTipoVeiculo(tipo) || 'Truck / Tração');
   try {
     const result = await db.prepare(`
       INSERT INTO veiculos (
-        placa, apelido, tipo, km_atual, hr_atual, layout_pneus, filial_id, ativo
-      ) VALUES (?, ?, ?, ?, 0, ?, ?, 1)
+        placa, apelido, tipo, tipo_codigo, km_atual, hr_atual, layout_pneus, filial_id, ativo
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(
       String(placa).trim().toUpperCase(),
       apelido?.trim() || null,
-      normalizarTipoVeiculo(tipo) || 'Truck / Tração',
+      tipoCampos.tipo,
+      tipoCampos.tipo_codigo,
       Number(km_atual) || 0,
+      Number(hr_atual) || 0,
       layoutId,
       filialId
     );

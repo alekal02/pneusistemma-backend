@@ -34,11 +34,27 @@ CREATE TABLE IF NOT EXISTS usuarios (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS equipamento_tipos (
+  codigo TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  familia TEXT NOT NULL,
+  unidade_uso TEXT NOT NULL DEFAULT 'km',
+  layout_padrao TEXT NOT NULL,
+  layouts_permitidos JSONB NOT NULL DEFAULT '[]'::jsonb,
+  perfil_medicao TEXT NOT NULL DEFAULT 'caminhao',
+  permite_recap INTEGER NOT NULL DEFAULT 1,
+  legado INTEGER NOT NULL DEFAULT 0,
+  regras JSONB DEFAULT '{}'::jsonb,
+  ativo INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS veiculos (
   id BIGSERIAL PRIMARY KEY,
   placa TEXT NOT NULL UNIQUE,
   apelido TEXT,
   tipo TEXT NOT NULL DEFAULT 'Outro',
+  tipo_codigo TEXT,
   marca TEXT,
   modelo TEXT,
   ano INTEGER,
@@ -99,6 +115,9 @@ CREATE TABLE IF NOT EXISTS medicoes (
   diagnostico TEXT,
   acao_sugerida TEXT,
   desgaste_mm_km DOUBLE PRECISION,
+  desgaste_mm_hora DOUBLE PRECISION,
+  sulco_mm DOUBLE PRECISION,
+  inspecao_danos TEXT,
   veiculo_placa TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -176,6 +195,11 @@ CREATE INDEX IF NOT EXISTS idx_tokens_acesso_token ON tokens_acesso_rapido(token
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alerta_dest_whatsapp
   ON alerta_destinatarios(whatsapp);
+
+-- Bancos já criados: coluna nova sem reescrever veículos existentes.
+-- O seed do catálogo e o backfill de tipo_codigo rodam no start da API.
+ALTER TABLE veiculos ADD COLUMN IF NOT EXISTS tipo_codigo TEXT;
+CREATE INDEX IF NOT EXISTS idx_veiculos_tipo_codigo ON veiculos(tipo_codigo);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pneus_fogo_filial
   ON pneus(filial_id, numero_fogo)

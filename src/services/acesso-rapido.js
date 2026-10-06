@@ -3,11 +3,12 @@
  * tipos: medir | cadastrar_veiculo | cadastrar_pneu | troca
  */
 import { randomBytes } from 'crypto';
-import { getDb, classificarSulco } from '../database.js';
+import { getDb } from '../database.js';
 import { config } from '../config.js';
-import { getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
+import { limitesDoVeiculo, menorSulco } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
-import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
+import { percentualVida } from '../diagnostico.js';
+import { avaliarAlertaPerfil, classeAlerta, especificacaoMedicao } from '../medicao-perfil.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import {
   POSICOES_PNEU,
@@ -90,50 +91,15 @@ export async function marcarTokenUsado(tokenId) {
   `).run(tokenId);
 }
 
-function sanitizarBuscaEstoque(busca) {
-  return String(busca || '').trim().replace(/[%_\\]/g, '').slice(0, 40);
-}
-
-export async function contarEstoqueFilial(filialId) {
+export async function listarEstoqueFilial(filialId, limite = 40) {
   const db = getDb();
-  const row = await db.prepare(`
-    SELECT COUNT(*) as n FROM pneus
-    WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
-  `).get(filialId);
-  return Number(row?.n || 0);
-}
-
-/**
- * Estoque da filial. Sem busca limita a lista; com busca acha fogo parcial (ex.: 5316 → LD1-5316).
- */
-export async function listarEstoqueFilial(filialId, limite = 4000, busca = '') {
-  const db = getDb();
-  const cap = Math.min(Math.max(parseInt(limite, 10) || 4000, 1), 4000);
-  const q = sanitizarBuscaEstoque(busca);
-  const params = [filialId];
-  let filtro = '';
-  if (q) {
-    const like = `%${q}%`;
-    const compacto = q.replace(/[^a-zA-Z0-9]/g, '');
-    filtro = `
-      AND (
-        COALESCE(numero_fogo, '') ILIKE ?
-        OR COALESCE(marca, '') ILIKE ?
-        OR COALESCE(modelo, '') ILIKE ?
-        OR CAST(id AS TEXT) LIKE ?
-        ${compacto ? "OR regexp_replace(COALESCE(numero_fogo, ''), '[^0-9A-Za-z]', '', 'g') ILIKE ?" : ''}
-      )`;
-    params.push(like, like, like, like);
-    if (compacto) params.push(`%${compacto}%`);
-  }
   return db.prepare(`
     SELECT id, numero_fogo, marca, modelo, tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu
     FROM pneus
     WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
-    ${filtro}
     ORDER BY LOWER(COALESCE(numero_fogo, '')), id
     LIMIT ?
-  `).all(...params, cap);
+  `).all(filialId, limite);
 }
 
 /** Mesmo payload de GET /veiculos/:id */
@@ -160,6 +126,8 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
       um.sulco_central as ult_sulco_cent,
       um.sulco_interno as ult_sulco_int,
       um.sulco_auxiliar as ult_sulco_aux,
+      um.sulco_mm as ult_sulco_mm,
+      um.inspecao_danos as ult_inspecao_danos,
       um.diagnostico as ult_diagnostico,
       um.acao_sugerida as ult_acao,
       um.data_medicao as ult_medicao
@@ -169,32 +137,43 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
     ORDER BY ${orderSql}
   `).all(veiculoId);
 
-  const basePneus = pneus.map((p) => {
-    const row = {
+  const basePneus = pneus.map((p) => ({
+    ...p,
+    _row: {
       sulco_externo: p.ult_sulco_ext,
       sulco_central: p.ult_sulco_cent,
       sulco_interno: p.ult_sulco_int,
       sulco_auxiliar: p.ult_sulco_aux,
-    };
-    const menor = menorSulco(row);
-    const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
-      papel: papelPosicao(p.posicao),
-      posicao: p.posicao,
-    });
-    const sulcoRef = p.sulco_inicial_mm ?? limites.sulco_novo_mm;
+      sulco_mm: p.ult_sulco_mm,
+      inspecao_danos: p.ult_inspecao_danos,
+    },
+  }));
 
+  const pneusComStatus = basePneus.map((p) => {
+    const candidatos = basePneus.filter((c) => c.id !== p.id);
+    const aval = avaliarAlertaPerfil(p._row, {
+      tipo: veiculo.tipo,
+      layout: veiculo.layout_pneus,
+      limites,
+      vidaRecap: p.vida_recap || 0,
+      candidatos,
+      posicao: p.posicao,
+      papel: papelPosicao(p.posicao),
+    });
+    const menor = aval.menor_sulco;
+    const sulcoRef = p.sulco_inicial_mm ?? limites.sulco_novo_mm;
+    const { _row, ...rest } = p;
     return {
-      ...p,
-      _row: row,
+      ...rest,
       posicao_label: labelPosicao(p.posicao),
       papel_posicao: papelPosicao(p.posicao),
       padrao: p.tipo_pneu,
       padrao_label: labelTipoPneu(p.tipo_pneu),
       menor_sulco: menor,
-      status_sulco: classificarSulco(menor, limites),
-      diagnostico: diag.codigo,
-      diagnostico_label: diag.label,
-      diagnostico_desc: diag.descricao || '',
+      status_sulco: aval.status_sulco,
+      diagnostico: aval.diagnostico.codigo,
+      diagnostico_label: aval.diagnostico.label,
+      diagnostico_desc: aval.diagnostico.descricao || '',
       vida_util_pct: percentualVida(menor, sulcoRef, limites.sulco_critico_mm),
       vida_label: p.vida_recap > 0
         ? `${p.vida_recap}ª recap`
@@ -206,27 +185,16 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
           sulco_central: p.ult_sulco_cent,
           sulco_interno: p.ult_sulco_int,
           sulco_auxiliar: p.ult_sulco_aux,
+          sulco_mm: p.ult_sulco_mm,
           menor_sulco: menor,
         }
         : null,
-    };
-  });
-
-  const pneusComStatus = basePneus.map((p) => {
-    const candidatos = basePneus.filter((c) => c.id !== p.id);
-    const acao = sugerirAcao(p.menor_sulco, limites, p.vida_recap || 0, {
-      pontos: p._row,
-      candidatos,
-      posicaoAtual: p.posicao,
-    });
-    const { _row, ...rest } = p;
-    return {
-      ...rest,
-      acao_sugerida: acao.codigo,
-      acao_label: acao.label,
-      acao_motivo: acao.motivo,
-      desvio_mm: acao.desvio_mm ?? null,
-      rodizio_sugestao: acao.rodizio_sugestao || null,
+      acao_sugerida: aval.acao.codigo,
+      acao_label: aval.acao.label,
+      acao_motivo: aval.acao.motivo,
+      desvio_mm: aval.acao.desvio_mm ?? null,
+      rodizio_sugestao: aval.acao.rodizio_sugestao || null,
+      alertas: aval.alertas,
     };
   });
 
@@ -262,6 +230,7 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
     medicoes,
     posicoes: POSICOES_PNEU,
     limites,
+    medicao_perfil: especificacaoMedicao(veiculo.tipo, veiculo.layout_pneus),
     token_valido: true,
   };
 }
@@ -298,8 +267,6 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
   const veiculo = await db.prepare(`
     SELECT tipo, layout_pneus FROM veiculos WHERE id = ?
   `).get(veiculoId);
-  const limites = limitesDoVeiculo(veiculo || {});
-
   const rows = await db.prepare(`
     SELECT
       p.posicao,
@@ -308,7 +275,10 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
       m.sulco_externo,
       m.sulco_central,
       m.sulco_interno,
-      m.sulco_auxiliar
+      m.sulco_auxiliar,
+      m.sulco_mm,
+      m.inspecao_danos,
+      m.hr_veiculo
     FROM pneus p
     LEFT JOIN medicoes m ON m.id = (
       SELECT id FROM medicoes
@@ -322,14 +292,20 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
   let criticos = 0;
   let alertas = 0;
   let ok = 0;
+  let semClassificacao = 0;
   let ultimaMedicao = null;
 
   for (const r of rows) {
-    const menor = menorSulco(r);
-    const status = classificarSulco(menor, limites);
-    if (status === 'critico') criticos += 1;
-    else if (status === 'alerta') alertas += 1;
-    else if (status === 'ok') ok += 1;
+    const aval = avaliarAlertaPerfil(r, {
+      tipo: veiculo?.tipo,
+      layout: veiculo?.layout_pneus,
+      hr_veiculo: r.hr_veiculo,
+    });
+    const classe = classeAlerta(aval);
+    if (classe === 'critico') criticos += 1;
+    else if (classe === 'alerta') alertas += 1;
+    else if (classe === 'ok') ok += 1;
+    else if (classe === 'sem_classificacao') semClassificacao += 1;
 
     if (r.data_medicao) {
       if (!ultimaMedicao || String(r.data_medicao) > String(ultimaMedicao.data_medicao)) {
@@ -337,11 +313,13 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
           data_medicao: r.data_medicao,
           posicao: r.posicao,
           numero_fogo: r.numero_fogo,
-          menor_sulco: menor,
+          menor_sulco: aval.menor_sulco,
+          acao_sugerida: aval.acao.codigo,
+          acao_label: aval.acao.label,
         };
       }
     }
   }
 
-  return { criticos, alertas, ok, ultimaMedicao };
+  return { criticos, alertas, ok, semClassificacao, ultimaMedicao };
 }

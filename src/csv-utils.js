@@ -1,6 +1,4 @@
-/**
- * Utilitários CSV (separador ; ou ,) para importação de frota.
- */
+import { codigoTipoEquipamento, layoutPadraoDoCatalogo } from './equipamento-tipos.js';
 
 export function parseCsv(text) {
   const raw = String(text || '').replace(/^\uFEFF/, '').trim();
@@ -248,7 +246,12 @@ export const PNEU_TEMPLATE_ROWS = [
 ];
 
 export function mapLayoutId(raw, tipo) {
+  const codigo = codigoTipoEquipamento(tipo);
+  if (codigo === 'mini_carregadeira') return 'skid_4';
+  if (codigo === 'giro_zero') return 'giro_4';
+
   const v = String(raw || '').trim().toLowerCase();
+  // "mini" na coluna de layout da planilha antiga = Toco. Mini carregadeira já saiu acima.
   const aliases = {
     truck_10: 'truck_10',
     truck10: 'truck_10',
@@ -276,16 +279,13 @@ export function mapLayoutId(raw, tipo) {
     varredeira: 'utilitario_4',
     trator_4: 'trator_4',
     trator: 'trator_4',
+    skid_4: 'skid_4',
+    giro_4: 'giro_4',
   };
   if (v && aliases[v]) return aliases[v];
   if (v && aliases[v.replace(/\s+/g, '')]) return aliases[v.replace(/\s+/g, '')];
 
-  const t = String(tipo || '').toLowerCase();
-  if (t.includes('trator')) return 'trator_4';
-  if (t.includes('compactador')) return 'compactador';
-  if (t.includes('utilit') || t.includes('varred')) return 'utilitario_4';
-  if (t.includes('toco') || t.includes('mini')) return 'toco_6';
-  return 'truck_10';
+  return layoutPadraoDoCatalogo(tipo);
 }
 
 export function mapTipoPneu(raw) {

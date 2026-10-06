@@ -24,7 +24,7 @@ export function textoMenu() {
     '🛠️ *PneuSistemma — Menu*',
     '',
     '1️⃣ Medir pneu (placa → link)',
-    '2️⃣ Cadastrar caminhão (link)',
+    '2️⃣ Cadastrar equipamento (link)',
     '3️⃣ Cadastrar pneu estoque (link)',
     '4️⃣ Trocar / montar (placa → link)',
     '5️⃣ Enviar pneu → estoque (nº fogo)',
@@ -210,7 +210,7 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filial
     filialId,
     whatsappOrigem: phone || destinoEnvio,
   });
-  const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
+  const { criticos, alertas, semClassificacao, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
 
   let mensagem = `🚛 *${veiculo.placa}* — ${veiculo.tipo}\n`;
   if (veiculo.apelido) mensagem += `🏷️ ${veiculo.apelido}\n`;
@@ -222,7 +222,8 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filial
   }
   if (criticos > 0) mensagem += `🚨 *${criticos} pneu(s) em estado CRÍTICO*\n`;
   if (alertas > 0) mensagem += `⚠️ *${alertas} pneu(s) em ALERTA*\n`;
-  if (criticos === 0 && alertas === 0) mensagem += `✅ Todos os pneus estão OK\n`;
+  if (semClassificacao > 0) mensagem += `ℹ️ *${semClassificacao} pneu(s) sem classificação de sulco*\n`;
+  if (criticos === 0 && alertas === 0 && !semClassificacao) mensagem += `✅ Todos os pneus estão OK\n`;
   mensagem += `\n👉 *Abrir medição de sulcos:*\n${link}\n\n`;
   mensagem += `Meça todas as posições e salve.\n`;
   mensagem += `_Link válido por 24 horas._\n\n_Digite *menu* para outras opções._`;
@@ -296,7 +297,7 @@ async function enviarLinkCadastro(ctx, tipo) {
   if (tipo === 'cadastrar_veiculo') {
     await reply(
       ctx,
-      `🚛 *Cadastrar caminhão*\n\nAbra o link e preencha placa, tipo e KM:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
+      `🚜 *Cadastrar equipamento*\n\nAbra o link, escolha o tipo e preencha os dados:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
     );
   } else {
     await reply(

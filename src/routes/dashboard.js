@@ -1,12 +1,21 @@
 import { Router } from 'express';
 import { getDb } from '../database.js';
 import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
-import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
-import { papelPosicao } from '../pneus-layouts.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
 import { normalizarDiaMedicao, labelDiaMedicao, semanaMedicaoBrasil } from '../dia-medicao.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO, SQL_LOGS_MEDICAO_FILIAL } from '../sql-ultima-medicao.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
+import {
+  acumularAlerta,
+  avaliarPneuPainel,
+  filtroTipoAtivo,
+  indicadoresUso,
+  novoAcumulador,
+  piorStatus,
+  statusPainel,
+  unidadeUsoVeiculo,
+  veiculoCombinaTipo,
+} from '../services/indicadores-frota.js';
 
 const router = Router();
 
@@ -50,12 +59,11 @@ function compactarPneusPorVeiculo(pneus) {
   for (const p of pneus) {
     const vid = Number(p.veiculo_id);
     if (!map.has(vid)) map.set(vid, []);
-    const menor = menorSulco(p);
     map.get(vid).push({
       id: p.id,
       posicao: p.posicao,
-      menor_sulco: menor,
-      status_sulco: classificarSulco(menor, limitesDoVeiculo(p)),
+      menor_sulco: p._menor_sulco,
+      status_sulco: p._status_sulco,
     });
   }
   return map;
@@ -90,9 +98,9 @@ router.get('/resumo', async (req, res, next) => {
       db.prepare(`
         SELECT
           p.id, p.veiculo_id, p.vida_recap, p.condicao, p.numero_fogo, p.posicao,
-          v.placa, v.apelido, v.tipo, v.layout_pneus,
-          um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar,
-          um.data_medicao, um.created_at as medicao_created
+          v.placa, v.apelido, v.tipo, v.layout_pneus, v.km_atual, v.hr_atual,
+          um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
+          um.inspecao_danos, um.data_medicao, um.created_at as medicao_created
         FROM pneus p
         JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
         ${SQL_LATERAL_ULTIMA_MEDICAO}
@@ -106,35 +114,30 @@ router.get('/resumo', async (req, res, next) => {
       db.prepare('SELECT dia_medicao FROM filiais WHERE id = ?').get(filialId),
     ]);
 
-    let ok = 0;
-    let alerta = 0;
-    let critico = 0;
-    let semDado = 0;
-    let troca = 0;
-    let recap = 0;
-    let monitorar = 0;
-    let rodizio = 0;
+    const tipoFiltro = req.query.tipo;
+    const pneusFiltrados = pneus.filter((p) => veiculoCombinaTipo(p.tipo, tipoFiltro));
+    const acc = novoAcumulador();
+    const accKm = novoAcumulador();
+    const accHoras = novoAcumulador();
+    const statusPorVeiculo = new Map();
     const diagnosticos = {};
     const acoesItens = [];
     const diagnosticosItens = [];
 
-    for (const p of pneus) {
-      const menor = menorSulco(p);
+    for (const p of pneusFiltrados) {
       const limV = limitesDoVeiculo(p);
-      const status = classificarSulco(menor, limV);
-      if (status === 'ok') ok += 1;
-      else if (status === 'alerta') alerta += 1;
-      else if (status === 'critico') critico += 1;
-      else semDado += 1;
+      const aval = avaliarPneuPainel(p, { limites: limV });
+      acumularAlerta(acc, aval);
+      const unidade = unidadeUsoVeiculo(p.tipo, p.layout_pneus);
+      acumularAlerta(unidade === 'horas' ? accHoras : accKm, aval);
+      const menor = aval.menor_sulco;
+      const status = statusPainel(aval);
+      p._menor_sulco = menor;
+      p._status_sulco = aval.status_sulco;
+      const vid = Number(p.veiculo_id);
+      statusPorVeiculo.set(vid, piorStatus(statusPorVeiculo.get(vid), status));
 
-      const acao = sugerirAcao(menor, limV, p.vida_recap || 0, {
-        pontos: p,
-        posicaoAtual: p.posicao || null,
-      });
-      if (acao.codigo === 'troca') troca += 1;
-      else if (acao.codigo === 'recap') recap += 1;
-      else if (acao.codigo === 'monitorar') monitorar += 1;
-      else if (acao.codigo === 'rodizio') rodizio += 1;
+      const acao = aval.acao || {};
       if (acao.codigo && acao.codigo !== 'ok') {
         acoesItens.push({
           pneu_id: p.id,
@@ -150,11 +153,8 @@ router.get('/resumo', async (req, res, next) => {
         });
       }
 
-      const diag = diagnosticarPerfil(p, limites.diagnostico_tolerancia_mm, {
-        papel: p.posicao ? papelPosicao(p.posicao) : null,
-        posicao: p.posicao || null,
-      });
-      if (diag.codigo !== 'sem_dado' && diag.codigo !== 'ok') {
+      const diag = aval.diagnostico || {};
+      if (diag.codigo && diag.codigo !== 'sem_dado' && diag.codigo !== 'ok') {
         diagnosticos[diag.codigo] = (diagnosticos[diag.codigo] || 0) + 1;
         diagnosticosItens.push({
           pneu_id: p.id,
@@ -171,7 +171,7 @@ router.get('/resumo', async (req, res, next) => {
       }
     }
 
-    const ordemAcao = { troca: 0, recap: 1, rodizio: 2, monitorar: 3 };
+    const ordemAcao = { troca: 0, recap: 1, rodizio: 2, monitorar: 3, substituir: 0, corte: 0, dano_lateral: 0 };
     acoesItens.sort((a, b) => (ordemAcao[a.acao_sugerida] ?? 9) - (ordemAcao[b.acao_sugerida] ?? 9)
       || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
     const ordemDiag = {
@@ -180,42 +180,56 @@ router.get('/resumo', async (req, res, next) => {
     diagnosticosItens.sort((a, b) => (ordemDiag[a.diagnostico] ?? 9) - (ordemDiag[b.diagnostico] ?? 9)
       || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
 
-    const porVeiculo = statsPorVeiculo(pneus);
-    const pneusMap = compactarPneusPorVeiculo(pneus);
-    const logsMedicao = await logsMedicaoFilial(db, filialId);
-    const veiculos = veiculosRows.map((v) => {
-      const tipo = normalizarTipoVeiculo(v.tipo);
-      const a = porVeiculo.get(Number(v.id)) || {
-        total_pneus: 0,
-        pneus_medidos: 0,
-        menor_sulco: null,
-        ultima_medicao: null,
-        ultima_atualizacao: null,
-      };
-      return {
-        ...v,
-        tipo,
-        total_pneus: a.total_pneus,
-        pneus_medidos: a.pneus_medidos,
-        menor_sulco: a.menor_sulco,
-        status_sulco: classificarSulco(a.menor_sulco, limitesDoVeiculo({ ...v, tipo })),
-        ultima_medicao: a.ultima_medicao,
-        ultima_atualizacao: a.ultima_atualizacao,
-        dia_medicao: normalizarDiaMedicao(v.dia_medicao),
-        pneus: pneusMap.get(Number(v.id)) || [],
-      };
-    });
+    const porVeiculo = statsPorVeiculo(pneusFiltrados);
+    const pneusMap = compactarPneusPorVeiculo(pneusFiltrados);
+    const logsTodos = await logsMedicaoFilial(db, filialId);
+    const veiculos = veiculosRows
+      .filter((v) => veiculoCombinaTipo(v.tipo, tipoFiltro))
+      .map((v) => {
+        const tipo = normalizarTipoVeiculo(v.tipo);
+        const a = porVeiculo.get(Number(v.id)) || {
+          total_pneus: 0,
+          pneus_medidos: 0,
+          menor_sulco: null,
+          ultima_medicao: null,
+          ultima_atualizacao: null,
+        };
+        return {
+          ...v,
+          tipo,
+          total_pneus: a.total_pneus,
+          pneus_medidos: a.pneus_medidos,
+          menor_sulco: a.menor_sulco,
+          status_sulco: statusPorVeiculo.get(Number(v.id)) || 'sem_dado',
+          unidade_uso: unidadeUsoVeiculo(tipo, v.layout_pneus),
+          ultima_medicao: a.ultima_medicao,
+          ultima_atualizacao: a.ultima_atualizacao,
+          dia_medicao: normalizarDiaMedicao(v.dia_medicao),
+          pneus: pneusMap.get(Number(v.id)) || [],
+        };
+      });
+    const idsFrota = new Set(veiculos.map((v) => Number(v.id)));
+    const logsMedicao = tipoFiltro
+      ? logsTodos.filter((l) => idsFrota.has(Number(l.veiculo_id)))
+      : logsTodos;
 
     const semana = semanaMedicaoBrasil();
 
     res.json({
       veiculos_ativos: veiculos.length,
-      pneus_total: pneus.length,
-      pneus_ok: ok,
-      pneus_alerta: alerta,
-      pneus_critico: critico,
-      pneus_sem_dado: semDado,
-      acoes: { troca, recap, monitorar, rodizio },
+      pneus_total: pneusFiltrados.length,
+      pneus_ok: acc.ok,
+      pneus_alerta: acc.monitorar,
+      pneus_critico: acc.critico,
+      pneus_sem_dado: acc.sem_dado,
+      acoes: {
+        troca: acc.troca,
+        recap: acc.recap,
+        monitorar: acc.acao_monitorar,
+        rodizio: acc.rodizio,
+      },
+      indicadores_uso: indicadoresUso(veiculos, accKm, accHoras),
+      filtro_tipo: filtroTipoAtivo(tipoFiltro),
       acoes_itens: acoesItens,
       diagnosticos,
       diagnosticos_itens: diagnosticosItens,

@@ -1,13 +1,10 @@
 import { Router } from 'express';
-import { getDb, classificarSulco } from '../database.js';
+import { getDb } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
-import { getLimites, limitesDoVeiculo, menorSulco, adicionarDias } from '../limites.js';
+import { getLimites, limitesDoVeiculo, adicionarDias } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
-import {
-  diagnosticarPerfil,
-  sugerirAcao,
-  percentualVida,
-} from '../diagnostico.js';
+import { percentualVida } from '../diagnostico.js';
+import { avaliarAlertaPerfil } from '../medicao-perfil.js';
 import {
   validarMontagem,
   papelPosicao,
@@ -182,19 +179,23 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
     ? limitesDoVeiculo({ tipo: pneu.veiculo_tipo || pneu.tipo, layout_pneus: pneu.layout_pneus })
     : getLimites();
   const row = ultimaMedicao || {};
-  const menor = menorSulco(row);
   const papel = pneu.posicao ? papelPosicao(pneu.posicao) : null;
-  const diagnostico = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
-    papel,
-    posicao: pneu.posicao || null,
-  });
-  const acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
-    pontos: ultimaMedicao ? row : null,
+  const aval = avaliarAlertaPerfil(row, {
+    tipo: pneu.veiculo_tipo || pneu.tipo || null,
+    layout: pneu.layout_pneus || null,
+    limites,
+    vidaRecap: pneu.vida_recap || 0,
     candidatos: candidatos.filter((c) => Number(c.id) !== Number(pneu.id)),
-    posicaoAtual: pneu.posicao || null,
+    posicao: pneu.posicao || null,
+    papel,
+    hr_veiculo: row.hr_veiculo,
+    km_veiculo: row.km_veiculo,
   });
+  const menor = aval.menor_sulco;
+  const diagnostico = aval.diagnostico;
+  const acao = aval.acao;
   const sulcoRef = pneu.sulco_inicial_mm ?? limites.sulco_novo_mm;
-  const statusSulco = classificarSulco(menor, limites);
+  const statusSulco = aval.status_sulco;
   const prazo = enriquecerPrazoRecap(pneu, statusSulco, limites);
 
   return {
@@ -716,15 +717,23 @@ router.get('/:id', async (req, res, next) => {
   `).all(req.params.id);
 
     const medicoesComStatus = medicoes.map((m) => {
-      const menor = menorSulco(m);
-      const diag = diagnosticarPerfil(m, limites.diagnostico_tolerancia_mm, {
+      const aval = avaliarAlertaPerfil(m, {
+        tipo: pneu.veiculo_tipo || null,
+        layout: pneu.layout_pneus || null,
+        limites,
+        vidaRecap: pneu.vida_recap || 0,
+        posicao: pneu.posicao || null,
         papel: pneu.posicao ? papelPosicao(pneu.posicao) : null,
+        hr_veiculo: m.hr_veiculo,
+        km_veiculo: m.km_veiculo,
       });
       return {
         ...m,
-        menor_sulco: menor,
-        status_sulco: classificarSulco(menor, limites),
-        diagnostico_label: diag.label,
+        menor_sulco: aval.menor_sulco,
+        status_sulco: aval.status_sulco,
+        diagnostico_label: aval.diagnostico.label,
+        acao_sugerida: aval.acao.codigo,
+        acao_label: aval.acao.label,
         veiculo_placa: m.veiculo_placa || pneu.placa || null,
       };
     });
