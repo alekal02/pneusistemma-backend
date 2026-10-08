@@ -1,17 +1,11 @@
-/**
- * Utilitários CSV (separador ; ou ,) para importação de frota.
- */
+import { codigoTipoEquipamento, layoutPadraoDoCatalogo } from './equipamento-tipos.js';
 
 export function parseCsv(text) {
   const raw = String(text || '').replace(/^\uFEFF/, '').trim();
   if (!raw) return { headers: [], rows: [] };
 
   const firstLine = raw.split(/\r?\n/).find((l) => l.trim() && !l.trim().startsWith('#')) || '';
-  const sep = firstLine.includes(';') && !firstLine.split(';')[0].includes(',')
-    ? ';'
-    : (firstLine.includes(';') && firstLine.indexOf(';') < (firstLine.indexOf(',') === -1 ? 999 : firstLine.indexOf(','))
-      ? ';'
-      : ',');
+  const sep = separadorCsv(firstLine);
 
   const lines = [];
   let current = '';
@@ -21,9 +15,10 @@ export function parseCsv(text) {
     const next = raw[i + 1];
     if (ch === '"') {
       if (inQuotes && next === '"') {
-        current += '"';
+        current += '""';
         i++;
       } else {
+        current += '"';
         inQuotes = !inQuotes;
       }
       continue;
@@ -83,6 +78,30 @@ export function parseCsv(text) {
   }).filter((r) => Object.keys(r).some((k) => k !== '__linha' && String(r[k] || '').trim()));
 
   return { headers, rows, separator: sep };
+}
+
+/** Separador fora de aspas. `;` citado não vira delimitador. */
+function separadorCsv(line) {
+  let quoted = false;
+  let semi = -1;
+  let comma = -1;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    const next = line[i + 1];
+    if (ch === '"') {
+      if (quoted && next === '"') {
+        i++;
+        continue;
+      }
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (ch === ';' && semi < 0) semi = i;
+    if (ch === ',' && comma < 0) comma = i;
+  }
+  if (semi >= 0 && (comma < 0 || semi < comma)) return ';';
+  return ',';
 }
 
 function normalizeHeader(h) {
@@ -248,7 +267,12 @@ export const PNEU_TEMPLATE_ROWS = [
 ];
 
 export function mapLayoutId(raw, tipo) {
+  const codigo = codigoTipoEquipamento(tipo);
+  if (codigo === 'mini_carregadeira') return 'skid_4';
+  if (codigo === 'giro_zero') return 'giro_4';
+
   const v = String(raw || '').trim().toLowerCase();
+  // "mini" na coluna de layout da planilha antiga = Toco. Mini carregadeira já saiu acima.
   const aliases = {
     truck_10: 'truck_10',
     truck10: 'truck_10',
@@ -276,16 +300,13 @@ export function mapLayoutId(raw, tipo) {
     varredeira: 'utilitario_4',
     trator_4: 'trator_4',
     trator: 'trator_4',
+    skid_4: 'skid_4',
+    giro_4: 'giro_4',
   };
   if (v && aliases[v]) return aliases[v];
   if (v && aliases[v.replace(/\s+/g, '')]) return aliases[v.replace(/\s+/g, '')];
 
-  const t = String(tipo || '').toLowerCase();
-  if (t.includes('trator')) return 'trator_4';
-  if (t.includes('compactador')) return 'compactador';
-  if (t.includes('utilit') || t.includes('varred')) return 'utilitario_4';
-  if (t.includes('toco') || t.includes('mini')) return 'toco_6';
-  return 'truck_10';
+  return layoutPadraoDoCatalogo(tipo);
 }
 
 export function mapTipoPneu(raw) {
@@ -385,6 +406,7 @@ export const FROTA_TEMPLATE_HEADERS = [
   'condicao',
   'vida_recap',
   'marca',
+  'modelo',
   'medida',
   'dot',
   'sulco_inicial_mm',
@@ -406,6 +428,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'novo',
     vida_recap: '0',
     marca: 'Michelin',
+    modelo: 'X Multi D',
     medida: '275/80R22.5',
     dot: '1224',
     sulco_inicial_mm: '16',
@@ -425,6 +448,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'novo',
     vida_recap: '0',
     marca: 'Michelin',
+    modelo: 'X Multi D',
     medida: '275/80R22.5',
     dot: '1224',
     sulco_inicial_mm: '15',
@@ -444,6 +468,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'recapado',
     vida_recap: '1',
     marca: 'Goodyear',
+    modelo: '',
     medida: '275/80R22.5',
     dot: '',
     sulco_inicial_mm: '14',
@@ -463,6 +488,7 @@ export const FROTA_TEMPLATE_ROWS = [
     condicao: 'novo',
     vida_recap: '0',
     marca: 'Pirelli',
+    modelo: 'FG01',
     medida: '275/80R22.5',
     dot: '0325',
     sulco_inicial_mm: '17',

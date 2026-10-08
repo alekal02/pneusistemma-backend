@@ -129,7 +129,7 @@ if (filial) {
         token: filial, body: { posicao: '1D' },
       });
       await checar('POST /pneus/:id/desmontar', 'POST', `/pneus/${pneuId}/desmontar`, {
-        token: filial, body: { km_veiculo: 1800, motivo: 'smoke' },
+        token: filial, body: { km_veiculo: 1800, motivo: 'smoke', permitir_vazio: true },
       });
       await checar('POST /pneus/:id/evento (recap)', 'POST', `/pneus/${pneuId}/evento`, {
         token: filial, body: { tipo: 'recap' },

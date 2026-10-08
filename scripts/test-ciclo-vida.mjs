@@ -224,7 +224,11 @@ try {
 } finally {
   try {
     const db = getDb();
-    if (pneuId) await db.prepare(`DELETE FROM pneus WHERE id = ?`).run(pneuId);
+    if (pneuId) {
+      await db.prepare(`DELETE FROM medicoes WHERE pneu_id = ?`).run(pneuId);
+      await db.prepare(`DELETE FROM movimentacoes WHERE pneu_id = ?`).run(pneuId);
+      await db.prepare(`DELETE FROM pneus WHERE id = ?`).run(pneuId);
+    }
     if (veiculoId) await db.prepare(`DELETE FROM veiculos WHERE id = ?`).run(veiculoId);
   } catch (err) {
     erros.push(`limpeza: ${err.message}`);

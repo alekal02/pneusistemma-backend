@@ -106,6 +106,11 @@ assert.equal(veiculoCombinaTipo('Truck / Tração', 'truck_tracao'), true);
 assert.equal(veiculoCombinaTipo('Toco / Mini', 'truck_tracao'), false);
 assert.equal(veiculoCombinaTipo('Trator', ''), true);
 assert.equal(veiculoCombinaTipo('Caminhao legado', null), true);
+assert.equal(veiculoCombinaTipo('Mini carregadeira', 'mini_carregadeira'), true);
+assert.equal(veiculoCombinaTipo('Giro zero', 'giro_zero'), true);
+assert.equal(veiculoCombinaTipo('Caminhao legado', 'Caminhao legado'), true);
+assert.equal(veiculoCombinaTipo('Caminhao legado', 'truck_tracao'), false);
+assert.equal(veiculoCombinaTipo('Truck / Tração', 'Caminhao legado'), false);
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fontes = [
@@ -119,5 +124,41 @@ for (const rel of fontes) {
   assert.equal(src.includes('sugerirAcao'), false, `${rel} ainda chama sugerirAcao`);
   assert.equal(src.includes('avaliarPneuPainel'), true, `${rel} não usa o motor`);
 }
+
+const { resolverFiltroRelatorio, veiculoPassaFiltroRelatorio } = await import('../src/services/relatorio-semanal-pdf.js');
+
+const grupo = resolverFiltroRelatorio('caminhao_compactador');
+assert.equal(grupo.id, 'caminhao_compactador');
+assert.ok(grupo.codigos.includes('truck_tracao'));
+assert.ok(grupo.codigos.includes('compactador'));
+
+for (const codigo of ['truck_tracao', 'trator', 'mini_carregadeira', 'giro_zero', 'compactador', 'toco_mini']) {
+  const f = resolverFiltroRelatorio(codigo);
+  assert.deepEqual(f.codigos, [codigo], codigo);
+}
+assert.equal(resolverFiltroRelatorio('').id, 'todos');
+assert.equal(resolverFiltroRelatorio('todos').id, 'todos');
+
+const legado = resolverFiltroRelatorio('Caminhao Basculante');
+assert.equal(legado.texto, 'Caminhao Basculante');
+assert.equal(legado.codigos, null);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Caminhao Basculante', tipo_codigo: null }, 'Caminhao Basculante'), true);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Truck / Tração', tipo_codigo: 'truck_tracao' }, 'Caminhao Basculante'), false);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Truck / Tração' }, 'truck_tracao'), true);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Mini carregadeira' }, 'mini_carregadeira'), true);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Giro zero' }, 'giro_zero'), true);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Trator', tipo_codigo: 'trator' }, 'trator'), true);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Compactador' }, 'caminhao_compactador'), true);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Trator' }, 'caminhao_compactador'), false);
+assert.equal(veiculoPassaFiltroRelatorio({ tipo: 'Caminhao Basculante' }, 'todos'), true);
+
+const app = fs.readFileSync(path.join(root, '../frontend/src/app.js'), 'utf8');
+const html = fs.readFileSync(path.join(root, '../frontend/index.html'), 'utf8');
+for (const id of ['dash-frota-tipo', 'veiculos-filtro-tipo', 'relatorio-filtro-tipo', 'unidade-frota-tipo']) {
+  assert.ok(app.includes(id) || html.includes(id), `filtro ${id} ausente`);
+}
+assert.ok(app.includes('/veiculos/meta'), 'filtros não carregam /veiculos/meta');
+assert.ok(app.includes('tipos_equipamento'), 'filtros não usam o catálogo');
+assert.equal(app.includes('UPDATE veiculos') && app.includes('tiposAvulsos'), false);
 
 console.log('fase 6 ok');

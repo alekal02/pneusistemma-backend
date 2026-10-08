@@ -3,11 +3,13 @@
  * tipos: medir | cadastrar_veiculo | cadastrar_pneu | troca
  */
 import { randomBytes } from 'crypto';
-import { getDb, classificarSulco } from '../database.js';
+import { getDb } from '../database.js';
+import { filtroCadastroCompleto } from '../schema-colunas.js';
 import { config } from '../config.js';
-import { getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
+import { limitesDoVeiculo, menorSulco } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
-import { diagnosticarPerfil, sugerirAcao, percentualVida } from '../diagnostico.js';
+import { percentualVida } from '../diagnostico.js';
+import { avaliarAlertaPerfil, classeAlerta, especificacaoMedicao } from '../medicao-perfil.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import {
   POSICOES_PNEU,
@@ -29,17 +31,26 @@ const PATH_POR_TIPO = {
   troca: '/acesso-rapido/troca',
 };
 
+export function urlFrontendEhLocal(url) {
+  return /localhost|127\.0\.0\.1/i.test(String(url || ''));
+}
+
 export function linkAcessoRapido(tipo, token) {
+  const base = config.frontendUrl.replace(/\/$/, '');
+  if (config.nodeEnv === 'production' && urlFrontendEhLocal(base)) {
+    throw new Error('FRONTEND_URL aponta para localhost. Defina a URL pública do sistema.');
+  }
   const path = PATH_POR_TIPO[tipo] || PATH_POR_TIPO.medir;
-  return `${config.frontendUrl.replace(/\/$/, '')}${path}?token=${token}`;
+  return `${base}${path}?token=${token}`;
 }
 
 /**
- * @param {{ tipo?: string, veiculoId?: number|null, filialId: number, whatsappOrigem?: string|null }} opts
+ * @param {{ tipo?: string, veiculoId?: number|null, pneuId?: number|null, filialId: number, whatsappOrigem?: string|null }} opts
  */
 export async function gerarTokenAcessoRapido({
   tipo = 'medir',
   veiculoId = null,
+  pneuId = null,
   filialId,
   whatsappOrigem = null,
 }) {
@@ -52,12 +63,12 @@ export async function gerarTokenAcessoRapido({
   const db = getDb();
   const token = randomBytes(32).toString('hex');
   await db.prepare(`
-    INSERT INTO tokens_acesso_rapido (token, veiculo_id, filial_id, tipo, whatsapp_origem, expira_em)
-    VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime', '+24 hours'))
-  `).run(token, veiculoId || null, filialId, tipoOk, whatsappOrigem);
+    INSERT INTO tokens_acesso_rapido (token, veiculo_id, pneu_id, filial_id, tipo, whatsapp_origem, expira_em)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime', '+24 hours'))
+  `).run(token, veiculoId || null, pneuId || null, filialId, tipoOk, whatsappOrigem);
 
   const link = linkAcessoRapido(tipoOk, token);
-  if (/localhost|127\.0\.0\.1/i.test(link)) {
+  if (urlFrontendEhLocal(link)) {
     console.warn(
       '[acesso-rapido] FRONTEND_URL aponta para localhost — o link não abre no celular. '
       + 'Defina o IP da rede em backend/.env (ex.: http://10.0.0.231:5173).'
@@ -77,6 +88,17 @@ export async function validarTokenAcessoRapido(token, tiposPermitidos = null) {
   const tipo = row.tipo || 'medir';
   if (Array.isArray(tiposPermitidos) && tiposPermitidos.length && !tiposPermitidos.includes(tipo)) {
     return null;
+  }
+  if ((tipo === 'cadastrar_veiculo' || tipo === 'cadastrar_pneu') && row.usado_em) {
+    return null;
+  }
+  if (row.veiculo_id) {
+    const v = await db.prepare(`SELECT filial_id FROM veiculos WHERE id = ?`).get(row.veiculo_id);
+    if (!v || Number(v.filial_id) !== Number(row.filial_id)) return null;
+  }
+  if (row.pneu_id) {
+    const p = await db.prepare(`SELECT filial_id FROM pneus WHERE id = ?`).get(row.pneu_id);
+    if (!p || Number(p.filial_id) !== Number(row.filial_id)) return null;
   }
   return { ...row, tipo };
 }
@@ -99,6 +121,7 @@ export async function contarEstoqueFilial(filialId) {
   const row = await db.prepare(`
     SELECT COUNT(*) as n FROM pneus
     WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+      AND ${await filtroCadastroCompleto(db, 'pneus')}
   `).get(filialId);
   return Number(row?.n || 0);
 }
@@ -130,6 +153,7 @@ export async function listarEstoqueFilial(filialId, limite = 4000, busca = '') {
     SELECT id, numero_fogo, marca, modelo, tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu
     FROM pneus
     WHERE filial_id = ? AND ativo = 1 AND status_pneu = 'estoque'
+      AND ${await filtroCadastroCompleto(db, 'pneus')}
     ${filtro}
     ORDER BY LOWER(COALESCE(numero_fogo, '')), id
     LIMIT ?
@@ -160,6 +184,8 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
       um.sulco_central as ult_sulco_cent,
       um.sulco_interno as ult_sulco_int,
       um.sulco_auxiliar as ult_sulco_aux,
+      um.sulco_mm as ult_sulco_mm,
+      um.inspecao_danos as ult_inspecao_danos,
       um.diagnostico as ult_diagnostico,
       um.acao_sugerida as ult_acao,
       um.data_medicao as ult_medicao
@@ -169,32 +195,43 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
     ORDER BY ${orderSql}
   `).all(veiculoId);
 
-  const basePneus = pneus.map((p) => {
-    const row = {
+  const basePneus = pneus.map((p) => ({
+    ...p,
+    _row: {
       sulco_externo: p.ult_sulco_ext,
       sulco_central: p.ult_sulco_cent,
       sulco_interno: p.ult_sulco_int,
       sulco_auxiliar: p.ult_sulco_aux,
-    };
-    const menor = menorSulco(row);
-    const diag = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
-      papel: papelPosicao(p.posicao),
-      posicao: p.posicao,
-    });
-    const sulcoRef = p.sulco_inicial_mm ?? limites.sulco_novo_mm;
+      sulco_mm: p.ult_sulco_mm,
+      inspecao_danos: p.ult_inspecao_danos,
+    },
+  }));
 
+  const pneusComStatus = basePneus.map((p) => {
+    const candidatos = basePneus.filter((c) => c.id !== p.id);
+    const aval = avaliarAlertaPerfil(p._row, {
+      tipo: veiculo.tipo,
+      layout: veiculo.layout_pneus,
+      limites,
+      vidaRecap: p.vida_recap || 0,
+      candidatos,
+      posicao: p.posicao,
+      papel: papelPosicao(p.posicao),
+    });
+    const menor = aval.menor_sulco;
+    const sulcoRef = p.sulco_inicial_mm ?? limites.sulco_novo_mm;
+    const { _row, ...rest } = p;
     return {
-      ...p,
-      _row: row,
+      ...rest,
       posicao_label: labelPosicao(p.posicao),
       papel_posicao: papelPosicao(p.posicao),
       padrao: p.tipo_pneu,
       padrao_label: labelTipoPneu(p.tipo_pneu),
       menor_sulco: menor,
-      status_sulco: classificarSulco(menor, limites),
-      diagnostico: diag.codigo,
-      diagnostico_label: diag.label,
-      diagnostico_desc: diag.descricao || '',
+      status_sulco: aval.status_sulco,
+      diagnostico: aval.diagnostico.codigo,
+      diagnostico_label: aval.diagnostico.label,
+      diagnostico_desc: aval.diagnostico.descricao || '',
       vida_util_pct: percentualVida(menor, sulcoRef, limites.sulco_critico_mm),
       vida_label: p.vida_recap > 0
         ? `${p.vida_recap}ª recap`
@@ -206,27 +243,16 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
           sulco_central: p.ult_sulco_cent,
           sulco_interno: p.ult_sulco_int,
           sulco_auxiliar: p.ult_sulco_aux,
+          sulco_mm: p.ult_sulco_mm,
           menor_sulco: menor,
         }
         : null,
-    };
-  });
-
-  const pneusComStatus = basePneus.map((p) => {
-    const candidatos = basePneus.filter((c) => c.id !== p.id);
-    const acao = sugerirAcao(p.menor_sulco, limites, p.vida_recap || 0, {
-      pontos: p._row,
-      candidatos,
-      posicaoAtual: p.posicao,
-    });
-    const { _row, ...rest } = p;
-    return {
-      ...rest,
-      acao_sugerida: acao.codigo,
-      acao_label: acao.label,
-      acao_motivo: acao.motivo,
-      desvio_mm: acao.desvio_mm ?? null,
-      rodizio_sugestao: acao.rodizio_sugestao || null,
+      acao_sugerida: aval.acao.codigo,
+      acao_label: aval.acao.label,
+      acao_motivo: aval.acao.motivo,
+      desvio_mm: aval.acao.desvio_mm ?? null,
+      rodizio_sugestao: aval.acao.rodizio_sugestao || null,
+      alertas: aval.alertas,
     };
   });
 
@@ -262,6 +288,7 @@ export async function montarDetalheVeiculo(veiculoId, filialId = null) {
     medicoes,
     posicoes: POSICOES_PNEU,
     limites,
+    medicao_perfil: especificacaoMedicao(veiculo.tipo, veiculo.layout_pneus),
     token_valido: true,
   };
 }
@@ -298,8 +325,6 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
   const veiculo = await db.prepare(`
     SELECT tipo, layout_pneus FROM veiculos WHERE id = ?
   `).get(veiculoId);
-  const limites = limitesDoVeiculo(veiculo || {});
-
   const rows = await db.prepare(`
     SELECT
       p.posicao,
@@ -308,7 +333,10 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
       m.sulco_externo,
       m.sulco_central,
       m.sulco_interno,
-      m.sulco_auxiliar
+      m.sulco_auxiliar,
+      m.sulco_mm,
+      m.inspecao_danos,
+      m.hr_veiculo
     FROM pneus p
     LEFT JOIN medicoes m ON m.id = (
       SELECT id FROM medicoes
@@ -322,14 +350,20 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
   let criticos = 0;
   let alertas = 0;
   let ok = 0;
+  let semClassificacao = 0;
   let ultimaMedicao = null;
 
   for (const r of rows) {
-    const menor = menorSulco(r);
-    const status = classificarSulco(menor, limites);
-    if (status === 'critico') criticos += 1;
-    else if (status === 'alerta') alertas += 1;
-    else if (status === 'ok') ok += 1;
+    const aval = avaliarAlertaPerfil(r, {
+      tipo: veiculo?.tipo,
+      layout: veiculo?.layout_pneus,
+      hr_veiculo: r.hr_veiculo,
+    });
+    const classe = classeAlerta(aval);
+    if (classe === 'critico') criticos += 1;
+    else if (classe === 'alerta') alertas += 1;
+    else if (classe === 'ok') ok += 1;
+    else if (classe === 'sem_classificacao') semClassificacao += 1;
 
     if (r.data_medicao) {
       if (!ultimaMedicao || String(r.data_medicao) > String(ultimaMedicao.data_medicao)) {
@@ -337,11 +371,13 @@ export async function resumoStatusPneusVeiculoRapido(veiculoId) {
           data_medicao: r.data_medicao,
           posicao: r.posicao,
           numero_fogo: r.numero_fogo,
-          menor_sulco: menor,
+          menor_sulco: aval.menor_sulco,
+          acao_sugerida: aval.acao.codigo,
+          acao_label: aval.acao.label,
         };
       }
     }
   }
 
-  return { criticos, alertas, ok, ultimaMedicao };
+  return { criticos, alertas, ok, semClassificacao, ultimaMedicao };
 }

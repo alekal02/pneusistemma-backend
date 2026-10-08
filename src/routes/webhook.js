@@ -8,6 +8,7 @@ import { getDb } from '../database.js';
 import { config } from '../config.js';
 import { enviarERegistrar, limparTelefone, normalizarDestino } from '../services/whatsapp.js';
 import { processarMensagemMenu, pareceFogoAvulso } from '../services/whatsapp-menu.js';
+import { pareceComandoNatural, pareceMedicaoWhatsApp } from '../services/whatsapp-comandos.js';
 
 const router = Router();
 
@@ -53,7 +54,7 @@ function chaveTextoWebhook(filialId, body) {
 }
 
 /** true = já tratamos; false = primeira vez (marca na hora, antes do próximo await) */
-function mensagemDuplicada({ id, filialId, body }) {
+export function mensagemDuplicada({ id, filialId, body }) {
   const now = Date.now();
   limparMensagensVistas(now);
   if (id) {
@@ -61,6 +62,7 @@ function mensagemDuplicada({ id, filialId, body }) {
     const prev = mensagensVistas.get(chaveId);
     if (prev && now - prev.ts < DEDUP_ID_MS) return true;
     mensagensVistas.set(chaveId, { ts: now });
+    return false;
   }
   const texto = String(body || '').trim();
   if (texto) {
@@ -171,6 +173,8 @@ function deveIgnorarMensagemPropria(event) {
   if (placa.length >= 3 && placa.length <= 12 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) return false;
   // Nº de fogo real (0501-0042, AP1-0134) — não “fechou/rlx/flws”
   if (pareceFogoAvulso(text)) return false;
+  if (pareceComandoNatural(text)) return false;
+  if (pareceMedicaoWhatsApp(text)) return false;
   return true;
 }
 
@@ -446,6 +450,7 @@ router.post('/whatsapp', async (req, res) => {
       destino: destinoEnvio,
       filialId: canal?.escopoFilialId || null,
       chatJid: chatJid || null,
+      mensagemId: msgId || null,
     }).then((r) => {
       if (r?.handled) {
         console.log('[webhook] menu handled', {

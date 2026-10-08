@@ -198,8 +198,25 @@ export function metaTiposEquipamento() {
 }
 
 /**
- * Preenche tipo_codigo só onde está vazio, pelo texto já gravado em `tipo`.
- * Não altera label, layout, medições nem histórico.
+ * Código só quando o texto gravado é o código, o rótulo ou um alias exato.
+ * "Truckado" não entra: o relatório geral inclui o registro sem regravar tipo_codigo.
+ */
+export function codigoTipoExato(tipo) {
+  const raw = String(tipo || '').trim();
+  if (!raw) return null;
+  if (POR_CODIGO.has(raw)) return raw;
+  const n = norm(raw);
+  const byLabel = EQUIPAMENTO_TIPOS.find((t) => norm(t.label) === n);
+  if (byLabel) return byLabel.codigo;
+  for (const [codigo, lista] of Object.entries(ALIASES)) {
+    if (lista.some((a) => n === norm(a))) return codigo;
+  }
+  return null;
+}
+
+/**
+ * Preenche tipo_codigo só onde está vazio e o texto já é um tipo exato do catálogo.
+ * Não altera label, layout, medições nem histórico. Não reclassifica "Truckado".
  */
 export async function backfillTipoCodigoVeiculos(db) {
   const rows = await db.prepare(`
@@ -212,7 +229,7 @@ export async function backfillTipoCodigoVeiculos(db) {
   `);
   let n = 0;
   for (const row of rows) {
-    const codigo = codigoTipoEquipamento(row.tipo);
+    const codigo = codigoTipoExato(row.tipo);
     if (!codigo) continue;
     const result = await upd.run(codigo, row.id);
     n += result.changes || 0;

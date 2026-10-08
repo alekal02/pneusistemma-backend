@@ -7,6 +7,7 @@ import { getDb } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { requireAuth, requireFilial, filialScopeId } from '../auth.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
+import { camposTipoVeiculo } from '../equipamento-tipos.js';
 import {
   LAYOUTS_PNEU,
   LAYOUT_PADRAO,
@@ -59,8 +60,8 @@ router.post('/import', async (req, res, next) => {
     WHERE placa = ? AND filial_id = ? AND ativo = 1
   `);
   const insertVeiculo = db.prepare(`
-    INSERT INTO veiculos (placa, apelido, tipo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO veiculos (placa, apelido, tipo, tipo_codigo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertPneuEstoque = db.prepare(`
     INSERT INTO pneus (
@@ -96,7 +97,8 @@ router.post('/import', async (req, res, next) => {
       return info;
     }
 
-    const tipo = normalizarTipoVeiculo(raw.tipo_veiculo || raw.tipo) || 'Truck / Tração';
+    const tipoCampos = camposTipoVeiculo(normalizarTipoVeiculo(raw.tipo_veiculo || raw.tipo) || 'Truck / Tração');
+    const tipo = tipoCampos.tipo;
     const layoutId = mapLayoutId(raw.layout_pneus || raw.layout, tipo);
     if (!LAYOUTS_PNEU[layoutId]) {
       erros.push({ linha, placa, erro: `Layout inválido: ${raw.layout_pneus || raw.layout}` });
@@ -112,6 +114,7 @@ router.post('/import', async (req, res, next) => {
           placa,
           String(raw.apelido || '').trim() || null,
           tipo,
+          tipoCampos.tipo_codigo,
           null,
           null,
           null,
@@ -171,6 +174,7 @@ router.post('/import', async (req, res, next) => {
           ? parseFloat(String(raw.sulco_inicial_mm).replace(',', '.'))
           : null;
         const marca = String(raw.marca || '').trim() || null;
+        const modelo = String(raw.modelo || '').trim() || null;
         const medida = String(raw.medida || '').trim() || null;
         const dot = String(raw.dot || '').trim() || null;
         const obs = String(raw.observacoes || '').trim() || null;
@@ -230,7 +234,7 @@ router.post('/import', async (req, res, next) => {
                 posicao,
                 filialId,
                 marca,
-                null,
+                modelo,
                 medida,
                 dot,
                 fogo,
@@ -266,7 +270,7 @@ router.post('/import', async (req, res, next) => {
           const result = await comSavepoint(db, () => insertPneuEstoque.run(
             filialId,
             marca,
-            null,
+            modelo,
             medida,
             dot,
             fogo,

@@ -3,7 +3,7 @@
  * e sugestão de ação (OK / RODÍZIO / RECAP / TROCA).
  */
 
-import { labelPosicao, posicaoEspelhada, ladoPosicao } from './pneus-layouts.js';
+import { labelPosicao, perfilMedicaoVeiculo, posicaoEspelhada, ladoPosicao } from './pneus-layouts.js';
 import { getLimites } from './limites.js';
 
 export const DIAGNOSTICOS = {
@@ -60,6 +60,13 @@ export const ACOES = {
   rodizio: { codigo: 'rodizio', label: 'Mudar posição', prioridade: 2 },
   recap: { codigo: 'recap', label: 'Recapagem', prioridade: 3 },
   troca: { codigo: 'troca', label: 'Trocar', prioridade: 4 },
+  substituir: { codigo: 'substituir', label: 'Programar substituição', prioridade: 4 },
+  verificar_desgaste: { codigo: 'verificar_desgaste', label: 'Verificar desgaste', prioridade: 2 },
+  reinspecionar: { codigo: 'reinspecionar', label: 'Reinspecionar', prioridade: 1 },
+  corte: { codigo: 'corte', label: 'Corte', prioridade: 3 },
+  dano_lateral: { codigo: 'dano_lateral', label: 'Dano lateral', prioridade: 3 },
+  desgaste_irregular: { codigo: 'desgaste_irregular', label: 'Desgaste irregular', prioridade: 2 },
+  avaliar: { codigo: 'avaliar', label: 'Inspecionar e avaliar', prioridade: 2 },
 };
 
 /**
@@ -272,7 +279,21 @@ export function encontrarParRodizio(pontosAtual, candidatos = [], limites = {}, 
   };
 }
 
+function perfilInformado(row, opcoes = {}) {
+  if (opcoes.limites?.perfil) return opcoes.limites.perfil;
+  const tipo = opcoes.tipo || row?.tipo || row?.veiculo_tipo || null;
+  const layout = opcoes.layout || row?.layout_pneus || null;
+  if (!tipo && !layout) return null;
+  return perfilMedicaoVeiculo(tipo, layout);
+}
+
 function limiarCritico(opcoes = {}) {
+  if (opcoes.limites?.perfil === 'industrial') {
+    const bruto = opcoes.limites.sulco_critico_mm;
+    if (bruto == null || bruto === '') return null;
+    const n = Number(bruto);
+    return Number.isFinite(n) ? n : null;
+  }
   const n = opcoes.limites?.sulco_critico_mm;
   if (Number.isFinite(n)) return n;
   const fallback = getLimites()?.sulco_critico_mm;
@@ -310,6 +331,9 @@ function aplicarCriticoAoDiagnostico(perfil, menorMm, opcoes = {}) {
  * @param {{ papel?: string|null, posicao?: string|null, limites?: object }} [opcoes]
  */
 export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
+  if (perfilInformado(row, opcoes) === 'industrial') {
+    return { codigo: null, label: null, descricao: '' };
+  }
   const pontos = valoresValidos(row);
   const menor = menorSulco4(row);
   let perfil;
@@ -397,6 +421,15 @@ export function diagnosticarPerfil(row, toleranciaMm = 1.0, opcoes = {}) {
  * @param {{ pontos?: object|null, candidatos?: object[], posicaoAtual?: string|null }} [opcoes]
  */
 export function sugerirAcao(menorMm, limites, vidaRecap = 0, opcoes = {}) {
+  if (limites?.perfil === 'industrial' && (limites.sulco_critico_mm == null || limites.sulco_critico_mm === '' || !Number.isFinite(Number(limites.sulco_critico_mm)))) {
+    return {
+      codigo: null,
+      label: null,
+      motivo: null,
+      rodizio_sugestao: null,
+      desvio_mm: null,
+    };
+  }
   const { pontos = null, candidatos = [], posicaoAtual = null } = opcoes;
   const custom = limites?.acoes || {};
   const comCustom = (base, chave) => {
@@ -531,11 +564,16 @@ export function desgastePorKm(sulcoAnterior, sulcoAtual, kmAnterior, kmAtual) {
   return Math.round((deltaSulco / deltaKm) * 100000) / 100000;
 }
 
+/** Mesma taxa do KM, com a diferença de horímetro no denominador. */
+export function desgastePorHora(sulcoAnterior, sulcoAtual, hrAnterior, hrAtual) {
+  return desgastePorKm(sulcoAnterior, sulcoAtual, hrAnterior, hrAtual);
+}
+
 /**
  * Percentual de vida útil restante com base no sulco inicial e crítico.
  */
 export function percentualVida(sulcoAtual, sulcoInicial, sulcoCritico) {
-  if (sulcoAtual == null || sulcoInicial == null) return null;
+  if (sulcoAtual == null || sulcoInicial == null || !Number.isFinite(Number(sulcoCritico))) return null;
   const util = sulcoInicial - sulcoCritico;
   if (util <= 0) return null;
   const restante = sulcoAtual - sulcoCritico;

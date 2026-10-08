@@ -1,5 +1,7 @@
 /** Posições, papéis (direcional/tração) e layouts Truck / Toco / frota */
 
+import { layoutPadraoDoCatalogo, perfilMedicaoDoCatalogo, resolverTipoEquipamento } from './equipamento-tipos.js';
+
 export const POSICOES_PNEU = {
   // Nomenclatura operacional (folhas de cadastro)
   '1E': 'Eixo 1 Esquerdo (dianteiro)',
@@ -37,6 +39,15 @@ export const POSICOES_PNEU = {
   D: 'Dianteiro (moto)',
   T: 'Traseiro (moto)',
   ESTEPE: 'Estepe',
+
+  S1E: 'Dianteiro esquerdo',
+  S1D: 'Dianteiro direito',
+  S2E: 'Traseiro esquerdo',
+  S2D: 'Traseiro direito',
+  G1E: 'Dianteiro esquerdo',
+  G1D: 'Dianteiro direito',
+  G2E: 'Tração esquerda',
+  G2D: 'Tração direita',
 };
 
 /** Papel da posição: direcional (dianteira) ou tracao (eixos de tração/truck) */
@@ -74,6 +85,14 @@ export const PAPEL_POSICAO = {
   E3EE: 'tracao',
   E3EI: 'tracao',
   ESTEPE: 'estepe',
+  S1E: 'rodado',
+  S1D: 'rodado',
+  S2E: 'rodado',
+  S2D: 'rodado',
+  G1E: 'direcional',
+  G1D: 'direcional',
+  G2E: 'tracao',
+  G2D: 'tracao',
 };
 
 export const ORDEM_POSICAO = Object.keys(POSICOES_PNEU);
@@ -147,7 +166,24 @@ export const LAYOUTS_PNEU = {
     nome: 'Trator 4 pneus — 2 dianteiros + 2 traseiros',
     descricao: '2 eixos simples; traseiros maiores. Medição com faixas próprias de sulco.',
     familia: 'trator',
+    diagrama: 'trator',
     posicoes: ['1E', '1D', '2E', '2D'],
+  },
+  skid_4: {
+    id: 'skid_4',
+    nome: 'Mini carregadeira — 4 pneus iguais',
+    descricao: 'Quatro rodas do mesmo tamanho, uma em cada canto.',
+    familia: 'caminhao',
+    diagrama: 'quad',
+    posicoes: ['S1E', 'S1D', 'S2E', 'S2D'],
+  },
+  giro_4: {
+    id: 'giro_4',
+    nome: 'Giro zero — 2 dianteiros + 2 tração',
+    descricao: 'Dois dianteiros menores e duas rodas de tração traseiras.',
+    familia: 'caminhao',
+    diagrama: 'generico',
+    posicoes: ['G1E', 'G1D', 'G2E', 'G2D'],
   },
   moto_2: {
     id: 'moto_2',
@@ -159,6 +195,15 @@ export const LAYOUTS_PNEU = {
 };
 
 export const LAYOUT_PADRAO = 'truck_10';
+
+export function listarLayoutsPublicos() {
+  return Object.values(LAYOUTS_PNEU).map((l) => ({
+    id: l.id,
+    nome: l.nome,
+    descricao: l.descricao,
+    posicoes: l.posicoes,
+  }));
+}
 
 export const TIPOS_PNEU = ['direcional', 'misto', 'borrachudo'];
 export const CONDICOES_PNEU = ['novo', 'recapado'];
@@ -197,8 +242,10 @@ export function familiaLayout(id) {
   return getLayout(id)?.familia || 'caminhao';
 }
 
-/** Régua de sulco: caminhão (padrão) ou trator. */
+/** Régua de sulco: catálogo do tipo, senão trator pelo layout, senão família. */
 export function perfilMedicaoVeiculo(tipo, layoutId) {
+  const perfilCat = perfilMedicaoDoCatalogo(tipo);
+  if (perfilCat) return perfilCat;
   const t = String(tipo || '').toLowerCase();
   if (t.includes('trator')) return 'trator';
   const layout = String(layoutId || '').toLowerCase();
@@ -206,14 +253,35 @@ export function perfilMedicaoVeiculo(tipo, layoutId) {
   return familiaLayout(layoutId);
 }
 
-/** Layout sugerido ao cadastrar pelo tipo (WhatsApp / import). */
+/** Layout sugerido ao cadastrar pelo tipo (WhatsApp / import). Não trata "mini" como Toco. */
 export function layoutPadraoPorTipo(tipo) {
-  const t = String(tipo || '').toLowerCase();
-  if (t.includes('toco') || t.includes('mini')) return 'toco_6';
-  if (t.includes('compactador')) return 'compactador';
-  if (t.includes('utilit') || t.includes('varredeira')) return 'utilitario_4';
-  if (t.includes('trator')) return 'trator_4';
-  return LAYOUT_PADRAO;
+  return layoutPadraoDoCatalogo(tipo);
+}
+
+/**
+ * Cadastro novo: layout do catálogo.
+ * Um layout explícito só entra se existir e estiver permitido para o tipo.
+ * Lista customizada de posições não é reescrita.
+ */
+export function layoutParaNovoVeiculo(tipo, layoutInformado, { posicoesCustom = null } = {}) {
+  if (Array.isArray(posicoesCustom) && posicoesCustom.length) {
+    const custom = String(layoutInformado || '').trim();
+    return custom || 'personalizado';
+  }
+  const padrao = layoutPadraoPorTipo(tipo);
+  const informado = String(layoutInformado || '').trim();
+  if (!informado || !LAYOUTS_PNEU[informado]) return padrao;
+  const permitidos = resolverTipoEquipamento(tipo)?.layouts_permitidos;
+  if (permitidos?.length && !permitidos.includes(informado)) return padrao;
+  return informado;
+}
+
+/** Edição: não troca o layout salvo pelo padrão do tipo. Só muda se vier explícito. */
+export function layoutNaEdicao(layoutSalvo, layoutInformado) {
+  if (layoutInformado == null) return layoutSalvo ?? null;
+  const informado = String(layoutInformado).trim();
+  if (!informado) return layoutSalvo ?? null;
+  return informado;
 }
 
 export function labelPosicao(codigo) {
@@ -256,6 +324,14 @@ const POSICAO_ESPELHADA = {
   E3DE: 'E3EE',
   E3EI: 'E3DI',
   E3DI: 'E3EI',
+  S1E: 'S1D',
+  S1D: 'S1E',
+  S2E: 'S2D',
+  S2D: 'S2E',
+  G1E: 'G1D',
+  G1D: 'G1E',
+  G2E: 'G2D',
+  G2D: 'G2E',
 };
 
 export function posicaoEspelhada(codigo) {
@@ -295,6 +371,14 @@ const LADO_POSICAO = {
   E3EI: 'esquerdo',
   E3DI: 'direito',
   E3DE: 'direito',
+  S1E: 'esquerdo',
+  S2E: 'esquerdo',
+  G1E: 'esquerdo',
+  G2E: 'esquerdo',
+  S1D: 'direito',
+  S2D: 'direito',
+  G1D: 'direito',
+  G2D: 'direito',
 };
 
 export function ladoPosicao(codigo) {

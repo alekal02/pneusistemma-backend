@@ -13,24 +13,27 @@ import {
   gerarTokenAcessoRapido,
   resumoStatusPneusVeiculoRapido,
 } from './acesso-rapido.js';
-import { gerarRelatorioSemanalPdfBuffer } from './relatorio-semanal-pdf.js';
+import { gerarRelatorioSemanalPdfBuffer, resolverFiltroRelatorio } from './relatorio-semanal-pdf.js';
 import {
   enviarERegistrar,
   enviarDocumentoERegistrar,
 } from './whatsapp.js';
+import { parseComandoNatural, parseMedicaoWhatsApp, parseKmWhatsApp } from './whatsapp-comandos.js';
+import { TIPOS_VEICULO } from '../config.js';
+import { listarTiposEquipamento, resolverTipoEquipamento } from '../equipamento-tipos.js';
 
 export function textoMenu() {
   return [
     '🛠️ *PneuSistemma — Menu*',
     '',
     '1️⃣ Medir pneu (placa → link)',
-    '2️⃣ Cadastrar caminhão (link)',
+    '2️⃣ Cadastrar equipamento (link)',
     '3️⃣ Cadastrar pneu estoque (link)',
     '4️⃣ Trocar / montar (placa → link)',
     '5️⃣ Enviar pneu → estoque (nº fogo)',
     '6️⃣ Enviar pneu → recap (nº fogo)',
     '7️⃣ Enviar pneu → descarte (nº fogo)',
-    '8️⃣ Relatório da frota (PDF visual)',
+    '8️⃣ Relatório da frota (PDF por tipo)',
     '9️⃣ Frota (placas + sulco)',
     '',
     '0️⃣ Cancelar / voltar ao menu',
@@ -133,26 +136,20 @@ function simNao(texto) {
 }
 
 const comandosRecentes = new Map();
-const COMANDO_DEDUP_MS = 25_000;
+const COMANDO_DEDUP_ID_MS = 120_000;
 
-function chaveComandoMenu(filialId, texto) {
-  const placa = normalizarPlaca(texto);
-  if (placa.length >= 3 && placa.length <= 12 && /[A-Z]/.test(placa) && /[0-9]/.test(placa)) {
-    return `p:${filialId}|${placa}`;
-  }
-  return `t:${filialId}|${norm(texto)}`;
-}
-
-function comandoDuplicado(filialId, texto) {
+function comandoDuplicado(ctx) {
+  const id = ctx?.mensagemId;
+  if (!id) return false;
   const now = Date.now();
   if (comandosRecentes.size > 200) {
     for (const [k, ts] of comandosRecentes) {
-      if (now - ts > COMANDO_DEDUP_MS) comandosRecentes.delete(k);
+      if (now - ts > COMANDO_DEDUP_ID_MS) comandosRecentes.delete(k);
     }
   }
-  const chave = chaveComandoMenu(filialId, texto);
+  const chave = `id:${id}`;
   const prev = comandosRecentes.get(chave);
-  if (prev && now - prev < COMANDO_DEDUP_MS) return true;
+  if (prev && now - prev < COMANDO_DEDUP_ID_MS) return true;
   comandosRecentes.set(chave, now);
   return false;
 }
@@ -210,7 +207,7 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filial
     filialId,
     whatsappOrigem: phone || destinoEnvio,
   });
-  const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
+  const { criticos, alertas, semClassificacao, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
 
   let mensagem = `🚛 *${veiculo.placa}* — ${veiculo.tipo}\n`;
   if (veiculo.apelido) mensagem += `🏷️ ${veiculo.apelido}\n`;
@@ -222,14 +219,19 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filial
   }
   if (criticos > 0) mensagem += `🚨 *${criticos} pneu(s) em estado CRÍTICO*\n`;
   if (alertas > 0) mensagem += `⚠️ *${alertas} pneu(s) em ALERTA*\n`;
-  if (criticos === 0 && alertas === 0) mensagem += `✅ Todos os pneus estão OK\n`;
-  mensagem += `\n👉 *Abrir medição de sulcos:*\n${link}\n\n`;
-  mensagem += `Meça todas as posições e salve.\n`;
-  mensagem += `_Link válido por 24 horas._\n\n_Digite *menu* para outras opções._`;
+  if (semClassificacao > 0) mensagem += `ℹ️ *${semClassificacao} pneu(s) sem classificação de sulco*\n`;
+  if (criticos === 0 && alertas === 0 && !semClassificacao) mensagem += `✅ Todos os pneus estão OK\n`;
+  mensagem += `\n👉 Link (24h):\n${link}\n`;
+  mensagem += `Ou envie no Zap: *1E 14,14,14* (KM opcional: *KM 150000*).`;
   return mensagem;
 }
 
 async function fluxoMedirPlaca(ctx, texto) {
+  const med = parseMedicaoWhatsApp(texto);
+  if (med?.linhas?.length) {
+    await iniciarMedicaoWhatsApp(ctx, med);
+    return;
+  }
   if (!parecePlacaOperacional(texto) && !parecePlacaBrasil(texto)) {
     await reply(ctx, 'Isso não parece uma *placa* (ex.: BH123, ABC1D23).\nEnvie a placa ou *0* para cancelar.');
     return;
@@ -250,6 +252,195 @@ async function fluxoMedirPlaca(ctx, texto) {
     await reply(ctx, `❌ Não consegui gerar o link: ${err.message}\n\nDigite *menu*.`);
   }
   await clear(ctx);
+}
+
+function mesclarLinhasMedicao(atual, novas) {
+  const map = new Map();
+  for (const l of atual || []) map.set(String(l.posicao).toUpperCase(), l);
+  for (const l of novas || []) map.set(String(l.posicao).toUpperCase(), l);
+  return [...map.values()];
+}
+
+function textoErrosMedicao(ok, erros) {
+  const linhas = [];
+  if (ok.length) linhas.push(`OK: ${ok.map((i) => i.posicao).join(', ')}`);
+  linhas.push('Corrija:');
+  for (const e of erros) linhas.push(`• ${e.posicao} — ${e.motivo}`);
+  linhas.push('*0* cancela');
+  return linhas.join('\n');
+}
+
+async function resolverPlacaMedicao(ctx, placaTexto) {
+  const r = await resolverVeiculoPorTexto(ctx.filialId, placaTexto);
+  if (!r.ok && r.motivo === 'varias') {
+    await reply(ctx, `🔍 Encontrei várias:\n${r.veiculos.map((v) => `• ${v.placa}`).join('\n')}\n\nEnvie a *placa exata*.`);
+    return null;
+  }
+  if (!r.ok) {
+    await reply(ctx, `Placa *${r.placa || placaTexto}* não está nesta unidade.`);
+    return null;
+  }
+  return r.veiculo;
+}
+
+function aplicarKmSessao(dados, km, kmAtual) {
+  if (km == null) return { ...dados, km_erro: null };
+  const err = ops.validarKmInformado(km, kmAtual);
+  if (err) return { ...dados, km_erro: err };
+  return { ...dados, km_informado: km, km_erro: null };
+}
+
+async function aplicarLinhasMedicao(ctx, sessaoDados, linhas, kmNovo = undefined) {
+  const veiculoId = sessaoDados.veiculo_id;
+  const mescladas = mesclarLinhasMedicao(sessaoDados.linhas, linhas);
+  const { veiculo, ok, erros } = await ops.validarMedicoesWhatsApp({
+    filialId: ctx.filialId,
+    veiculoId,
+    linhas: mescladas,
+  });
+  let dados = {
+    veiculo_id: veiculo.id,
+    placa: veiculo.placa,
+    km_atual: veiculo.km_atual,
+    km_informado: sessaoDados.km_informado,
+    linhas: ok.map((i) => ({ posicao: i.posicao, valores: i.valores })),
+    ok,
+    erros,
+  };
+  if (kmNovo !== undefined) dados = aplicarKmSessao(dados, kmNovo, veiculo.km_atual);
+  if (dados.km_erro) {
+    await setFluxo(ctx, 'medir_wa', erros.length ? 'coletar' : (ok.length ? 'confirma' : 'coletar'), dados);
+    await reply(ctx, `❌ ${dados.km_erro}. KM atual: ${veiculo.km_atual ?? 0}.`);
+    return;
+  }
+  if (erros.length) {
+    await setFluxo(ctx, 'medir_wa', 'coletar', dados);
+    await reply(ctx, textoErrosMedicao(ok, erros));
+    return;
+  }
+  if (!ok.length) {
+    await setFluxo(ctx, 'medir_wa', 'coletar', dados);
+    await reply(ctx, 'Envie: *1E 14,14,14* (ou *14,5;14,5;14,5*).\n*0* cancela');
+    return;
+  }
+  await setFluxo(ctx, 'medir_wa', 'confirma', dados);
+  await reply(ctx, ops.textoResumoMedicaoWa(veiculo.placa, ok, {
+    kmAtual: veiculo.km_atual,
+    kmInformado: dados.km_informado,
+  }));
+}
+
+async function iniciarMedicaoWhatsApp(ctx, med) {
+  let veiculoId = null;
+  let placa = med.placa || null;
+  if (placa) {
+    const veiculo = await resolverPlacaMedicao(ctx, placa);
+    if (!veiculo) {
+      if (med.linhas?.length) {
+        await setFluxo(ctx, 'medir_wa', 'placa', { linhas: med.linhas });
+      }
+      return;
+    }
+    veiculoId = veiculo.id;
+    placa = veiculo.placa;
+  }
+  if (!veiculoId) {
+    await setFluxo(ctx, 'medir_wa', 'placa', { linhas: med.linhas || [], km_informado: med.km });
+    await reply(ctx, 'Envie a *placa* do caminhão.\n*0* cancela');
+    return;
+  }
+  await aplicarLinhasMedicao(ctx, { veiculo_id: veiculoId, placa, linhas: [], km_informado: med.km }, med.linhas || [], med.km);
+}
+
+async function passoMedicaoWhatsApp(ctx, sessao, texto) {
+  const d = sessao.dados || {};
+  const med = parseMedicaoWhatsApp(texto);
+  const kmSo = parseKmWhatsApp(texto);
+
+  if (sessao.passo === 'placa') {
+    if (med?.placa || parecePlacaOperacional(texto) || parecePlacaBrasil(texto)) {
+      const placaTxt = med?.placa || texto;
+      const veiculo = await resolverPlacaMedicao(ctx, placaTxt);
+      if (!veiculo) return;
+      const linhas = mesclarLinhasMedicao(d.linhas, med?.linhas || []);
+      await aplicarLinhasMedicao(
+        ctx,
+        { veiculo_id: veiculo.id, placa: veiculo.placa, linhas: [], km_informado: d.km_informado },
+        linhas,
+        med?.km ?? d.km_informado,
+      );
+      return;
+    }
+    await reply(ctx, 'Envie a placa (ex.: ABC1D23).\n*0* cancela');
+    return;
+  }
+
+  if (med?.linhas?.length) {
+    if (med.placa && d.veiculo_id) {
+      const veiculo = await resolverPlacaMedicao(ctx, med.placa);
+      if (!veiculo) return;
+      d.veiculo_id = veiculo.id;
+      d.placa = veiculo.placa;
+    }
+    await aplicarLinhasMedicao(ctx, d, med.linhas, med.km);
+    return;
+  }
+
+  if (kmSo != null && !med?.linhas?.length) {
+    await aplicarLinhasMedicao(ctx, d, [], kmSo);
+    return;
+  }
+
+  if (sessao.passo === 'confirma') {
+    const sn = simNao(texto);
+    if (sn === false) {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado.');
+      return;
+    }
+    if (sn !== true) {
+      await reply(ctx, 'Mais posições, *KM 123456*, *1* salva ou *0* cancela.');
+      return;
+    }
+    if (d.erros?.length) {
+      await reply(ctx, textoErrosMedicao(d.ok || [], d.erros));
+      return;
+    }
+    if (!d.ok?.length) {
+      await reply(ctx, 'Envie as medições: *1E 14,14,14*');
+      return;
+    }
+    if (d.km_erro) {
+      await reply(ctx, `❌ ${d.km_erro}`);
+      return;
+    }
+    try {
+      const r = await ops.registrarMedicoesWhatsApp({
+        filialId: ctx.filialId,
+        veiculoId: d.veiculo_id,
+        itens: d.ok,
+        kmInformado: d.km_informado,
+        responsavel: `WhatsApp ${ctx.phone || ctx.destino || ''}`.trim(),
+      });
+      await clear(ctx);
+      const kmTxt = r.km != null ? ` · KM ${r.km}` : '';
+      await reply(ctx, `✅ ${r.total} medições em *${r.placa}*${kmTxt}.`);
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\n*1* tenta de novo · *0* cancela`);
+    }
+    return;
+  }
+
+  if (sessao.passo === 'coletar') {
+    if (simNao(texto) === true && d.ok?.length && !d.erros?.length) {
+      await setFluxo(ctx, 'medir_wa', 'confirma', d);
+      await reply(ctx, ops.textoResumoMedicaoWa(d.placa, d.ok, {
+        kmAtual: d.km_atual, kmInformado: d.km_informado,
+      }));
+      return;
+    }
+    await reply(ctx, 'Envie *1E 14,14,14* ou *14,5;14,5;14,5*.\n*0* cancela');
+  }
 }
 
 async function fluxoTrocaPlaca(ctx, texto) {
@@ -296,7 +487,7 @@ async function enviarLinkCadastro(ctx, tipo) {
   if (tipo === 'cadastrar_veiculo') {
     await reply(
       ctx,
-      `🚛 *Cadastrar caminhão*\n\nAbra o link e preencha placa, tipo e KM:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
+      `🚜 *Cadastrar equipamento*\n\nAbra o link, escolha o tipo e preencha os dados:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
     );
   } else {
     await reply(
@@ -304,6 +495,253 @@ async function enviarLinkCadastro(ctx, tipo) {
       `🛞 *Cadastrar pneu (estoque)*\n\nAbra o link e informe nº de fogo, modelo e padrão:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
     );
   }
+}
+
+function textoTiposVeiculo() {
+  return TIPOS_VEICULO.map((t, i) => `*${i + 1}* ${t}`).join('\n');
+}
+
+function resolverTipoVeiculoDigitado(texto) {
+  const n = soNumero(texto);
+  if (n != null) {
+    const idx = parseInt(n, 10) - 1;
+    if (idx >= 0 && idx < TIPOS_VEICULO.length) return TIPOS_VEICULO[idx];
+  }
+  const c = norm(texto);
+  if (/caminhao|truck|tracao/.test(c)) return 'Truck / Tração';
+  if (/trator/.test(c)) return 'Trator';
+  if (/toco|mini/.test(c)) return 'Toco / Mini';
+  if (/compactador/.test(c)) return 'Compactador';
+  if (/utilit|varredeira/.test(c)) return 'Utilitário / Varredeira';
+  return null;
+}
+
+function textoPreCadastroVeiculo(placa, link) {
+  return [
+    '✅ Pré-cadastro realizado!',
+    '',
+    `🚛 Veículo: ${placa}`,
+    '',
+    'Para concluir o cadastro, acesse o link abaixo e informe modelo, fabricante, configuração dos eixos e demais informações necessárias.',
+    '',
+    `🔗 ${link}`,
+    '',
+    '⚠️ O veículo só estará disponível para operações após a conclusão do cadastro.',
+  ].join('\n');
+}
+
+function textoPreCadastroPneu(fogo, link) {
+  return [
+    '✅ Pré-cadastro realizado!',
+    '',
+    `🛞 Pneu: ${fogo}`,
+    '',
+    'Para concluir o cadastro, acesse o link abaixo e informe modelo, fabricante e demais informações técnicas.',
+    '',
+    `🔗 ${link}`,
+    '',
+    '⚠️ O pneu só estará disponível para operações após a conclusão do cadastro.',
+  ].join('\n');
+}
+
+async function pedirConfirmacaoPreCadastro(ctx, dados) {
+  await setFluxo(ctx, 'pre_cadastro', 'confirma', dados);
+  if (dados.alvo === 'pneu') {
+    await reply(ctx, `Pré-cadastrar pneu *${dados.fogo}*?\n*1* sim · *0* não`);
+    return;
+  }
+  await reply(
+    ctx,
+    `Pré-cadastrar *${dados.placa}* como *${dados.tipoVeiculo}*?\n*1* sim · *0* não`
+  );
+}
+
+async function concluirPreCadastroVeiculo(ctx, { placa, tipoVeiculo }) {
+  const existente = await ops.buscarPlacaFilial(ctx.filialId, placa);
+  if (existente) {
+    await clear(ctx);
+    if (!ops.cadastroEstaCompleto(existente)) {
+      await reply(ctx, `❌ *${existente.placa}* já está em pré-cadastro nesta unidade. Conclua pelo link enviado.`);
+    } else {
+      await reply(ctx, `❌ Placa *${existente.placa}* já cadastrada nesta unidade.`);
+    }
+    return;
+  }
+  const created = await ops.criarVeiculo(ctx.filialId, {
+    placa,
+    tipo: tipoVeiculo,
+    preCadastro: true,
+  });
+  const { link } = await gerarTokenAcessoRapido({
+    tipo: 'cadastrar_veiculo',
+    veiculoId: created.id,
+    filialId: ctx.filialId,
+    whatsappOrigem: ctx.phone || ctx.destino,
+  });
+  await clear(ctx);
+  await reply(ctx, textoPreCadastroVeiculo(String(placa).trim().toUpperCase(), link));
+}
+
+async function concluirPreCadastroPneu(ctx, { fogo }) {
+  const hits = await ops.buscarPneusPorFogo(ctx.filialId, fogo);
+  const existente = hits.find((p) =>
+    String(p.numero_fogo || '').replace(/[-\s]/g, '').toLowerCase()
+    === String(fogo).replace(/[-\s]/g, '').toLowerCase()
+  ) || (hits.length === 1 ? hits[0] : null);
+  if (existente) {
+    await clear(ctx);
+    await reply(ctx, `❌ Já existe pneu com o nº de fogo *${existente.numero_fogo}* nesta unidade.`);
+    return;
+  }
+  const created = await ops.criarPneuEstoque(ctx.filialId, {
+    numero_fogo: fogo,
+    modelo: 'Pendente',
+    preCadastro: true,
+  });
+  const { link } = await gerarTokenAcessoRapido({
+    tipo: 'cadastrar_pneu',
+    pneuId: created.id,
+    filialId: ctx.filialId,
+    whatsappOrigem: ctx.phone || ctx.destino,
+  });
+  await clear(ctx);
+  await reply(ctx, textoPreCadastroPneu(created.numero_fogo || fogo, link));
+}
+
+async function iniciarPreCadastro(ctx, natural) {
+  if (natural.tipo === 'cadastrar_pneu') {
+    if (!natural.fogo) {
+      await setFluxo(ctx, 'pre_cadastro', 'fogo', { alvo: 'pneu' });
+      await reply(ctx, '🛞 Envie o *nº de fogo* do pneu.\n_0 = cancelar_');
+      return;
+    }
+    await pedirConfirmacaoPreCadastro(ctx, { alvo: 'pneu', fogo: natural.fogo });
+    return;
+  }
+
+  const placa = natural.placa ? String(natural.placa).toUpperCase() : null;
+  const tipoVeiculo = natural.tipoVeiculo || null;
+  if (placa) {
+    const existente = await ops.buscarPlacaFilial(ctx.filialId, placa);
+    if (existente) {
+      if (!ops.cadastroEstaCompleto(existente)) {
+        await reply(ctx, `❌ *${existente.placa}* já está em pré-cadastro nesta unidade. Conclua pelo link enviado.`);
+      } else {
+        await reply(ctx, `❌ Placa *${existente.placa}* já cadastrada nesta unidade.`);
+      }
+      return;
+    }
+  }
+  if (!placa) {
+    await setFluxo(ctx, 'pre_cadastro', 'placa', { alvo: 'veiculo', tipoVeiculo });
+    await reply(ctx, '🚛 Envie a *placa* ou identificação interna do veículo.\n_0 = cancelar_');
+    return;
+  }
+  if (!tipoVeiculo) {
+    await setFluxo(ctx, 'pre_cadastro', 'tipo', { alvo: 'veiculo', placa });
+    await reply(ctx, `Qual o tipo de *${placa}*?\n${textoTiposVeiculo()}\n_0 = cancelar_`);
+    return;
+  }
+  await pedirConfirmacaoPreCadastro(ctx, { alvo: 'veiculo', placa, tipoVeiculo });
+}
+
+async function passoPreCadastro(ctx, sessao, texto) {
+  const d = sessao.dados || {};
+  if (sessao.passo === 'placa') {
+    const placa = normalizarPlaca(texto);
+    if (placa.length < 3 || !/[0-9]/.test(placa)) {
+      await reply(ctx, 'Envie a *placa* ou identificação interna (ex.: ABC1D23 ou TR-015).\n_0 = cancelar_');
+      return;
+    }
+    const existente = await ops.buscarPlacaFilial(ctx.filialId, placa);
+    if (existente) {
+      await clear(ctx);
+      await reply(ctx, `❌ Placa *${existente.placa}* já cadastrada nesta unidade.`);
+      return;
+    }
+    if (!d.tipoVeiculo) {
+      await setFluxo(ctx, 'pre_cadastro', 'tipo', { ...d, alvo: 'veiculo', placa });
+      await reply(ctx, `Qual o tipo de *${placa}*?\n${textoTiposVeiculo()}\n_0 = cancelar_`);
+      return;
+    }
+    await pedirConfirmacaoPreCadastro(ctx, { alvo: 'veiculo', placa, tipoVeiculo: d.tipoVeiculo });
+    return;
+  }
+  if (sessao.passo === 'tipo') {
+    const tipoVeiculo = resolverTipoVeiculoDigitado(texto);
+    if (!tipoVeiculo) {
+      await reply(ctx, `Tipo inválido. Escolha:\n${textoTiposVeiculo()}\n_0 = cancelar_`);
+      return;
+    }
+    await pedirConfirmacaoPreCadastro(ctx, { alvo: 'veiculo', placa: d.placa, tipoVeiculo });
+    return;
+  }
+  if (sessao.passo === 'fogo') {
+    const fogo = String(texto).replace(/^fogo\s+/i, '').trim();
+    if (!fogo || fogo.length < 3) {
+      await reply(ctx, 'Envie o *nº de fogo* (mín. 3 caracteres).\n_0 = cancelar_');
+      return;
+    }
+    await pedirConfirmacaoPreCadastro(ctx, { alvo: 'pneu', fogo });
+    return;
+  }
+  if (sessao.passo === 'confirma') {
+    const sn = simNao(texto);
+    if (sn === false) {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado. Nada foi alterado.');
+      return;
+    }
+    if (sn !== true) {
+      await reply(ctx, '*1* confirma · *0* cancela');
+      return;
+    }
+    try {
+      if (d.alvo === 'pneu') await concluirPreCadastroPneu(ctx, d);
+      else await concluirPreCadastroVeiculo(ctx, d);
+    } catch (err) {
+      await clear(ctx);
+      await reply(ctx, `❌ ${err.message}`);
+    }
+  }
+}
+
+async function pedirSubstitutoObrigatorio(ctx, {
+  fluxo, passo, dados, titulo, placa, posicao,
+}) {
+  const estoque = await ops.listarEstoque(ctx.filialId, 20);
+  if (!estoque.length) {
+    await clear(ctx);
+    await reply(
+      ctx,
+      [
+        `⚠️ ${titulo}`,
+        `Estoque vazio — o pneu original permanece montado em *${placa}* / *${posicao}*.`,
+        'Cadastre um pneu (*3*) e tente de novo.',
+        '',
+        textoMenu(),
+      ].join('\n')
+    );
+    return false;
+  }
+  await setFluxo(ctx, fluxo, passo, dados);
+  const lista = estoque
+    .slice(0, 15)
+    .map((p) => `• *${p.numero_fogo}* — ${[p.marca, p.modelo].filter(Boolean).join(' ') || p.tipo_pneu}`)
+    .join('\n');
+  await reply(
+    ctx,
+    [
+      titulo,
+      `Para concluir, monte um pneu do estoque em *${placa}* / *${posicao}*.`,
+      '',
+      `Estoque:\n${lista}`,
+      '',
+      'Envie o *nº de fogo* do estoque.',
+      '*0* cancela — o pneu original permanece montado.',
+    ].join('\n')
+  );
+  return true;
 }
 
 async function pedirMontarEstoque(ctx, { veiculoId, posicao, placa, acaoLabel }) {
@@ -380,15 +818,104 @@ async function passoMontarPos(ctx, sessao, texto) {
   }
 }
 
-async function enviarRelatorio(ctx) {
-  await reply(ctx, '📊 Gerando o *relatório gerencial*… aguarde alguns segundos.', 'relatorio_semanal');
+const MARCA_OPCAO = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
+
+/** Mesmos atalhos de filtroGrupoCaminhao. Não inclui código nem rótulo do catálogo. */
+const GRUPOS_RELATORIO_ANTIGOS = new Set([
+  'caminhao',
+  'caminhoes',
+  'compactadores',
+  'caminhao/compactador',
+  'caminhao compactador',
+  'caminhao_compactador',
+]);
+
+const OPCOES_RELATORIO_FIXAS = [
+  { id: 'todos', label: 'Todos' },
+  { id: 'caminhao_compactador', label: 'Caminhão/Compactador' },
+  { id: 'trator', label: 'Trator' },
+  { id: 'mini_carregadeira', label: 'Mini carregadeira' },
+  { id: 'giro_zero', label: 'Giro zero' },
+];
+
+const IDS_RELATORIO_FIXOS = new Set(OPCOES_RELATORIO_FIXAS.map((o) => o.id));
+
+export function opcoesMenuRelatorio() {
+  const extras = listarTiposEquipamento()
+    .filter((t) => !IDS_RELATORIO_FIXOS.has(t.codigo))
+    .map((t) => ({ id: t.codigo, label: t.label }));
+  return [...OPCOES_RELATORIO_FIXAS, ...extras];
+}
+
+export function textoTiposRelatorio() {
+  const linhas = opcoesMenuRelatorio().map((o, i) => {
+    const n = i + 1;
+    const marca = MARCA_OPCAO[i] || `*${n}*`;
+    return `${marca} ${o.label}`;
+  });
+  return [
+    '📊 *Relatório semanal*',
+    '',
+    'Qual tipo de equipamento?',
+    ...linhas,
+    '',
+    '_2 = grupo: caminhao, caminhoes e caminhao/compactador._',
+    '_0️⃣ cancela_',
+  ].join('\n');
+}
+
+function numeroOpcaoRelatorio(texto) {
+  const m = String(texto || '').trim().match(/^(\d{1,2})$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 1 ? n : null;
+}
+
+export function tipoRelatorioDaResposta(texto) {
+  const c = norm(texto);
+  const n = numeroOpcaoRelatorio(texto);
+  const opcoes = opcoesMenuRelatorio();
+  if (n) {
+    if (n <= opcoes.length) return opcoes[n - 1].id;
+    return null;
+  }
+  if (!c) return null;
+  if (/^todos?$|^todas$/.test(c)) return 'todos';
+  if (GRUPOS_RELATORIO_ANTIGOS.has(c)) return 'caminhao_compactador';
+  const cat = resolverTipoEquipamento(texto);
+  if (cat) return cat.codigo;
+  if (c === 'mini' || c === 'skid' || c === 'bobcat') return 'mini_carregadeira';
+  if (c === 'giro') return 'giro_zero';
+  return null;
+}
+
+async function pedirTipoRelatorio(ctx) {
+  await setFluxo(ctx, 'relatorio', 'tipo', {});
+  await reply(ctx, textoTiposRelatorio(), 'relatorio_semanal');
+}
+
+async function passoTipoRelatorio(ctx, texto) {
+  const tipo = tipoRelatorioDaResposta(texto);
+  if (!tipo) {
+    await reply(ctx, `Não entendi o tipo.\n\n${textoTiposRelatorio()}`, 'relatorio_semanal');
+    return;
+  }
+  await clear(ctx);
+  await enviarRelatorio(ctx, tipo);
+}
+
+async function enviarRelatorio(ctx, tipo = 'todos') {
+  const filtro = resolverFiltroRelatorio(tipo);
+  await reply(ctx, `📊 Gerando o *relatório* de *${filtro.label}*… aguarde alguns segundos.`, 'relatorio_semanal');
   try {
     const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(ctx.filialId, {
       geradoPor: `WhatsApp · ${ctx.phone || ctx.destino}`,
+      tipo: filtro.id,
     });
     const resumo = dados?.resumo || {};
     const caption = [
-      `📊 *Relatório visual da frota* — ${dados.filial?.nome || 'Unidade'}`,
+      `📊 *${dados.titulo || 'Relatório semanal'}* — ${dados.filial?.nome || 'Unidade'}`,
+      `Tipo: ${dados.filtro_label || filtro.label}`,
       dados.periodo?.label ? `Semana: ${dados.periodo.label}` : null,
       `Montados: ${resumo.pneus_montados ?? 0} · Estoque: ${resumo.pneus_estoque ?? 0} · Em recap: ${resumo.pneus_em_recapagem ?? 0}`,
       `Críticos: ${resumo.sulco_critico ?? 0} · Monitorar: ${resumo.sulco_monitorar ?? 0} · Mov. na semana: ${resumo.movimentacoes_semana ?? 0}`,
@@ -403,7 +930,7 @@ async function enviarRelatorio(ctx) {
       buffer,
       fileName: filename,
       mensagem: caption,
-      caption: `📊 Frota visual — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
+      caption: `📊 ${dados.filtro_label || filtro.label} — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
       filialId: ctx.filialId,
       fallbackDestinatario: ctx.phone,
     });
@@ -440,7 +967,7 @@ async function iniciarOpcao(ctx, n) {
   switch (n) {
     case '1':
       await setFluxo(ctx, 'medir', 'placa', {});
-      await reply(ctx, '📏 *Medir pneu*\n\nEnvie a *placa* do caminhão (ex.: BH123).\n_0 = cancelar_');
+      await reply(ctx, '📏 Envie a *placa* (ou as medições: *1E 14,14,14*).\n*0* cancela');
       return;
     case '2':
       await clear(ctx);
@@ -467,8 +994,7 @@ async function iniciarOpcao(ctx, n) {
       await reply(ctx, '🗑️ *Descarte*\n\nEnvie o *nº de fogo*.\n_0 = cancelar_');
       return;
     case '8':
-      await clear(ctx);
-      await enviarRelatorio(ctx);
+      await pedirTipoRelatorio(ctx);
       return;
     case '9':
       await clear(ctx);
@@ -480,6 +1006,38 @@ async function iniciarOpcao(ctx, n) {
 }
 
 async function passoEstoque(ctx, sessao, texto) {
+  const d = { ...(sessao.dados || {}) };
+
+  if (sessao.passo === 'substituto') {
+    if (await recusarFogoInvalido(ctx, texto)) return;
+    const sub = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
+    if (!sub || sub.status_pneu !== 'estoque') {
+      await reply(ctx, 'Fogo não encontrado no *estoque*. Envie outro nº ou *0* (o pneu original permanece montado).');
+      return;
+    }
+    try {
+      await ops.validarSubstitutoEstoque({
+        filialId: ctx.filialId,
+        pneuEstoqueId: sub.id,
+        veiculoId: d.veiculo_id,
+        posicao: d.posicao,
+      });
+      const r = await ops.trocarPorEstoque({
+        filialId: ctx.filialId,
+        pneuMontadoId: d.pneu_id,
+        pneuEstoqueId: sub.id,
+      });
+      await clear(ctx);
+      await reply(
+        ctx,
+        `✅ ${r.mensagem || `Fogo *${d.fogo}* foi para o estoque.`}\nFogo *${sub.numero_fogo}* montado em *${d.placa}* (${d.posicao}).\n\n` + textoMenu()
+      );
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\nEnvie outro nº de fogo ou *0* (original permanece montado).`);
+    }
+    return;
+  }
+
   if (await recusarFogoInvalido(ctx, texto)) return;
   const pneu = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
   if (!pneu) {
@@ -496,17 +1054,55 @@ async function passoEstoque(ctx, sessao, texto) {
     await reply(ctx, `Fogo *${pneu.numero_fogo}* está em *${pneu.status_pneu}* — não dá para enviar ao estoque assim.\n\n` + textoMenu());
     return;
   }
-  const r = await ops.desmontarPneu({ filialId: ctx.filialId, pneuId: pneu.id });
-  await pedirMontarEstoque(ctx, {
-    veiculoId: r.veiculo_id,
-    posicao: r.posicao,
-    placa: r.placa,
-    acaoLabel: `Fogo *${r.fogo}* foi para o estoque`,
+  await pedirSubstitutoObrigatorio(ctx, {
+    fluxo: 'estoque',
+    passo: 'substituto',
+    dados: {
+      pneu_id: pneu.id,
+      fogo: pneu.numero_fogo,
+      veiculo_id: pneu.veiculo_id,
+      posicao: pneu.posicao,
+      placa: pneu.placa,
+    },
+    titulo: `📦 Fogo *${pneu.numero_fogo}* será enviado ao estoque`,
+    placa: pneu.placa,
+    posicao: pneu.posicao,
   });
 }
 
 async function passoRecap(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
+
+  if (sessao.passo === 'substituto') {
+    if (await recusarFogoInvalido(ctx, texto)) return;
+    const sub = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
+    if (!sub || sub.status_pneu !== 'estoque') {
+      await reply(ctx, 'Fogo não encontrado no *estoque*. Envie outro nº ou *0* (o pneu original permanece montado).');
+      return;
+    }
+    try {
+      await ops.validarSubstitutoEstoque({
+        filialId: ctx.filialId,
+        pneuEstoqueId: sub.id,
+        veiculoId: d.veiculo_id,
+        posicao: d.posicao,
+      });
+      const r = await ops.registrarRecap({
+        filialId: ctx.filialId,
+        pneuId: d.pneu_id,
+        pneuEstoqueId: sub.id,
+      });
+      const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
+      const montou = r.substituto
+        ? `\nFogo *${r.substituto.fogo}* montado em *${r.substituto.placa}* (${r.substituto.posicao}).`
+        : '';
+      await clear(ctx);
+      await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${montou}${lembrete}\n\n` + textoMenu());
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\nEnvie outro nº de fogo ou *0* (original permanece montado).`);
+    }
+    return;
+  }
 
   if (sessao.passo === 'devolver') {
     const sn = simNao(texto);
@@ -557,20 +1153,27 @@ async function passoRecap(ctx, sessao, texto) {
     return;
   }
 
+  if (pneu.status_pneu === 'montado' && pneu.veiculo_id && pneu.posicao) {
+    await pedirSubstitutoObrigatorio(ctx, {
+      fluxo: 'recap',
+      passo: 'substituto',
+      dados: {
+        pneu_id: pneu.id,
+        fogo: pneu.numero_fogo,
+        veiculo_id: pneu.veiculo_id,
+        posicao: pneu.posicao,
+        placa: pneu.placa,
+      },
+      titulo: `♻️ Fogo *${pneu.numero_fogo}* será enviado à recap`,
+      placa: pneu.placa,
+      posicao: pneu.posicao,
+    });
+    return;
+  }
+
   try {
     const r = await ops.registrarRecap({ filialId: ctx.filialId, pneuId: pneu.id });
     const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
-
-    if (r.estava_montado && r.veiculo_id && r.posicao) {
-      await pedirMontarEstoque(ctx, {
-        veiculoId: r.veiculo_id,
-        posicao: r.posicao,
-        placa: r.placa,
-        acaoLabel: `Fogo *${r.fogo}* enviado à recap (${r.vida}ª vida)`,
-      });
-      return;
-    }
-
     await clear(ctx);
     await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${lembrete}\n\n` + textoMenu());
   } catch (err) {
@@ -580,6 +1183,36 @@ async function passoRecap(ctx, sessao, texto) {
 }
 
 async function passoDescarte(ctx, sessao, texto) {
+  if (sessao.passo === 'substituto') {
+    const d = { ...(sessao.dados || {}) };
+    if (await recusarFogoInvalido(ctx, texto)) return;
+    const sub = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
+    if (!sub || sub.status_pneu !== 'estoque') {
+      await reply(ctx, 'Fogo não encontrado no *estoque*. Envie outro nº ou *0* (o pneu original permanece montado).');
+      return;
+    }
+    try {
+      await ops.validarSubstitutoEstoque({
+        filialId: ctx.filialId,
+        pneuEstoqueId: sub.id,
+        veiculoId: d.veiculo_id,
+        posicao: d.posicao,
+      });
+      await setFluxo(ctx, 'descarte', 'confirma', {
+        ...d,
+        substituto_id: sub.id,
+        substituto_fogo: sub.numero_fogo,
+      });
+      await reply(
+        ctx,
+        `⚠️ Descartar fogo *${d.fogo}* e montar *${sub.numero_fogo}* em *${d.placa}* / *${d.posicao}*?\nMotivo: ${d.motivo || '—'}\n\n*1* Sim · *0* Não (original permanece montado)`
+      );
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\nEnvie outro nº de fogo ou *0* (original permanece montado).`);
+    }
+    return;
+  }
+
   if (sessao.passo === 'confirma') {
     const d = { ...(sessao.dados || {}) };
     const sn = simNao(texto);
@@ -592,28 +1225,38 @@ async function passoDescarte(ctx, sessao, texto) {
       await reply(ctx, 'Responda *1* ou *0*.');
       return;
     }
-    const r = await ops.registrarDescarte({
-      filialId: ctx.filialId,
-      pneuId: d.pneu_id,
-      motivo: d.motivo,
-    });
-    if (r.estava_montado && r.veiculo_id && r.posicao) {
-      await pedirMontarEstoque(ctx, {
-        veiculoId: r.veiculo_id,
-        posicao: r.posicao,
-        placa: r.placa,
-        acaoLabel: `Fogo *${r.fogo}* descartado`,
+    try {
+      const r = await ops.registrarDescarte({
+        filialId: ctx.filialId,
+        pneuId: d.pneu_id,
+        motivo: d.motivo,
+        pneuEstoqueId: d.substituto_id || null,
       });
-      return;
+      const montou = r.substituto
+        ? `\nFogo *${r.substituto.fogo}* montado em *${r.substituto.placa}* (${r.substituto.posicao}).`
+        : '';
+      await clear(ctx);
+      await reply(ctx, `✅ Fogo *${r.fogo}* no descarte.${montou}\n\n` + textoMenu());
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\nEnvie outro nº ou *0* (original permanece montado).`);
     }
-    await clear(ctx);
-    await reply(ctx, `✅ Fogo *${r.fogo}* no descarte.\n\n` + textoMenu());
     return;
   }
 
   if (sessao.passo === 'motivo') {
     const d = { ...(sessao.dados || {}) };
     d.motivo = /^(?:-|\.|pular|skip)$/i.test(String(texto).trim()) ? null : String(texto).trim();
+    if (d.estava_montado && d.veiculo_id && d.posicao) {
+      await pedirSubstitutoObrigatorio(ctx, {
+        fluxo: 'descarte',
+        passo: 'substituto',
+        dados: d,
+        titulo: `🗑️ Descarte de fogo *${d.fogo}*`,
+        placa: d.placa,
+        posicao: d.posicao,
+      });
+      return;
+    }
     await setFluxo(ctx, 'descarte', 'confirma', d);
     await reply(ctx, `⚠️ Descartar fogo *${d.fogo}*?\nMotivo: ${d.motivo || '—'}\n\n*1* Sim · *0* Não`);
     return;
@@ -628,8 +1271,352 @@ async function passoDescarte(ctx, sessao, texto) {
   await setFluxo(ctx, 'descarte', 'motivo', {
     pneu_id: pneu.id,
     fogo: pneu.numero_fogo,
+    estava_montado: pneu.status_pneu === 'montado' && !!pneu.veiculo_id,
+    veiculo_id: pneu.veiculo_id || null,
+    posicao: pneu.posicao || null,
+    placa: pneu.placa || null,
   });
   await reply(ctx, 'Motivo do descarte? (ou `-` para pular)');
+}
+
+function resumoOnde(p) {
+  if (p.status_pneu === 'montado') return `montado em *${p.placa || '?'}* (${p.posicao || '?'})`;
+  if (p.status_pneu === 'recapagem') return 'em recapagem';
+  if (p.status_pneu === 'descarte') return 'no descarte';
+  return 'no estoque';
+}
+
+function tituloAcaoNatural(tipo, pneu) {
+  if (tipo === 'descarte') return `🗑️ Descarte de *${pneu.numero_fogo}*`;
+  if (tipo === 'recap') return `♻️ Recap de *${pneu.numero_fogo}*`;
+  if (tipo === 'estoque') return `📦 *${pneu.numero_fogo}* → estoque`;
+  return `🔄 Troca de *${pneu.numero_fogo}*`;
+}
+
+function textoConfirmaNatural(tipo, d) {
+  const sub = d.substituto_fogo
+    ? ` e montar *${d.substituto_fogo}* em *${d.placa}* / *${d.posicao}*`
+    : '';
+  if (tipo === 'descarte') return `Descartar *${d.fogo}*${sub}?\n*1* Sim · *0* Não`;
+  if (tipo === 'recap') return `Enviar *${d.fogo}* à recap${sub}?\n*1* Sim · *0* Não`;
+  if (tipo === 'estoque' || tipo === 'troca') {
+    return `Enviar *${d.fogo}* ao estoque e montar *${d.substituto_fogo}* em *${d.placa}* / *${d.posicao}*?\n*1* Sim · *0* Não`;
+  }
+  return `Confirmar?\n*1* Sim · *0* Não`;
+}
+
+async function executarComandoNatural(ctx, d) {
+  const filialId = ctx.filialId;
+  if (d.tipo === 'recap') {
+    const r = await ops.registrarRecap({
+      filialId,
+      pneuId: d.pneu_id,
+      pneuEstoqueId: d.substituto_id || null,
+    });
+    const extra = r.substituto ? ` *${r.substituto.fogo}* em ${r.substituto.placa} (${r.substituto.posicao}).` : '';
+    return `✅ *${r.fogo}* em recapagem (${r.vida}ª vida).${extra}`;
+  }
+  if (d.tipo === 'descarte') {
+    const r = await ops.registrarDescarte({
+      filialId,
+      pneuId: d.pneu_id,
+      pneuEstoqueId: d.substituto_id || null,
+    });
+    const extra = r.substituto ? ` *${r.substituto.fogo}* em ${r.substituto.placa} (${r.substituto.posicao}).` : '';
+    return `✅ *${r.fogo}* no descarte.${extra}`;
+  }
+  if (d.tipo === 'estoque' || d.tipo === 'troca') {
+    const r = await ops.trocarPorEstoque({
+      filialId,
+      pneuMontadoId: d.pneu_id,
+      pneuEstoqueId: d.substituto_id,
+    });
+    return `✅ ${r.mensagem}`;
+  }
+  throw new Error('Ação inválida');
+}
+
+async function iniciarAcaoNatural(ctx, tipo, pneu, extra = {}) {
+  if (tipo === 'onde') {
+    await clear(ctx);
+    await reply(ctx, `🛞 *${pneu.numero_fogo}* — ${resumoOnde(pneu)}`);
+    return;
+  }
+  if (tipo === 'recap' && pneu.status_pneu === 'recapagem') {
+    await setFluxo(ctx, 'cmd_natural', 'devolver', {
+      tipo, pneu_id: pneu.id, fogo: pneu.numero_fogo,
+    });
+    await reply(ctx, `♻️ *${pneu.numero_fogo}* já está em recapagem.\n*1* devolver ao estoque · *0* cancelar`);
+    return;
+  }
+  if (tipo === 'estoque' && pneu.status_pneu === 'estoque') {
+    await clear(ctx);
+    await reply(ctx, `*${pneu.numero_fogo}* já está no estoque.`);
+    return;
+  }
+
+  const montado = pneu.status_pneu === 'montado' && pneu.veiculo_id && pneu.posicao;
+  if ((tipo === 'estoque' || tipo === 'troca' || tipo === 'recap' || tipo === 'descarte') && montado) {
+    if (extra.substituto) {
+      try {
+        await ops.validarSubstitutoEstoque({
+          filialId: ctx.filialId,
+          pneuEstoqueId: extra.substituto.id,
+          veiculoId: pneu.veiculo_id,
+          posicao: pneu.posicao,
+        });
+      } catch (err) {
+        await reply(ctx, `❌ ${err.message}\nEnvie outro fogo ou *0*.`);
+        await setFluxo(ctx, 'cmd_natural', 'substituto', {
+          tipo,
+          pneu_id: pneu.id,
+          fogo: pneu.numero_fogo,
+          veiculo_id: pneu.veiculo_id,
+          posicao: pneu.posicao,
+          placa: pneu.placa,
+        });
+        return;
+      }
+      const dados = {
+        tipo,
+        pneu_id: pneu.id,
+        fogo: pneu.numero_fogo,
+        veiculo_id: pneu.veiculo_id,
+        posicao: pneu.posicao,
+        placa: pneu.placa,
+        substituto_id: extra.substituto.id,
+        substituto_fogo: extra.substituto.numero_fogo,
+      };
+      await setFluxo(ctx, 'cmd_natural', 'confirma', dados);
+      await reply(ctx, textoConfirmaNatural(tipo, dados));
+      return;
+    }
+    await pedirSubstitutoObrigatorio(ctx, {
+      fluxo: 'cmd_natural',
+      passo: 'substituto',
+      dados: {
+        tipo,
+        pneu_id: pneu.id,
+        fogo: pneu.numero_fogo,
+        veiculo_id: pneu.veiculo_id,
+        posicao: pneu.posicao,
+        placa: pneu.placa,
+      },
+      titulo: tituloAcaoNatural(tipo, pneu),
+      placa: pneu.placa,
+      posicao: pneu.posicao,
+    });
+    return;
+  }
+
+  if (tipo === 'troca' || tipo === 'estoque') {
+    await clear(ctx);
+    await reply(ctx, `*${pneu.numero_fogo}* não está montado (${pneu.status_pneu}).`);
+    return;
+  }
+
+  const dados = { tipo, pneu_id: pneu.id, fogo: pneu.numero_fogo };
+  await setFluxo(ctx, 'cmd_natural', 'confirma', dados);
+  await reply(ctx, textoConfirmaNatural(tipo, dados));
+}
+
+async function pedirEscolhaPneus(ctx, dados, lista) {
+  await setFluxo(ctx, 'cmd_natural', 'escolher', {
+    ...dados,
+    candidatos: lista.slice(0, 8).map((p) => ({
+      id: p.id,
+      fogo: p.numero_fogo,
+      status_pneu: p.status_pneu,
+      placa: p.placa,
+      posicao: p.posicao,
+      veiculo_id: p.veiculo_id,
+    })),
+  });
+  const linhas = lista.slice(0, 8).map((p, i) => `*${i + 1}* ${p.numero_fogo} — ${resumoOnde(p)}`);
+  await reply(ctx, `Vários pneus. Qual?\n${linhas.join('\n')}\n\nNúmero ou fogo. *0* cancela.`);
+}
+
+async function resolverEIniciarComando(ctx, tipo, fogo, fogo2) {
+  const lista = await ops.buscarPneusPorFogo(ctx.filialId, fogo);
+  if (!lista.length) {
+    await reply(ctx, `Pneu *${fogo}* não encontrado nesta unidade.`);
+    return;
+  }
+  if (lista.length > 1) {
+    await pedirEscolhaPneus(ctx, { tipo, fogo2: fogo2 || null }, lista);
+    return;
+  }
+  let sub = null;
+  if (fogo2) {
+    const subs = await ops.buscarPneusPorFogo(ctx.filialId, fogo2);
+    if (!subs.length) {
+      await reply(ctx, `Substituto *${fogo2}* não encontrado nesta unidade.`);
+      return;
+    }
+    if (subs.length > 1) {
+      await pedirEscolhaPneus(ctx, {
+        tipo,
+        pneu_alvo: {
+          id: lista[0].id,
+          numero_fogo: lista[0].numero_fogo,
+          status_pneu: lista[0].status_pneu,
+          placa: lista[0].placa,
+          posicao: lista[0].posicao,
+          veiculo_id: lista[0].veiculo_id,
+        },
+        escolher: 'substituto',
+      }, subs);
+      return;
+    }
+    sub = subs[0];
+  }
+  await iniciarAcaoNatural(ctx, tipo, lista[0], { substituto: sub });
+}
+
+async function passoComandoNatural(ctx, sessao, texto) {
+  const d = { ...(sessao.dados || {}) };
+
+  if (sessao.passo === 'escolher') {
+    const cands = d.candidatos || [];
+    const n = soNumero(texto);
+    let escolhido = null;
+    if (n && Number(n) >= 1 && Number(n) <= cands.length) {
+      escolhido = cands[Number(n) - 1];
+    } else {
+      const hits = await ops.buscarPneusPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
+      if (hits.length === 1) escolhido = hits[0];
+      else if (hits.length > 1) {
+        await pedirEscolhaPneus(ctx, d, hits);
+        return;
+      }
+    }
+    if (!escolhido) {
+      await reply(ctx, 'Não achei. Envie o número da lista, o fogo ou *0*.');
+      return;
+    }
+    const fogoEsc = escolhido.fogo || escolhido.numero_fogo;
+    const full = (fogoEsc && await ops.buscarPneuPorFogo(ctx.filialId, fogoEsc)) || escolhido;
+    const row = {
+      ...full,
+      numero_fogo: full.numero_fogo || fogoEsc,
+    };
+    if (d.escolher === 'substituto' && d.pneu_alvo) {
+      await iniciarAcaoNatural(ctx, d.tipo, d.pneu_alvo, { substituto: row });
+      return;
+    }
+    let sub = null;
+    if (d.fogo2) {
+      const subs = await ops.buscarPneusPorFogo(ctx.filialId, d.fogo2);
+      if (subs.length === 1) sub = subs[0];
+      else if (subs.length > 1) {
+        await pedirEscolhaPneus(ctx, {
+          tipo: d.tipo,
+          pneu_alvo: row,
+          escolher: 'substituto',
+        }, subs);
+        return;
+      }
+    }
+    await iniciarAcaoNatural(ctx, d.tipo, row, { substituto: sub });
+    return;
+  }
+
+  if (sessao.passo === 'substituto') {
+    if (await recusarFogoInvalido(ctx, texto)) return;
+    const busca = String(texto).replace(/^fogo\s+/i, '').trim();
+    const hits = await ops.buscarPneusPorFogo(ctx.filialId, busca);
+    if (hits.length > 1) {
+      await pedirEscolhaPneus(ctx, { ...d, escolher: 'substituto', pneu_alvo: {
+        id: d.pneu_id,
+        numero_fogo: d.fogo,
+        status_pneu: 'montado',
+        placa: d.placa,
+        posicao: d.posicao,
+        veiculo_id: d.veiculo_id,
+      } }, hits);
+      return;
+    }
+    const sub = hits[0];
+    if (!sub || sub.status_pneu !== 'estoque') {
+      await reply(ctx, 'Fogo não encontrado no *estoque*. Outro nº ou *0*.');
+      return;
+    }
+    try {
+      await ops.validarSubstitutoEstoque({
+        filialId: ctx.filialId,
+        pneuEstoqueId: sub.id,
+        veiculoId: d.veiculo_id,
+        posicao: d.posicao,
+      });
+      const dados = { ...d, substituto_id: sub.id, substituto_fogo: sub.numero_fogo };
+      await setFluxo(ctx, 'cmd_natural', 'confirma', dados);
+      await reply(ctx, textoConfirmaNatural(d.tipo, dados));
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\nOutro nº ou *0*.`);
+    }
+    return;
+  }
+
+  if (sessao.passo === 'devolver') {
+    const sn = simNao(texto);
+    if (sn === false) {
+      await clear(ctx);
+      await reply(ctx, 'Ok.');
+      return;
+    }
+    if (sn !== true) {
+      await reply(ctx, '*1* devolver · *0* cancelar');
+      return;
+    }
+    try {
+      const r = await ops.devolverRecapAoEstoque({ filialId: ctx.filialId, pneuId: d.pneu_id });
+      await clear(ctx);
+      await reply(ctx, `✅ ${r.mensagem}`);
+    } catch (err) {
+      await clear(ctx);
+      await reply(ctx, `❌ ${err.message}`);
+    }
+    return;
+  }
+
+  if (sessao.passo === 'confirma') {
+    const sn = simNao(texto);
+    if (sn === false) {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado. Nada foi alterado.');
+      return;
+    }
+    if (sn !== true) {
+      const talvezFogo = String(texto).replace(/^fogo\s+/i, '').trim();
+      const hits = await ops.buscarPneusPorFogo(ctx.filialId, talvezFogo);
+      if (hits.length === 1 && d.veiculo_id) {
+        try {
+          await ops.validarSubstitutoEstoque({
+            filialId: ctx.filialId,
+            pneuEstoqueId: hits[0].id,
+            veiculoId: d.veiculo_id,
+            posicao: d.posicao,
+          });
+          const dados = { ...d, substituto_id: hits[0].id, substituto_fogo: hits[0].numero_fogo };
+          await setFluxo(ctx, 'cmd_natural', 'confirma', dados);
+          await reply(ctx, textoConfirmaNatural(d.tipo, dados));
+          return;
+        } catch (err) {
+          await reply(ctx, `❌ ${err.message}\n*1* confirma · *0* cancela`);
+          return;
+        }
+      }
+      await reply(ctx, '*1* confirma · *0* cancela');
+      return;
+    }
+    try {
+      const msg = await executarComandoNatural(ctx, d);
+      await clear(ctx);
+      await reply(ctx, msg);
+    } catch (err) {
+      await reply(ctx, `❌ ${err.message}\n*1* tenta de novo · *0* cancela`);
+    }
+  }
 }
 
 async function atalhoFogo(ctx, texto) {
@@ -663,6 +1650,14 @@ async function atalhoFogo(ctx, texto) {
 
 async function continuarSessao(ctx, sessao, texto) {
   try {
+    if (
+      sessao.fluxo !== 'cmd_natural'
+      && sessao.fluxo !== 'pre_cadastro'
+      && parseComandoNatural(texto)
+    ) {
+      await reply(ctx, 'Você está no meio de uma operação. Envie o que foi pedido, *0* para cancelar ou *menu*.');
+      return;
+    }
     switch (sessao.fluxo) {
       case 'medir':
         return await fluxoMedirPlaca(ctx, texto);
@@ -676,6 +1671,14 @@ async function continuarSessao(ctx, sessao, texto) {
         return await passoDescarte(ctx, sessao, texto);
       case 'montar_pos':
         return await passoMontarPos(ctx, sessao, texto);
+      case 'cmd_natural':
+        return await passoComandoNatural(ctx, sessao, texto);
+      case 'pre_cadastro':
+        return await passoPreCadastro(ctx, sessao, texto);
+      case 'medir_wa':
+        return await passoMedicaoWhatsApp(ctx, sessao, texto);
+      case 'relatorio':
+        return await passoTipoRelatorio(ctx, texto);
       default:
         await clear(ctx);
         await reply(ctx, textoMenu());
@@ -701,9 +1704,10 @@ export async function processarMensagemMenu(ctx) {
     return { handled: true };
   }
 
-  if (comandoDuplicado(filialId, texto)) {
+  if (comandoDuplicado(ctx)) {
     console.info('[whatsapp-menu] duplicada ignorada', {
       filial: filialId,
+      id: ctx.mensagemId || null,
       texto: texto.slice(0, 40),
     });
     return { handled: true, duplicado: true };
@@ -737,11 +1741,37 @@ export async function processarMensagemMenu(ctx) {
   }
 
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) {
-    await enviarRelatorio(ctx);
+    await pedirTipoRelatorio(ctx);
     return { handled: true };
   }
   if (/^(frota|placas|lista)\b/i.test(cmd)) {
     await enviarFrota(ctx);
+    return { handled: true };
+  }
+
+  const medicao = parseMedicaoWhatsApp(texto);
+  if (medicao) {
+    try {
+      await iniciarMedicaoWhatsApp(ctx, medicao);
+    } catch (err) {
+      console.error('[whatsapp-menu] medicao', err);
+      await reply(ctx, `❌ ${err.message}`);
+    }
+    return { handled: true };
+  }
+
+  const natural = parseComandoNatural(texto);
+  if (natural) {
+    try {
+      if (natural.tipo === 'cadastrar_veiculo' || natural.tipo === 'cadastrar_pneu') {
+        await iniciarPreCadastro(ctx, natural);
+      } else {
+        await resolverEIniciarComando(ctx, natural.tipo, natural.fogo, natural.fogo2);
+      }
+    } catch (err) {
+      console.error('[whatsapp-menu] comando natural', err);
+      await reply(ctx, `❌ ${err.message}`);
+    }
     return { handled: true };
   }
 

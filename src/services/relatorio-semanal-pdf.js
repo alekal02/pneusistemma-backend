@@ -4,14 +4,25 @@
 import PDFDocument from 'pdfkit';
 import { getDb } from '../database.js';
 import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
-import { diagnosticarPerfil, sugerirAcao } from '../diagnostico.js';
+import {
+  acumularAlerta,
+  avaliarPneuPainel,
+  contarAcaoLegada,
+  indicadoresUso,
+  novoAcumulador,
+  piorStatus,
+  statusPainel,
+  unidadeUsoVeiculo,
+} from './indicadores-frota.js';
 import {
   labelPosicao,
   labelTipoPneu,
   labelTratamentoDescarte,
   sqlOrderPosicao,
 } from '../pneus-layouts.js';
+import { resolverTipoEquipamento, EQUIPAMENTO_TIPOS } from '../equipamento-tipos.js';
 import { desenharRelatorioVisual } from './relatorio-frota-visual-pdf.js';
+import { carregarEvolucaoDesgaste } from './pneu-ciclo.js';
 import { SQL_LOGS_MEDICAO_SEMANA } from '../sql-ultima-medicao.js';
 
 function pad2(n) {
@@ -95,10 +106,119 @@ function mm(v) {
   return v == null ? '—' : `${Number(v)} mm`;
 }
 
+const FILTROS_RELATORIO = {
+  todos: { id: 'todos', label: 'Todos os equipamentos', codigos: null },
+  caminhao_compactador: {
+    id: 'caminhao_compactador',
+    label: 'Caminhao/Compactador',
+    codigos: ['compactador', 'truck_tracao', 'toco_mini', 'utilitario'],
+  },
+  trator: { id: 'trator', label: 'Trator', codigos: ['trator'] },
+  mini_carregadeira: { id: 'mini_carregadeira', label: 'Mini carregadeira', codigos: ['mini_carregadeira'] },
+  giro_zero: { id: 'giro_zero', label: 'Giro zero', codigos: ['giro_zero'] },
+};
+
+function normFiltro(s) {
+  return String(s || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+/** Grupo só para o atalho explícito. Código ou rótulo do catálogo não entra aqui. */
+function filtroGrupoCaminhao(bruto) {
+  return bruto === 'caminhao'
+    || bruto === 'caminhoes'
+    || bruto === 'compactadores'
+    || bruto === 'caminhao/compactador'
+    || bruto === 'caminhao compactador'
+    || bruto === 'caminhao_compactador';
+}
+
+function filtroEhTipoCatalogo(original, cat) {
+  const n = normFiltro(original);
+  return n === cat.codigo || n === normFiltro(cat.label);
+}
+
+export function resolverFiltroRelatorio(tipo) {
+  const original = String(tipo || '').trim();
+  const bruto = normFiltro(original);
+  if (!bruto || bruto === 'todos' || bruto === 'todas') return FILTROS_RELATORIO.todos;
+  if (FILTROS_RELATORIO[bruto]) return FILTROS_RELATORIO[bruto];
+
+  const cat = resolverTipoEquipamento(original);
+  if (cat && filtroEhTipoCatalogo(original, cat)) {
+    if (FILTROS_RELATORIO[cat.codigo]) return FILTROS_RELATORIO[cat.codigo];
+    return { id: cat.codigo, label: cat.label, codigos: [cat.codigo] };
+  }
+  if (filtroGrupoCaminhao(bruto)) return FILTROS_RELATORIO.caminhao_compactador;
+  if (cat) {
+    if (FILTROS_RELATORIO[cat.codigo]) return FILTROS_RELATORIO[cat.codigo];
+    return { id: cat.codigo, label: cat.label, codigos: [cat.codigo] };
+  }
+  return { id: original, label: original, codigos: null, texto: original };
+}
+
+function unidadeDoFiltro(filtro) {
+  if (!filtro?.codigos?.length) return 'misto';
+  const uns = new Set(
+    filtro.codigos.map((c) => EQUIPAMENTO_TIPOS.find((t) => t.codigo === c)?.unidade_uso || 'km'),
+  );
+  if (uns.size !== 1) return 'misto';
+  return [...uns][0] === 'horas' ? 'horas' : 'km';
+}
+
+export function veiculoNoFiltro(veiculo, filtro) {
+  if (filtro?.texto) {
+    const alvo = normFiltro(filtro.texto);
+    const tipo = normFiltro(veiculo?.tipo);
+    const codigo = normFiltro(veiculo?.tipo_codigo);
+    return tipo === alvo || codigo === alvo;
+  }
+  // Relatório geral: inclui tipo_codigo nulo (ex.: Truckado) sem regravar o cadastro.
+  if (!filtro?.codigos?.length) return true;
+  const codigo = veiculo.tipo_codigo || resolverTipoEquipamento(veiculo.tipo)?.codigo || '';
+  return filtro.codigos.includes(codigo);
+}
+
+export function veiculoPassaFiltroRelatorio(veiculo, tipo) {
+  return veiculoNoFiltro(veiculo, resolverFiltroRelatorio(tipo));
+}
+
+function resumirEstoqueParaPdf(estoque, limites) {
+  const criticoMm = Number(limites?.sulco_critico_mm) || 3;
+  const alertaMm = Number(limites?.sulco_alerta_mm) || 6;
+  const porPadrao = {};
+  let novos = 0;
+  let recapados = 0;
+  let criticos = 0;
+  let alerta = 0;
+  let semMedicao = 0;
+  for (const p of estoque) {
+    const pad = String(p.padrao || 'Outros').trim() || 'Outros';
+    porPadrao[pad] = (porPadrao[pad] || 0) + 1;
+    if (/^novo$/i.test(String(p.vida || ''))) novos += 1;
+    else recapados += 1;
+    if (p.sulco == null) semMedicao += 1;
+    else if (p.sulco <= criticoMm) criticos += 1;
+    else if (p.sulco <= alertaMm) alerta += 1;
+  }
+  return {
+    total: estoque.length,
+    novos,
+    recapados,
+    criticos,
+    alerta,
+    sem_medicao: semMedicao,
+    por_padrao: porPadrao,
+  };
+}
+
 /**
  * Monta o snapshot gerencial da filial para a semana corrente.
  */
-export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null } = {}) {
+export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null, tipo = null } = {}) {
   const db = getDb();
   const limites = getLimites();
   const periodo = periodoSemanaCorrente();
@@ -112,13 +232,15 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     throw err;
   }
 
-  const veiculos = await db.prepare(`
-    SELECT id, placa, apelido, tipo, marca, modelo, ano, layout_pneus,
+  const filtro = resolverFiltroRelatorio(tipo);
+  const tipoFiltro = filtro.id === 'todos' ? null : filtro.id;
+  const veiculos = (await db.prepare(`
+    SELECT id, placa, apelido, tipo, tipo_codigo, marca, modelo, ano, layout_pneus,
            km_atual, hr_atual, ativo
     FROM veiculos
     WHERE filial_id = ? AND ativo = 1
     ORDER BY placa
-  `).all(filialId);
+  `).all(filialId)).filter((v) => veiculoNoFiltro(v, filtro));
 
   const orderPos = sqlOrderPosicao('p.posicao');
 
@@ -134,6 +256,9 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
   let totMontados = 0;
   let custoMontado = 0;
   let veiculosAtrasados = 0;
+  const acc = novoAcumulador();
+  const accKm = novoAcumulador();
+  const accHoras = novoAcumulador();
 
   const prioridadesTroca = [];
   const prioridadesMonitorar = [];
@@ -144,8 +269,8 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     const pneus = await db.prepare(`
       SELECT
         p.*,
-        m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar,
-        m.data_medicao, m.pressao_psi, m.diagnostico as med_diagnostico,
+        m.sulco_externo, m.sulco_central, m.sulco_interno, m.sulco_auxiliar, m.sulco_mm,
+        m.inspecao_danos, m.data_medicao, m.pressao_psi, m.diagnostico as med_diagnostico,
         m.acao_sugerida as med_acao
       FROM pneus p
       LEFT JOIN medicoes m ON m.pneu_id = p.id
@@ -169,47 +294,29 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     }));
 
     let ultimaMedicaoVeiculo = null;
-    let piorStatus = 'ok';
-    const ordemStatus = { critico: 0, alerta: 1, sem_dado: 2, ok: 3 };
+    let pior = null;
     const pneusDetalhe = [];
+    const unidadeVeiculo = unidadeUsoVeiculo(v.tipo, v.layout_pneus);
 
     for (const p of pneus) {
       totMontados += 1;
       if (p.custo != null) custoMontado += Number(p.custo);
 
-      const pontos = {
-        sulco_externo: p.sulco_externo,
-        sulco_central: p.sulco_central,
-        sulco_interno: p.sulco_interno,
-        sulco_auxiliar: p.sulco_auxiliar,
-        externo: p.sulco_externo,
-        central: p.sulco_central,
-        interno: p.sulco_interno,
-        auxiliar: p.sulco_auxiliar,
-      };
-      const menor = menorSulco(pontos);
-      const status = classificarSulco(menor, limV);
-      const diag = diagnosticarPerfil(pontos, limV.diagnostico_tolerancia_mm, {
-        limites: limV,
-        posicao: p.posicao,
-      });
-      const acao = sugerirAcao(menor, limV, p.vida_recap || 0, {
-        pontos,
-        candidatos,
-        posicaoAtual: p.posicao,
-      });
-
-      if (status === 'ok') totOk += 1;
-      else if (status === 'alerta') totAlerta += 1;
-      else if (status === 'critico') totCritico += 1;
-      else totSemDado += 1;
-
-      if (acao.codigo === 'troca') totTroca += 1;
-      else if (acao.codigo === 'recap') totRecap += 1;
-      else if (acao.codigo === 'monitorar') totMonitorar += 1;
-      else if (acao.codigo === 'rodizio') totRodizio += 1;
-
-      if (ordemStatus[status] < ordemStatus[piorStatus]) piorStatus = status;
+      const aval = avaliarPneuPainel({
+        ...p,
+        tipo: v.tipo,
+        layout_pneus: v.layout_pneus,
+        km_atual: v.km_atual,
+        hr_atual: v.hr_atual,
+      }, { limites: limV, candidatos });
+      acumularAlerta(acc, aval);
+      acumularAlerta(unidadeVeiculo === 'horas' ? accHoras : accKm, aval);
+      const menor = aval.menor_sulco;
+      const status = statusPainel(aval);
+      const diag = aval.diagnostico || {};
+      const acao = aval.acao || {};
+      const leg = contarAcaoLegada(acao.codigo);
+      pior = piorStatus(pior, status);
       if (p.data_medicao && (!ultimaMedicaoVeiculo || p.data_medicao > ultimaMedicaoVeiculo)) {
         ultimaMedicaoVeiculo = p.data_medicao;
       }
@@ -243,11 +350,11 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       };
       pneusDetalhe.push(item);
 
-      if (acao.codigo === 'troca' || status === 'critico') {
+      if (leg === 'troca' || status === 'critico') {
         prioridadesTroca.push(item);
-      } else if (acao.codigo === 'monitorar' || acao.codigo === 'recap' || status === 'alerta') {
+      } else if (leg === 'monitorar' || leg === 'recap' || status === 'alerta') {
         prioridadesMonitorar.push(item);
-      } else if (acao.codigo === 'rodizio') {
+      } else if (leg === 'rodizio') {
         prioridadesRodizio.push(item);
       }
     }
@@ -268,11 +375,12 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       marca: v.marca,
       modelo: v.modelo,
       layout: v.layout_pneus,
-      km_atual: v.km_atual,
-      hr_atual: v.hr_atual,
+      km_atual: unidadeVeiculo === 'km' ? v.km_atual : null,
+      hr_atual: unidadeVeiculo === 'horas' ? v.hr_atual : null,
+      unidade: unidadeVeiculo,
       total_pneus: pneus.length,
-      status_sulco: pneus.length ? piorStatus : 'sem_dado',
-      status_label: pneus.length ? labelStatusSulco(piorStatus) : 'Sem pneus',
+      status_sulco: pneus.length ? (pior || 'sem_dado') : 'sem_dado',
+      status_label: pneus.length ? labelStatusSulco(pior || 'sem_dado') : 'Sem pneus',
       ultima_medicao: ultimaMedicaoVeiculo,
       dias_sem_medicao: diasSemMedicao,
       atrasado_semana: atrasado,
@@ -339,11 +447,13 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     };
   };
 
-  const estoque = estoqueRows.map(mapInventario);
+  const estoqueCompleto = estoqueRows.map(mapInventario);
   const emRecapagem = emRecapagemRows.map(mapInventario);
+  const estoqueResumo = resumirEstoqueParaPdf(estoqueCompleto, limites);
+  const estoque = estoqueCompleto;
 
   let custoEstoque = 0;
-  for (const p of [...estoque, ...emRecapagem]) {
+  for (const p of [...estoqueCompleto, ...emRecapagem]) {
     if (p.custo != null) custoEstoque += Number(p.custo);
   }
 
@@ -374,7 +484,9 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     desmontagem: 'Desmontagem',
     mudanca_posicao: 'Rodizio / reposicao',
     recap: 'Envio a recap',
+    enviar_recap: 'Envio a recap',
     retorno_recap: 'Retorno de recap',
+    entrada_estoque: 'Entrada no estoque',
     descarte: 'Descarte',
   };
 
@@ -426,8 +538,23 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     };
   });
 
+  const evolucaoDesgaste = await carregarEvolucaoDesgaste(db, filialId);
+
+  totOk = acc.ok;
+  totAlerta = acc.monitorar;
+  totCritico = acc.critico;
+  totSemDado = acc.sem_dado;
+  totTroca = acc.troca;
+  totRecap = acc.recap;
+  totMonitorar = acc.acao_monitorar;
+  totRodizio = acc.rodizio;
+  const indicadores_uso = indicadoresUso(veiculos, accKm, accHoras);
+
   return {
-    titulo: 'Relatório semanal gerencial — Controle de Pneus',
+    titulo: `Relatorio semanal - ${filtro.label}`,
+    filtro_tipo: tipoFiltro,
+    filtro_label: filtro.label,
+    unidade_relatorio: unidadeDoFiltro(filtro),
     gerado_em: new Date().toISOString(),
     gerado_por: geradoPor,
     periodo,
@@ -445,7 +572,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
     resumo: {
       veiculos: veiculos.length,
       pneus_montados: totMontados,
-      pneus_estoque: estoque.length,
+      pneus_estoque: estoqueCompleto.length,
       pneus_em_recapagem: emRecapagem.length,
       pneus_descarte: descarte.length,
       sulco_ok: totOk,
@@ -459,6 +586,7 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       medicoes_semana: medicoesSemana,
       movimentacoes_semana: historico.length,
       veiculos_atrasados_medicao: veiculosAtrasados,
+      indicadores_uso,
       custo_montado: Math.round(custoMontado * 100) / 100,
       custo_estoque: Math.round(custoEstoque * 100) / 100,
       descarte_aguardando: descartePendentes.length,
@@ -481,9 +609,19 @@ export async function montarDadosRelatorioSemanal(filialId, { geradoPor = null }
       .filter((p) => p.diagnostico && !/^ok$/i.test(p.diagnostico) && !/sem dados/i.test(p.diagnostico))
       .map((p) => ({ ...p, placa: v.placa, apelido: v.apelido }))),
     estoque,
+    estoque_resumo: {
+      total: estoqueResumo.total,
+      novos: estoqueResumo.novos,
+      recapados: estoqueResumo.recapados,
+      criticos: estoqueResumo.criticos,
+      alerta: estoqueResumo.alerta,
+      sem_medicao: estoqueResumo.sem_medicao,
+      por_padrao: estoqueResumo.por_padrao,
+    },
     em_recapagem: emRecapagem,
-    historico,
+    historico: historico.slice(0, 12),
     medicoes_semana_lista: medicoesLista,
+    evolucao_desgaste: evolucaoDesgaste,
     descarte: descarte.map((p) => ({
       fogo: p.numero_fogo || `ID ${p.id}`,
       marca: p.marca,
@@ -849,8 +987,7 @@ function drawVehicleBlock(doc, pager, v) {
     .text(
       fitWidth(doc, [
         v.tipo || null,
-        `KM ${formatNum(v.km_atual)}`,
-        v.hr_atual != null ? `HR ${formatNum(v.hr_atual)}` : null,
+        v.unidade === 'horas' ? `HR ${formatNum(v.hr_atual)}` : `KM ${formatNum(v.km_atual)}`,
         `${v.total_pneus} pneus`,
         `Medicao ${formatBr(v.ultima_medicao)}`,
       ].filter(Boolean).join('  |  '), w - 24, 6.5),

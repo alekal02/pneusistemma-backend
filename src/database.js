@@ -5,6 +5,8 @@ import bcrypt from 'bcryptjs';
 import { config } from './config.js';
 import { createPool, db, closePool } from './pg-db.js';
 import { corrigirEncodingBanco } from './fix-encoding.js';
+import { backfillTipoCodigoVeiculos, seedEquipamentoTipos } from './equipamento-tipos.js';
+import { limparCacheColunas } from './schema-colunas.js';
 
 let ready = false;
 
@@ -38,6 +40,21 @@ CREATE TABLE IF NOT EXISTS usuarios (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS equipamento_tipos (
+  codigo TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  familia TEXT NOT NULL,
+  unidade_uso TEXT NOT NULL DEFAULT 'km',
+  layout_padrao TEXT NOT NULL,
+  layouts_permitidos JSONB NOT NULL DEFAULT '[]'::jsonb,
+  perfil_medicao TEXT NOT NULL DEFAULT 'caminhao',
+  permite_recap INTEGER NOT NULL DEFAULT 1,
+  legado INTEGER NOT NULL DEFAULT 0,
+  regras JSONB DEFAULT '{}'::jsonb,
+  ativo INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS veiculos (
   id BIGSERIAL PRIMARY KEY,
   placa TEXT NOT NULL UNIQUE,
@@ -53,6 +70,8 @@ CREATE TABLE IF NOT EXISTS veiculos (
   filial_id BIGINT REFERENCES filiais(id) ON DELETE RESTRICT,
   layout_pneus TEXT DEFAULT 'truck_10',
   dia_medicao INTEGER,
+  cadastro_completo INTEGER DEFAULT 1,
+  tipo_codigo TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -79,13 +98,16 @@ CREATE TABLE IF NOT EXISTS pneus (
   custo DOUBLE PRECISION,
   nota_fiscal TEXT,
   data_alerta_monitorar TEXT,
+  cadastro_completo INTEGER DEFAULT 1,
+  recap_fornecedor TEXT,
+  recap_enviado_em TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (veiculo_id, posicao)
 );
 
 CREATE TABLE IF NOT EXISTS medicoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
   data_medicao TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
   km_veiculo INTEGER,
   hr_veiculo DOUBLE PRECISION,
@@ -100,13 +122,20 @@ CREATE TABLE IF NOT EXISTS medicoes (
   diagnostico TEXT,
   acao_sugerida TEXT,
   desgaste_mm_km DOUBLE PRECISION,
+  desgaste_mm_hora DOUBLE PRECISION,
+  sulco_mm DOUBLE PRECISION,
+  inspecao_danos TEXT,
   veiculo_placa TEXT,
+  veiculo_id BIGINT,
+  veiculo_apelido TEXT,
+  posicao TEXT,
+  ciclo INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS movimentacoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
   veiculo_id BIGINT REFERENCES veiculos(id) ON DELETE SET NULL,
   tipo TEXT NOT NULL,
   data_evento TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
@@ -119,6 +148,13 @@ CREATE TABLE IF NOT EXISTS movimentacoes (
   km_rodado INTEGER,
   hr_rodado DOUBLE PRECISION,
   veiculo_placa TEXT,
+  veiculo_apelido TEXT,
+  ciclo INTEGER,
+  usuario TEXT,
+  custo DOUBLE PRECISION,
+  sulco_antes DOUBLE PRECISION,
+  sulco_depois DOUBLE PRECISION,
+  motivo TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -130,7 +166,7 @@ CREATE TABLE IF NOT EXISTS configuracoes (
 
 CREATE TABLE IF NOT EXISTS notificacoes_whatsapp (
   id BIGSERIAL PRIMARY KEY,
-  tipo TEXT NOT NULL CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('alerta_critico', 'alerta_desgaste', 'alerta_posicao', 'link_veiculo', 'menu', 'relatorio_semanal')),
   destinatario_whatsapp TEXT NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
   medicao_id BIGINT REFERENCES medicoes(id),
@@ -145,6 +181,7 @@ CREATE TABLE IF NOT EXISTS tokens_acesso_rapido (
   id BIGSERIAL PRIMARY KEY,
   token TEXT UNIQUE NOT NULL,
   veiculo_id BIGINT REFERENCES veiculos(id),
+  pneu_id BIGINT REFERENCES pneus(id),
   filial_id BIGINT NOT NULL REFERENCES filiais(id),
   tipo TEXT NOT NULL DEFAULT 'medir',
   whatsapp_origem TEXT,
@@ -190,24 +227,73 @@ CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
 CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
 `;
 
+async function restringirExclusaoHistoricoPneu() {
+  const fks = await db.prepare(`
+    SELECT t.relname AS tabela, c.conname, c.confdeltype::text AS confdeltype
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_class f ON f.oid = c.confrelid
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+    WHERE f.relname = 'pneus'
+      AND c.contype = 'f'
+      AND a.attname = 'pneu_id'
+      AND t.relname IN ('medicoes', 'movimentacoes')
+  `).all();
+  for (const fk of fks) {
+    if (fk.confdeltype === 'c') {
+      await db.exec(`ALTER TABLE ${fk.tabela} DROP CONSTRAINT ${fk.conname}`);
+      await db.exec(
+        `ALTER TABLE ${fk.tabela} ADD CONSTRAINT ${fk.conname} FOREIGN KEY (pneu_id) REFERENCES pneus(id) ON DELETE RESTRICT`
+      );
+    }
+  }
+}
+
 async function ensureColumn(table, column, ddl) {
   // db.exec quebra o SQL por ';', então blocos DO $$ ... $$ não podem ser usados aqui.
   await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${ddl}`);
 }
 
+/** Tipos gravados pelo código e já presentes em produção (incluindo menu). */
+export const TIPOS_NOTIFICACAO_WHATSAPP = [
+  'alerta_critico',
+  'alerta_desgaste',
+  'alerta_posicao',
+  'link_veiculo',
+  'menu',
+  'relatorio_semanal',
+];
+
+export function clausulaTiposNotificacao(extras = []) {
+  const tipos = [...new Set(
+    [...TIPOS_NOTIFICACAO_WHATSAPP, ...extras]
+      .map((t) => String(t || '').trim())
+      .filter((t) => /^[a-z0-9_]+$/i.test(t)),
+  )].sort();
+  return tipos.map((t) => `'${t}'`).join(', ');
+}
+
+/**
+ * Recria o check numa transação. Inclui os tipos já gravados.
+ * Se a troca falhar, o rollback devolve a constraint anterior. Nenhuma linha é apagada.
+ */
 async function ensureNotificacoesTipoRelatorio() {
-  try {
-    await db.exec(`
-      ALTER TABLE notificacoes_whatsapp DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check
-    `);
+  const rows = await db.prepare(`SELECT DISTINCT tipo FROM notificacoes_whatsapp`).all();
+  const existentes = rows.map((r) => String(r.tipo || '').trim()).filter(Boolean);
+  const invalidos = existentes.filter((t) => !/^[a-z0-9_]+$/i.test(t));
+  if (invalidos.length) {
+    console.warn('[database] constraint tipo notificacoes não alterada: tipo fora do padrão seguro');
+    return;
+  }
+  const lista = clausulaTiposNotificacao(existentes);
+  await db.transaction(async () => {
+    await db.exec(`ALTER TABLE notificacoes_whatsapp DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check`);
     await db.exec(`
       ALTER TABLE notificacoes_whatsapp
         ADD CONSTRAINT notificacoes_whatsapp_tipo_check
-        CHECK (tipo IN ('link_veiculo', 'alerta_critico', 'alerta_desgaste', 'relatorio_semanal'))
+        CHECK (tipo IN (${lista}))
     `);
-  } catch (err) {
-    console.warn('[database] constraint tipo notificacoes:', err.message);
-  }
+  });
 }
 
 async function seedConfigs() {
@@ -349,12 +435,51 @@ export async function initDatabase() {
   // Colunas extras (idempotente)
   await ensureColumn('notificacoes_whatsapp', 'filial_id', 'BIGINT');
   await ensureNotificacoesTipoRelatorio();
+  await ensureColumn('pneus', 'recap_fornecedor', 'TEXT');
+  await ensureColumn('pneus', 'recap_enviado_em', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
   await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
   await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
+  await ensureColumn('veiculos', 'tipo_codigo', 'TEXT');
+  await ensureColumn('medicoes', 'sulco_mm', 'DOUBLE PRECISION');
+  await ensureColumn('medicoes', 'inspecao_danos', 'TEXT');
+  await ensureColumn('medicoes', 'desgaste_mm_hora', 'DOUBLE PRECISION');
+  await ensureColumn('medicoes', 'veiculo_id', 'BIGINT');
+  await ensureColumn('medicoes', 'veiculo_apelido', 'TEXT');
+  await ensureColumn('medicoes', 'posicao', 'TEXT');
+  await ensureColumn('medicoes', 'ciclo', 'INTEGER');
+  await ensureColumn('movimentacoes', 'veiculo_apelido', 'TEXT');
+  await ensureColumn('movimentacoes', 'ciclo', 'INTEGER');
+  await ensureColumn('movimentacoes', 'usuario', 'TEXT');
+  await ensureColumn('movimentacoes', 'custo', 'DOUBLE PRECISION');
+  await ensureColumn('movimentacoes', 'sulco_antes', 'DOUBLE PRECISION');
+  await ensureColumn('movimentacoes', 'sulco_depois', 'DOUBLE PRECISION');
+  await ensureColumn('movimentacoes', 'motivo', 'TEXT');
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_data
+      ON movimentacoes(pneu_id, data_evento, id);
+    CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_ciclo
+      ON medicoes(pneu_id, ciclo);
+    CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_ciclo
+      ON movimentacoes(pneu_id, ciclo);
+    CREATE INDEX IF NOT EXISTS idx_movimentacoes_veiculo_periodo
+      ON movimentacoes(veiculo_id, data_evento);
+    CREATE INDEX IF NOT EXISTS idx_medicoes_veiculo_periodo
+      ON medicoes(veiculo_id, data_medicao);
+  `);
+  await restringirExclusaoHistoricoPneu();
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_veiculos_tipo_codigo ON veiculos(tipo_codigo);
+  `);
+  await seedEquipamentoTipos(db);
+  await backfillTipoCodigoVeiculos(db);
   await ensureColumn('tokens_acesso_rapido', 'tipo', "TEXT NOT NULL DEFAULT 'medir'");
+  await ensureColumn('tokens_acesso_rapido', 'pneu_id', 'BIGINT');
+  await ensureColumn('veiculos', 'cadastro_completo', 'INTEGER DEFAULT 1');
+  await ensureColumn('pneus', 'cadastro_completo', 'INTEGER DEFAULT 1');
+  limparCacheColunas();
   try {
     await db.exec(`
       ALTER TABLE tokens_acesso_rapido ALTER COLUMN veiculo_id DROP NOT NULL
@@ -364,16 +489,6 @@ export async function initDatabase() {
     if (!/does not exist|already|não existe/i.test(err.message)) {
       console.warn('[migrate] tokens veiculo_id nullable:', err.message);
     }
-  }
-
-  // Permite tipos extras do menu WhatsApp (relatorio, menu, cadastros…)
-  try {
-    await db.exec(`
-      ALTER TABLE notificacoes_whatsapp
-        DROP CONSTRAINT IF EXISTS notificacoes_whatsapp_tipo_check
-    `);
-  } catch (err) {
-    console.warn('[migrate] notificacoes tipo check:', err.message);
   }
 
   await db.exec(`
