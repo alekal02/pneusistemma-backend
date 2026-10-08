@@ -6,19 +6,11 @@ import {
   requireGerenteOuAdmin,
   filiaisEscopoIds,
 } from '../auth.js';
-import { getLimites, limitesDoVeiculo } from '../limites.js';
+import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
+import { sugerirAcao } from '../diagnostico.js';
 import { toCsv } from '../csv-utils.js';
 import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
-import {
-  acumularAlerta,
-  avaliarPneuPainel,
-  filtroTipoAtivo,
-  indicadoresUso,
-  novoAcumulador,
-  unidadeUsoVeiculo,
-  veiculoCombinaTipo,
-} from '../services/indicadores-frota.js';
 
 const router = Router();
 
@@ -59,10 +51,7 @@ router.get('/unidade/semanal.pdf', requireGerenteOuAdmin, async (req, res, next)
     }
 
     const geradoPor = [req.user.papel, req.user.login].filter(Boolean).join(' · ');
-    const { buffer, filename } = await gerarRelatorioSemanalPdfBuffer(filialId, {
-      geradoPor,
-      tipo: req.query.tipo,
-    });
+    const { buffer, filename } = await gerarRelatorioSemanalPdfBuffer(filialId, { geradoPor });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -79,7 +68,7 @@ router.get('/unidade/semanal.pdf', requireGerenteOuAdmin, async (req, res, next)
  * GET /api/relatorios/diretoria
  * GET /api/relatorios/diretoria.csv
  */
-async function montarRelatorioDiretoria(tipoFiltro = null) {
+async function montarRelatorioDiretoria() {
   const db = getDb();
   const limites = getLimites();
 
@@ -98,35 +87,29 @@ async function montarRelatorioDiretoria(tipoFiltro = null) {
   let totMonitorar = 0;
   let totCustoEstoque = 0;
   let totCustoMontado = 0;
-  const accKmGeral = novoAcumulador();
-  const accHorasGeral = novoAcumulador();
-  const veiculosUsoGeral = [];
 
   for (const f of filiais) {
-    const veiculosRows = await db.prepare(`
-      SELECT id, tipo, layout_pneus, km_atual, hr_atual
-      FROM veiculos WHERE filial_id = ? AND ativo = 1
-    `).all(f.id);
-    const veiculosLista = veiculosRows.filter((v) => veiculoCombinaTipo(v.tipo, tipoFiltro));
-    const veiculos = veiculosLista.length;
-    veiculosUsoGeral.push(...veiculosLista);
+    const veiculos = Number((await db.prepare(`
+      SELECT COUNT(*) as n FROM veiculos WHERE filial_id = ? AND ativo = 1
+    `).get(f.id)).n);
 
     const pneus = await db.prepare(`
       SELECT
         p.id, p.vida_recap, p.status_pneu, p.custo, p.nota_fiscal, p.modelo, p.marca, p.numero_fogo,
-        p.posicao,
-        v.tipo, v.layout_pneus, v.km_atual, v.hr_atual,
-        um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
-        um.inspecao_danos
+        v.tipo, v.layout_pneus,
+        um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar
       FROM pneus p
       LEFT JOIN veiculos v ON v.id = p.veiculo_id
       ${SQL_LATERAL_ULTIMA_MEDICAO}
       WHERE p.ativo = 1 AND p.filial_id = ? AND p.status_pneu != 'descarte'
     `).all(f.id);
 
-    const acc = novoAcumulador();
-    const accKm = novoAcumulador();
-    const accHoras = novoAcumulador();
+    let ok = 0;
+    let alerta = 0;
+    let critico = 0;
+    let semDado = 0;
+    let troca = 0;
+    let monitorar = 0;
     let custoEstoque = 0;
     let custoMontado = 0;
     let montados = 0;
@@ -137,23 +120,21 @@ async function montarRelatorioDiretoria(tipoFiltro = null) {
         continue;
       }
       if (p.status_pneu !== 'montado') continue;
-      if (!veiculoCombinaTipo(p.tipo, tipoFiltro)) continue;
       montados += 1;
       if (p.custo != null) custoMontado += Number(p.custo);
 
-      const aval = avaliarPneuPainel(p, { limites: limitesDoVeiculo(p) });
-      const unidade = unidadeUsoVeiculo(p.tipo, p.layout_pneus);
-      acumularAlerta(acc, aval);
-      acumularAlerta(unidade === 'horas' ? accHoras : accKm, aval);
-      acumularAlerta(unidade === 'horas' ? accHorasGeral : accKmGeral, aval);
+      const menor = menorSulco(p);
+      const limV = limitesDoVeiculo(p);
+      const status = classificarSulco(menor, limV);
+      if (status === 'ok') ok += 1;
+      else if (status === 'alerta') alerta += 1;
+      else if (status === 'critico') critico += 1;
+      else semDado += 1;
+
+      const acao = sugerirAcao(menor, limV, p.vida_recap || 0);
+      if (acao.codigo === 'troca') troca += 1;
+      else if (acao.codigo === 'monitorar' || acao.codigo === 'rodizio') monitorar += 1;
     }
-    const ok = acc.ok;
-    const alerta = acc.monitorar;
-    const critico = acc.critico;
-    const semDado = acc.sem_dado;
-    const troca = acc.troca;
-    const monitorar = acc.acao_monitorar + acc.rodizio;
-    const usoFilial = indicadoresUso(veiculosLista, accKm, accHoras);
 
     totVeiculos += veiculos;
     totPneus += montados;
@@ -182,15 +163,8 @@ async function montarRelatorioDiretoria(tipoFiltro = null) {
       acao_monitorar: monitorar,
       custo_montado: Math.round(custoMontado * 100) / 100,
       custo_estoque: Math.round(custoEstoque * 100) / 100,
-      media_km: usoFilial.km.media,
-      veiculos_km: usoFilial.km.veiculos,
-      media_horas: usoFilial.horas.media,
-      veiculos_horas: usoFilial.horas.veiculos,
-      indicadores_uso: usoFilial,
     });
   }
-
-  const usoGeral = indicadoresUso(veiculosUsoGeral, accKmGeral, accHorasGeral);
 
   const usuarios = Number((await db.prepare(`
     SELECT COUNT(*) as n FROM usuarios WHERE ativo = 1
@@ -220,37 +194,32 @@ async function montarRelatorioDiretoria(tipoFiltro = null) {
       custo_estoque: Math.round(totCustoEstoque * 100) / 100,
       custo_total_pneus: Math.round((totCustoMontado + totCustoEstoque) * 100) / 100,
       usuarios_ativos: usuarios,
-      indicadores_uso: usoGeral,
     },
-    filtro_tipo: filtroTipoAtivo(tipoFiltro),
     por_filial: porFilial,
     leitura_diretoria: [
-      `${totCritico} pneu(s) em crítico / ação necessária`,
-      `${totOk} pneu(s) OK · ${totAlerta} pneu(s) em monitorar`,
-      `Média KM (só equipamentos em km): ${usoGeral.km.media ?? '—'} (${usoGeral.km.veiculos} veículo(s))`,
-      `Média horas (só equipamentos em horas): ${usoGeral.horas.media ?? '—'} (${usoGeral.horas.veiculos} veículo(s))`,
+      `${totCritico} pneu(s) em estado crítico (troca imediata)`,
+      `${totAlerta} pneu(s) em monitorar — programar substituição / recap em até ${limites.prazo_recap_dias} dias`,
       `Custo estimado em pneus montados: R$ ${totCustoMontado.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`,
       `Custo em estoque: R$ ${totCustoEstoque.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`,
     ],
   };
 }
 
-router.get('/diretoria', requireAdmin, async (req, res, next) => {
+router.get('/diretoria', requireAdmin, async (_req, res, next) => {
   try {
-    res.json(await montarRelatorioDiretoria(req.query.tipo));
+    res.json(await montarRelatorioDiretoria());
   } catch (err) {
     next(err);
   }
 });
 
-router.get('/diretoria.csv', requireAdmin, async (req, res, next) => {
+router.get('/diretoria.csv', requireAdmin, async (_req, res, next) => {
   try {
-    const rel = await montarRelatorioDiretoria(req.query.tipo);
+    const rel = await montarRelatorioDiretoria();
     const headers = [
       'filial', 'codigo', 'veiculos', 'pneus_montados',
       'sulco_ok', 'sulco_monitorar', 'sulco_critico', 'sem_medicao',
       'acao_trocar', 'acao_monitorar', 'custo_montado', 'custo_estoque',
-      'media_km', 'media_horas',
     ];
     const rows = rel.por_filial.map((r) => ({
       filial: r.filial,
@@ -265,8 +234,6 @@ router.get('/diretoria.csv', requireAdmin, async (req, res, next) => {
       acao_monitorar: r.acao_monitorar,
       custo_montado: r.custo_montado,
       custo_estoque: r.custo_estoque,
-      media_km: r.media_km ?? '',
-      media_horas: r.media_horas ?? '',
     }));
     const csv = toCsv(headers, rows);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');

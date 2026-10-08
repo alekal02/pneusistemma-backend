@@ -13,7 +13,7 @@ import {
   gerarTokenAcessoRapido,
   resumoStatusPneusVeiculoRapido,
 } from './acesso-rapido.js';
-import { gerarRelatorioSemanalPdfBuffer, resolverFiltroRelatorio } from './relatorio-semanal-pdf.js';
+import { gerarRelatorioSemanalPdfBuffer } from './relatorio-semanal-pdf.js';
 import {
   enviarERegistrar,
   enviarDocumentoERegistrar,
@@ -24,13 +24,13 @@ export function textoMenu() {
     '🛠️ *PneuSistemma — Menu*',
     '',
     '1️⃣ Medir pneu (placa → link)',
-    '2️⃣ Cadastrar equipamento (link)',
+    '2️⃣ Cadastrar caminhão (link)',
     '3️⃣ Cadastrar pneu estoque (link)',
     '4️⃣ Trocar / montar (placa → link)',
     '5️⃣ Enviar pneu → estoque (nº fogo)',
     '6️⃣ Enviar pneu → recap (nº fogo)',
     '7️⃣ Enviar pneu → descarte (nº fogo)',
-    '8️⃣ Relatório da frota (PDF por tipo)',
+    '8️⃣ Relatório da frota (PDF visual)',
     '9️⃣ Frota (placas + sulco)',
     '',
     '0️⃣ Cancelar / voltar ao menu',
@@ -210,7 +210,7 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filial
     filialId,
     whatsappOrigem: phone || destinoEnvio,
   });
-  const { criticos, alertas, semClassificacao, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
+  const { criticos, alertas, ultimaMedicao } = await resumoStatusPneusVeiculoRapido(veiculo.id);
 
   let mensagem = `🚛 *${veiculo.placa}* — ${veiculo.tipo}\n`;
   if (veiculo.apelido) mensagem += `🏷️ ${veiculo.apelido}\n`;
@@ -222,8 +222,7 @@ export async function montarMensagemMedicao(veiculo, phone, destinoEnvio, filial
   }
   if (criticos > 0) mensagem += `🚨 *${criticos} pneu(s) em estado CRÍTICO*\n`;
   if (alertas > 0) mensagem += `⚠️ *${alertas} pneu(s) em ALERTA*\n`;
-  if (semClassificacao > 0) mensagem += `ℹ️ *${semClassificacao} pneu(s) sem classificação de sulco*\n`;
-  if (criticos === 0 && alertas === 0 && !semClassificacao) mensagem += `✅ Todos os pneus estão OK\n`;
+  if (criticos === 0 && alertas === 0) mensagem += `✅ Todos os pneus estão OK\n`;
   mensagem += `\n👉 *Abrir medição de sulcos:*\n${link}\n\n`;
   mensagem += `Meça todas as posições e salve.\n`;
   mensagem += `_Link válido por 24 horas._\n\n_Digite *menu* para outras opções._`;
@@ -297,7 +296,7 @@ async function enviarLinkCadastro(ctx, tipo) {
   if (tipo === 'cadastrar_veiculo') {
     await reply(
       ctx,
-      `🚜 *Cadastrar equipamento*\n\nAbra o link, escolha o tipo e preencha os dados:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
+      `🚛 *Cadastrar caminhão*\n\nAbra o link e preencha placa, tipo e KM:\n👉 ${link}\n\n_Válido 24h. Digite *menu*._`
     );
   } else {
     await reply(
@@ -381,61 +380,15 @@ async function passoMontarPos(ctx, sessao, texto) {
   }
 }
 
-function textoTiposRelatorio() {
-  return [
-    '📊 *Relatório semanal*',
-    '',
-    'Qual tipo de equipamento?',
-    '1️⃣ Todos',
-    '2️⃣ Caminhão/Compactador',
-    '3️⃣ Trator',
-    '4️⃣ Mini carregadeira',
-    '5️⃣ Giro zero',
-    '',
-    '_0️⃣ cancela_',
-  ].join('\n');
-}
-
-function tipoRelatorioDaResposta(texto) {
-  const c = norm(texto);
-  const n = soNumero(texto);
-  const porNumero = { 1: 'todos', 2: 'caminhao_compactador', 3: 'trator', 4: 'mini_carregadeira', 5: 'giro_zero' };
-  if (n && porNumero[n]) return porNumero[n];
-  if (/^todos?$/.test(c)) return 'todos';
-  if (/caminh|compact/.test(c)) return 'caminhao_compactador';
-  if (/trator/.test(c)) return 'trator';
-  if (/mini|skid|carregadeira/.test(c)) return 'mini_carregadeira';
-  if (/giro/.test(c)) return 'giro_zero';
-  return null;
-}
-
-async function pedirTipoRelatorio(ctx) {
-  await setFluxo(ctx, 'relatorio', 'tipo', {});
-  await reply(ctx, textoTiposRelatorio(), 'relatorio_semanal');
-}
-
-async function passoTipoRelatorio(ctx, texto) {
-  const tipo = tipoRelatorioDaResposta(texto);
-  if (!tipo) {
-    await reply(ctx, `Não entendi o tipo.\n\n${textoTiposRelatorio()}`, 'relatorio_semanal');
-    return;
-  }
-  await clear(ctx);
-  await enviarRelatorio(ctx, tipo);
-}
-
-async function enviarRelatorio(ctx, tipo = 'todos') {
-  const filtro = resolverFiltroRelatorio(tipo);
-  await reply(ctx, `📊 Gerando o *relatório* de *${filtro.label}*… aguarde alguns segundos.`, 'relatorio_semanal');
+async function enviarRelatorio(ctx) {
+  await reply(ctx, '📊 Gerando o *relatório gerencial*… aguarde alguns segundos.', 'relatorio_semanal');
   try {
     const { buffer, filename, dados } = await gerarRelatorioSemanalPdfBuffer(ctx.filialId, {
       geradoPor: `WhatsApp · ${ctx.phone || ctx.destino}`,
-      tipo: filtro.id,
     });
     const resumo = dados?.resumo || {};
     const caption = [
-      `📊 *${dados.titulo || 'Relatório semanal'}* — ${dados.filial?.nome || 'Unidade'}`,
-      `Tipo: ${dados.filtro_label || filtro.label}`,
+      `📊 *Relatório visual da frota* — ${dados.filial?.nome || 'Unidade'}`,
       dados.periodo?.label ? `Semana: ${dados.periodo.label}` : null,
       `Montados: ${resumo.pneus_montados ?? 0} · Estoque: ${resumo.pneus_estoque ?? 0} · Em recap: ${resumo.pneus_em_recapagem ?? 0}`,
       `Críticos: ${resumo.sulco_critico ?? 0} · Monitorar: ${resumo.sulco_monitorar ?? 0} · Mov. na semana: ${resumo.movimentacoes_semana ?? 0}`,
@@ -450,7 +403,7 @@ async function enviarRelatorio(ctx, tipo = 'todos') {
       buffer,
       fileName: filename,
       mensagem: caption,
-      caption: `📊 ${dados.filtro_label || filtro.label} — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
+      caption: `📊 Frota visual — ${dados.filial?.nome || 'Unidade'} (${dados.periodo?.label || ''})`.trim(),
       filialId: ctx.filialId,
       fallbackDestinatario: ctx.phone,
     });
@@ -514,7 +467,8 @@ async function iniciarOpcao(ctx, n) {
       await reply(ctx, '🗑️ *Descarte*\n\nEnvie o *nº de fogo*.\n_0 = cancelar_');
       return;
     case '8':
-      await pedirTipoRelatorio(ctx);
+      await clear(ctx);
+      await enviarRelatorio(ctx);
       return;
     case '9':
       await clear(ctx);
@@ -722,8 +676,6 @@ async function continuarSessao(ctx, sessao, texto) {
         return await passoDescarte(ctx, sessao, texto);
       case 'montar_pos':
         return await passoMontarPos(ctx, sessao, texto);
-      case 'relatorio':
-        return await passoTipoRelatorio(ctx, texto);
       default:
         await clear(ctx);
         await reply(ctx, textoMenu());
@@ -785,7 +737,7 @@ export async function processarMensagemMenu(ctx) {
   }
 
   if (/^(relatorio|report|pdf)\b/i.test(cmd)) {
-    await pedirTipoRelatorio(ctx);
+    await enviarRelatorio(ctx);
     return { handled: true };
   }
   if (/^(frota|placas|lista)\b/i.test(cmd)) {

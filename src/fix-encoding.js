@@ -6,8 +6,6 @@
  * Também é chamado na inicialização do banco.
  */
 
-import { labelTipoEquipamento } from './equipamento-tipos.js';
-
 const REPL = '\uFFFD'; // caractere de substituição �
 
 const CORRECOES_EXATAS = [
@@ -100,8 +98,6 @@ export async function corrigirEncodingBanco(db) {
 /** Normaliza tipo de veículo na leitura/gravação da API */
 export function normalizarTipoVeiculo(tipo) {
   if (!tipo || typeof tipo !== 'string') return tipo;
-  const doCatalogo = labelTipoEquipamento(tipo);
-  if (doCatalogo) return doCatalogo;
   const t = tipo.trim();
   if (t === 'Truck / Tração' || t === 'Toco / Mini') return t;
   if (t === 'Compactador' || t === 'Utilitário / Varredeira' || t === 'Trator') return t;

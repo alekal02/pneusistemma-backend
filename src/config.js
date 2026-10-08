@@ -57,4 +57,10 @@ export const config = {
   rootDir,
 };
 
-export { TIPOS_VEICULO } from './equipamento-tipos.js';
+export const TIPOS_VEICULO = [
+  'Truck / Tração',
+  'Toco / Mini',
+  'Compactador',
+  'Utilitário / Varredeira',
+  'Trator',
+];

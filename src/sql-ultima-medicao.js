@@ -4,8 +4,8 @@
  */
 export const SQL_LATERAL_ULTIMA_MEDICAO = `
 LEFT JOIN LATERAL (
-  SELECT sulco_externo, sulco_central, sulco_interno, sulco_auxiliar, sulco_mm,
-         inspecao_danos, data_medicao, created_at, diagnostico, acao_sugerida, id, km_veiculo, hr_veiculo
+  SELECT sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
+         data_medicao, created_at, diagnostico, acao_sugerida, id, km_veiculo
   FROM medicoes
   WHERE pneu_id = p.id
   ORDER BY data_medicao DESC, id DESC
@@ -24,8 +24,7 @@ SELECT * FROM (
       COALESCE(m.sulco_externo, 999),
       COALESCE(m.sulco_central, 999),
       COALESCE(m.sulco_interno, 999),
-      COALESCE(m.sulco_auxiliar, 999),
-      COALESCE(m.sulco_mm, 999)
+      COALESCE(m.sulco_auxiliar, 999)
     ) as menor_raw,
     p.posicao,
     p.numero_fogo,

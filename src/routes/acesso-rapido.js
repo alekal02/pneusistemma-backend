@@ -7,11 +7,12 @@ import {
   marcarTokenUsado,
   montarDetalheVeiculo,
   listarEstoqueFilial,
+  contarEstoqueFilial,
 } from '../services/acesso-rapido.js';
 import * as ops from '../services/whatsapp-ops.js';
 import { getDb } from '../database.js';
 import { assertVeiculoDaFilial } from '../auth.js';
-import { metaTiposEquipamento, resolverTipoEquipamento } from '../equipamento-tipos.js';
+import { TIPOS_VEICULO } from '../config.js';
 import {
   TIPOS_PNEU,
   CONDICOES_PNEU,
@@ -51,12 +52,7 @@ router.get('/', async (req, res, next) => {
     };
 
     if (row.tipo === 'cadastrar_veiculo') {
-      const cat = metaTiposEquipamento();
-      return res.json({
-        ...payload,
-        tipos: cat.tipos,
-        tipos_equipamento: cat.tipos_equipamento,
-      });
+      return res.json({ ...payload, tipos: TIPOS_VEICULO });
     }
     if (row.tipo === 'cadastrar_pneu') {
       const proximo_fogo = await consultarProximoFogo(db, row.filial_id).catch(() => null);
@@ -71,7 +67,7 @@ router.get('/', async (req, res, next) => {
     if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
 
     if (row.tipo === 'troca') {
-      const estoque = await listarEstoqueFilial(row.filial_id, 50);
+      const estoque = await listarEstoqueFilial(row.filial_id, 4000, req.query.q);
       return res.json({
         ...payload,
         veiculo,
@@ -82,6 +78,7 @@ router.get('/', async (req, res, next) => {
 
     // medir (compatível com GET /veiculos/acesso-rapido)
     const proximo_fogo = await consultarProximoFogo(db, row.filial_id).catch(() => null);
+    const estoque = await listarEstoqueFilial(row.filial_id, 4000, req.query.q).catch(() => []);
     res.json({
       ...veiculo,
       tipo_token: 'medir',
@@ -89,6 +86,7 @@ router.get('/', async (req, res, next) => {
       token_acesso: row.token,
       token_valido: true,
       filial,
+      estoque,
       proximo_fogo,
     });
   } catch (err) {
@@ -110,7 +108,7 @@ router.get('/proximo-fogo', async (req, res, next) => {
 
 router.post('/veiculo', async (req, res, next) => {
   try {
-    const { token, placa, apelido, tipo, km_atual, hr_atual, layout_pneus } = req.body || {};
+    const { token, placa, apelido, tipo, km_atual, layout_pneus } = req.body || {};
     const row = await tokenOuErro(token, ['cadastrar_veiculo']);
     if (!placa?.trim()) return res.status(400).json({ erro: 'Placa é obrigatória' });
 
@@ -119,15 +117,12 @@ router.post('/veiculo', async (req, res, next) => {
       apelido: apelido || null,
       tipo: tipo || 'Truck / Tração',
       km_atual: km_atual ?? 0,
-      hr_atual: hr_atual ?? 0,
       layout_pneus: layout_pneus || null,
     });
     await marcarTokenUsado(row.id);
 
-    const cat = resolverTipoEquipamento(tipo);
-    const rotulo = cat?.familia === 'rodoviario' ? 'Caminhão' : 'Equipamento';
     res.status(201).json({
-      mensagem: `${rotulo} ${String(placa).trim().toUpperCase()} cadastrado`,
+      mensagem: `Caminhão ${String(placa).trim().toUpperCase()} cadastrado`,
       veiculo_id: created.id,
       total_posicoes: created.total_posicoes,
     });
@@ -182,12 +177,35 @@ router.get('/frota', async (req, res, next) => {
   try {
     const row = await tokenOuErro(req.query.token, ['medir', 'troca']);
     const frota = await ops.listarFrota(row.filial_id);
-    const estoque = await listarEstoqueFilial(row.filial_id, 80);
+    const estoque = await listarEstoqueFilial(row.filial_id, 4000, req.query.q);
+    const total_estoque = await contarEstoqueFilial(row.filial_id).catch(() => estoque.length);
     res.json({
       filial_id: row.filial_id,
       veiculo_token_id: row.veiculo_id,
       frota,
       estoque,
+      total_estoque,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
+/**
+ * Estoque da filial do token, com busca por fogo/marca (ex.: 5316 acha LD1-5316).
+ */
+router.get('/estoque', async (req, res, next) => {
+  try {
+    const row = await tokenOuErro(req.query.token, ['medir', 'troca']);
+    const q = String(req.query.q || '').trim();
+    const estoque = await listarEstoqueFilial(row.filial_id, 4000, q);
+    const total = await contarEstoqueFilial(row.filial_id).catch(() => estoque.length);
+    res.json({
+      filial_id: row.filial_id,
+      estoque,
+      total,
+      busca: q,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ erro: err.message });
@@ -233,7 +251,7 @@ router.get('/veiculo-posicoes', async (req, res, next) => {
 
 /**
  * Ações do pneu no link de medição (token medir/troca).
- * acao: estoque | recap | descarte | reposicionar | troca_estoque | mover_frota
+ * acao: estoque | recap | descarte | reposicionar | troca_estoque | montar_estoque | mover_frota
  */
 router.post('/pneu-acao', async (req, res, next) => {
   try {
@@ -247,7 +265,11 @@ router.post('/pneu-acao', async (req, res, next) => {
       motivo,
     } = req.body || {};
     const row = await tokenOuErro(token, ['medir', 'troca']);
-    const pneuId = parseInt(pneu_id, 10);
+    const acaoNorm = String(acao || '');
+    const pneuId = parseInt(
+      acaoNorm === 'montar_estoque' ? (montar_pneu_id || pneu_id) : pneu_id,
+      10,
+    );
     if (!pneuId) return res.status(400).json({ erro: 'Informe pneu_id' });
     if (!acao) return res.status(400).json({ erro: 'Informe a ação' });
 
@@ -264,7 +286,7 @@ router.post('/pneu-acao', async (req, res, next) => {
     }
 
     let result;
-    switch (String(acao)) {
+    switch (acaoNorm) {
       case 'estoque':
         result = await ops.desmontarPneu({ filialId, pneuId });
         result = { mensagem: `Fogo ${result.fogo} enviado ao estoque`, ...result };
@@ -302,6 +324,26 @@ router.post('/pneu-acao', async (req, res, next) => {
           pneuEstoqueId: parseInt(montar_pneu_id, 10),
         });
         break;
+      case 'montar_estoque': {
+        if (!posicao) return res.status(400).json({ erro: 'Informe a posição vazia' });
+        if (pneu.status_pneu !== 'estoque') {
+          return res.status(400).json({ erro: 'Esse pneu não está no estoque' });
+        }
+        if (!row.veiculo_id) {
+          return res.status(400).json({ erro: 'Token sem veículo vinculado' });
+        }
+        result = await ops.montarPneu({
+          filialId,
+          pneuId,
+          veiculoId: row.veiculo_id,
+          posicao: String(posicao).trim().toUpperCase(),
+        });
+        result = {
+          mensagem: `Fogo ${result.fogo || pneu.numero_fogo} montado em ${result.label || posicao}`,
+          ...result,
+        };
+        break;
+      }
       case 'mover_frota':
         if (!veiculo_destino_id || !posicao) {
           return res.status(400).json({ erro: 'Informe veículo e posição de destino' });
@@ -316,7 +358,7 @@ router.post('/pneu-acao', async (req, res, next) => {
         break;
       default:
         return res.status(400).json({
-          erro: 'acao inválida (estoque, recap, descarte, reposicionar, troca_estoque, mover_frota)',
+          erro: 'acao inválida (estoque, recap, descarte, reposicionar, troca_estoque, montar_estoque, mover_frota)',
         });
     }
 

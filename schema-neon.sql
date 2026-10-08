@@ -34,27 +34,11 @@ CREATE TABLE IF NOT EXISTS usuarios (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS equipamento_tipos (
-  codigo TEXT PRIMARY KEY,
-  label TEXT NOT NULL,
-  familia TEXT NOT NULL,
-  unidade_uso TEXT NOT NULL DEFAULT 'km',
-  layout_padrao TEXT NOT NULL,
-  layouts_permitidos JSONB NOT NULL DEFAULT '[]'::jsonb,
-  perfil_medicao TEXT NOT NULL DEFAULT 'caminhao',
-  permite_recap INTEGER NOT NULL DEFAULT 1,
-  legado INTEGER NOT NULL DEFAULT 0,
-  regras JSONB DEFAULT '{}'::jsonb,
-  ativo INTEGER NOT NULL DEFAULT 1,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS veiculos (
   id BIGSERIAL PRIMARY KEY,
   placa TEXT NOT NULL UNIQUE,
   apelido TEXT,
   tipo TEXT NOT NULL DEFAULT 'Outro',
-  tipo_codigo TEXT,
   marca TEXT,
   modelo TEXT,
   ano INTEGER,
@@ -94,15 +78,13 @@ CREATE TABLE IF NOT EXISTS pneus (
   tratamento_descarte TEXT,
   tratamento_descarte_obs TEXT,
   tratamento_descarte_em TEXT,
-  recap_fornecedor TEXT,
-  recap_enviado_em TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (veiculo_id, posicao)
 );
 
 CREATE TABLE IF NOT EXISTS medicoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
   data_medicao TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
   km_veiculo INTEGER,
   hr_veiculo DOUBLE PRECISION,
@@ -117,20 +99,13 @@ CREATE TABLE IF NOT EXISTS medicoes (
   diagnostico TEXT,
   acao_sugerida TEXT,
   desgaste_mm_km DOUBLE PRECISION,
-  desgaste_mm_hora DOUBLE PRECISION,
-  sulco_mm DOUBLE PRECISION,
-  inspecao_danos TEXT,
   veiculo_placa TEXT,
-  veiculo_id BIGINT,
-  veiculo_apelido TEXT,
-  posicao TEXT,
-  ciclo INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS movimentacoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
   veiculo_id BIGINT REFERENCES veiculos(id) ON DELETE SET NULL,
   tipo TEXT NOT NULL,
   data_evento TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
@@ -143,13 +118,6 @@ CREATE TABLE IF NOT EXISTS movimentacoes (
   km_rodado INTEGER,
   hr_rodado DOUBLE PRECISION,
   veiculo_placa TEXT,
-  veiculo_apelido TEXT,
-  ciclo INTEGER,
-  usuario TEXT,
-  custo DOUBLE PRECISION,
-  sulco_antes DOUBLE PRECISION,
-  sulco_depois DOUBLE PRECISION,
-  motivo TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -201,11 +169,6 @@ CREATE INDEX IF NOT EXISTS idx_medicoes_pneu ON medicoes(pneu_id);
 CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_recente ON medicoes(pneu_id, data_medicao DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_medicoes_data ON medicoes(data_medicao);
 CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu ON movimentacoes(pneu_id);
-CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_data ON movimentacoes(pneu_id, data_evento, id);
-CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_ciclo ON medicoes(pneu_id, ciclo);
-CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_ciclo ON movimentacoes(pneu_id, ciclo);
-CREATE INDEX IF NOT EXISTS idx_movimentacoes_veiculo_periodo ON movimentacoes(veiculo_id, data_evento);
-CREATE INDEX IF NOT EXISTS idx_medicoes_veiculo_periodo ON medicoes(veiculo_id, data_medicao);
 CREATE INDEX IF NOT EXISTS idx_veiculos_filial ON veiculos(filial_id);
 CREATE INDEX IF NOT EXISTS idx_usuarios_filial ON usuarios(filial_id);
 CREATE INDEX IF NOT EXISTS idx_notif_whatsapp_medicao ON notificacoes_whatsapp(medicao_id);
@@ -213,11 +176,6 @@ CREATE INDEX IF NOT EXISTS idx_tokens_acesso_token ON tokens_acesso_rapido(token
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alerta_dest_whatsapp
   ON alerta_destinatarios(whatsapp);
-
--- Bancos já criados: coluna nova sem reescrever veículos existentes.
--- O seed do catálogo e o backfill de tipo_codigo rodam no start da API.
-ALTER TABLE veiculos ADD COLUMN IF NOT EXISTS tipo_codigo TEXT;
-CREATE INDEX IF NOT EXISTS idx_veiculos_tipo_codigo ON veiculos(tipo_codigo);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pneus_fogo_filial
   ON pneus(filial_id, numero_fogo)

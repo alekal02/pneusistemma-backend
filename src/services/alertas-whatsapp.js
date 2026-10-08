@@ -4,7 +4,6 @@
  */
 import { config } from '../config.js';
 import { getDb } from '../database.js';
-import { textoMensagemAlerta } from '../medicao-perfil.js';
 import { enviarERegistrar, normalizarDestino } from './whatsapp.js';
 
 function adicionarDestino(map, { id = null, nome, whatsapp, origem, cargo = null }) {
@@ -127,13 +126,15 @@ export async function jaNotificouMedicao(medicaoId) {
  * Dispara WhatsApp aos canais da unidade / números selecionados se status for alerta/crítico.
  */
 export async function notificarGerentesAposMedicao({
-  alerta,
+  statusSulco,
+  diagnosticoLabel,
+  acaoLabel,
   menorSulco,
   veiculo,
   pneu,
   medicaoId,
 }) {
-  if (!alerta?.notificar) return { enviados: 0 };
+  if (!['alerta', 'critico'].includes(statusSulco)) return { enviados: 0 };
 
   // Desligado até segunda ordem (WHATSAPP_ALERTAS_ENABLED=true para religar)
   if (!config.whatsappAlertasEnabled) {
@@ -146,12 +147,17 @@ export async function notificarGerentesAposMedicao({
 
   const filialId = veiculo.filial_id;
   const destinatarios = await listarDestinatariosAlerta(filialId);
-  const tipo = alerta.severidade === 'critico' ? 'alerta_critico' : 'alerta_desgaste';
-  const mensagem = textoMensagemAlerta(alerta, {
-    veiculo,
-    pneu,
-    menorSulco: menorSulco ?? alerta.menor_sulco,
-  });
+  const tipo = statusSulco === 'critico' ? 'alerta_critico' : 'alerta_desgaste';
+  const statusLabel = statusSulco === 'critico' ? 'CRÍTICO — TROCAR' : 'MONITORAR — programar substituição';
+
+  let mensagem = `🚨 *ALERTA DE PNEU* 🚨\n\n`;
+  mensagem += `🚛 Veículo: *${veiculo.placa}*\n`;
+  mensagem += `📍 Posição: ${pneu.posicao || '-'}${pneu.numero_fogo ? ` — Fogo: ${pneu.numero_fogo}` : ''}\n`;
+  mensagem += `⚠️ Status: *${statusLabel}*\n`;
+  mensagem += `📏 Sulco mínimo: ${menorSulco ?? '-'} mm\n`;
+  mensagem += `🔧 Diagnóstico: ${diagnosticoLabel || '-'}\n`;
+  mensagem += `💡 Ação: ${acaoLabel || '-'}\n\n`;
+  mensagem += `Acesse o sistema para organizar compras e recapagens.`;
 
   if (!destinatarios.length) {
     console.warn('[alerta] Nenhum destinatário — cadastre WhatsApp/grupo na filial ou em Destinatários de alerta');

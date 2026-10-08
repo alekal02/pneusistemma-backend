@@ -193,22 +193,6 @@ export function getLimites() {
 
 export function getLimitesPorPerfil(perfil = 'caminhao') {
   const base = getLimites();
-  if (perfil === 'industrial') {
-    const ind = base.industrial || {};
-    const critico = Number(ind.sulco_critico_mm);
-    const alerta = Number(ind.sulco_alerta_mm);
-    return {
-      perfil: 'industrial',
-      sulco_critico_mm: Number.isFinite(critico) ? critico : null,
-      sulco_alerta_mm: Number.isFinite(alerta) ? alerta : null,
-      sulco_novo_mm: null,
-      sulco_recap_mm: null,
-      max_recaps: null,
-      prazo_recap_dias: null,
-      diagnostico_tolerancia_mm: null,
-      acoes: {},
-    };
-  }
   if (perfil !== 'trator') {
     return { ...base, perfil: 'caminhao' };
   }
@@ -342,18 +326,6 @@ export function atingiuCritico(mm, criticoMm) {
 }
 
 export function classificarSulco(mm, limites) {
-  if (limites?.perfil === 'industrial') {
-    if (mm === null || mm === undefined) return null;
-    if (limites.sulco_critico_mm == null || limites.sulco_critico_mm === '') return null;
-    const critico = Number(limites.sulco_critico_mm);
-    if (!Number.isFinite(critico)) return null;
-    const alerta = limites.sulco_alerta_mm == null || limites.sulco_alerta_mm === ''
-      ? NaN
-      : Number(limites.sulco_alerta_mm);
-    if (mm <= critico) return 'critico';
-    if (Number.isFinite(alerta) && mm <= alerta) return 'alerta';
-    return 'ok';
-  }
   if (mm === null || mm === undefined) return 'sem_dado';
   const lim = limites && Number.isFinite(Number(limites.sulco_critico_mm))
     ? limites
@@ -375,14 +347,12 @@ export function alertaSulcoMaxMm() {
 }
 
 export function menorSulco(row) {
-  if (!row) return null;
   const valores = [
     row.sulco_externo,
     row.sulco_central,
     row.sulco_interno,
     row.sulco_auxiliar,
-    row.sulco_mm,
-  ].filter((v) => v != null && v !== '' && Number.isFinite(Number(v))).map(Number);
+  ].filter((v) => v != null);
   return valores.length ? Math.min(...valores) : null;
 }
 

@@ -5,7 +5,6 @@ import bcrypt from 'bcryptjs';
 import { config } from './config.js';
 import { createPool, db, closePool } from './pg-db.js';
 import { corrigirEncodingBanco } from './fix-encoding.js';
-import { backfillTipoCodigoVeiculos, seedEquipamentoTipos } from './equipamento-tipos.js';
 
 let ready = false;
 
@@ -39,21 +38,6 @@ CREATE TABLE IF NOT EXISTS usuarios (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS equipamento_tipos (
-  codigo TEXT PRIMARY KEY,
-  label TEXT NOT NULL,
-  familia TEXT NOT NULL,
-  unidade_uso TEXT NOT NULL DEFAULT 'km',
-  layout_padrao TEXT NOT NULL,
-  layouts_permitidos JSONB NOT NULL DEFAULT '[]'::jsonb,
-  perfil_medicao TEXT NOT NULL DEFAULT 'caminhao',
-  permite_recap INTEGER NOT NULL DEFAULT 1,
-  legado INTEGER NOT NULL DEFAULT 0,
-  regras JSONB DEFAULT '{}'::jsonb,
-  ativo INTEGER NOT NULL DEFAULT 1,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS veiculos (
   id BIGSERIAL PRIMARY KEY,
   placa TEXT NOT NULL UNIQUE,
@@ -69,7 +53,6 @@ CREATE TABLE IF NOT EXISTS veiculos (
   filial_id BIGINT REFERENCES filiais(id) ON DELETE RESTRICT,
   layout_pneus TEXT DEFAULT 'truck_10',
   dia_medicao INTEGER,
-  tipo_codigo TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -96,15 +79,13 @@ CREATE TABLE IF NOT EXISTS pneus (
   custo DOUBLE PRECISION,
   nota_fiscal TEXT,
   data_alerta_monitorar TEXT,
-  recap_fornecedor TEXT,
-  recap_enviado_em TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (veiculo_id, posicao)
 );
 
 CREATE TABLE IF NOT EXISTS medicoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
   data_medicao TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
   km_veiculo INTEGER,
   hr_veiculo DOUBLE PRECISION,
@@ -119,20 +100,13 @@ CREATE TABLE IF NOT EXISTS medicoes (
   diagnostico TEXT,
   acao_sugerida TEXT,
   desgaste_mm_km DOUBLE PRECISION,
-  desgaste_mm_hora DOUBLE PRECISION,
-  sulco_mm DOUBLE PRECISION,
-  inspecao_danos TEXT,
   veiculo_placa TEXT,
-  veiculo_id BIGINT,
-  veiculo_apelido TEXT,
-  posicao TEXT,
-  ciclo INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS movimentacoes (
   id BIGSERIAL PRIMARY KEY,
-  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE RESTRICT,
+  pneu_id BIGINT NOT NULL REFERENCES pneus(id) ON DELETE CASCADE,
   veiculo_id BIGINT REFERENCES veiculos(id) ON DELETE SET NULL,
   tipo TEXT NOT NULL,
   data_evento TEXT NOT NULL DEFAULT (CURRENT_DATE::TEXT),
@@ -145,13 +119,6 @@ CREATE TABLE IF NOT EXISTS movimentacoes (
   km_rodado INTEGER,
   hr_rodado DOUBLE PRECISION,
   veiculo_placa TEXT,
-  veiculo_apelido TEXT,
-  ciclo INTEGER,
-  usuario TEXT,
-  custo DOUBLE PRECISION,
-  sulco_antes DOUBLE PRECISION,
-  sulco_depois DOUBLE PRECISION,
-  motivo TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -222,28 +189,6 @@ CREATE TABLE IF NOT EXISTS whatsapp_sessoes (
 );
 CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
 `;
-
-async function restringirExclusaoHistoricoPneu() {
-  const fks = await db.prepare(`
-    SELECT t.relname AS tabela, c.conname, c.confdeltype::text AS confdeltype
-    FROM pg_constraint c
-    JOIN pg_class t ON t.oid = c.conrelid
-    JOIN pg_class f ON f.oid = c.confrelid
-    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
-    WHERE f.relname = 'pneus'
-      AND c.contype = 'f'
-      AND a.attname = 'pneu_id'
-      AND t.relname IN ('medicoes', 'movimentacoes')
-  `).all();
-  for (const fk of fks) {
-    if (fk.confdeltype === 'c') {
-      await db.exec(`ALTER TABLE ${fk.tabela} DROP CONSTRAINT ${fk.conname}`);
-      await db.exec(
-        `ALTER TABLE ${fk.tabela} ADD CONSTRAINT ${fk.conname} FOREIGN KEY (pneu_id) REFERENCES pneus(id) ON DELETE RESTRICT`
-      );
-    }
-  }
-}
 
 async function ensureColumn(table, column, ddl) {
   // db.exec quebra o SQL por ';', então blocos DO $$ ... $$ não podem ser usados aqui.
@@ -404,46 +349,11 @@ export async function initDatabase() {
   // Colunas extras (idempotente)
   await ensureColumn('notificacoes_whatsapp', 'filial_id', 'BIGINT');
   await ensureNotificacoesTipoRelatorio();
-  await ensureColumn('pneus', 'recap_fornecedor', 'TEXT');
-  await ensureColumn('pneus', 'recap_enviado_em', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_obs', 'TEXT');
   await ensureColumn('pneus', 'tratamento_descarte_em', 'TEXT');
   await ensureColumn('filiais', 'dia_medicao', 'INTEGER');
   await ensureColumn('veiculos', 'dia_medicao', 'INTEGER');
-  await ensureColumn('veiculos', 'tipo_codigo', 'TEXT');
-  await ensureColumn('medicoes', 'sulco_mm', 'DOUBLE PRECISION');
-  await ensureColumn('medicoes', 'inspecao_danos', 'TEXT');
-  await ensureColumn('medicoes', 'desgaste_mm_hora', 'DOUBLE PRECISION');
-  await ensureColumn('medicoes', 'veiculo_id', 'BIGINT');
-  await ensureColumn('medicoes', 'veiculo_apelido', 'TEXT');
-  await ensureColumn('medicoes', 'posicao', 'TEXT');
-  await ensureColumn('medicoes', 'ciclo', 'INTEGER');
-  await ensureColumn('movimentacoes', 'veiculo_apelido', 'TEXT');
-  await ensureColumn('movimentacoes', 'ciclo', 'INTEGER');
-  await ensureColumn('movimentacoes', 'usuario', 'TEXT');
-  await ensureColumn('movimentacoes', 'custo', 'DOUBLE PRECISION');
-  await ensureColumn('movimentacoes', 'sulco_antes', 'DOUBLE PRECISION');
-  await ensureColumn('movimentacoes', 'sulco_depois', 'DOUBLE PRECISION');
-  await ensureColumn('movimentacoes', 'motivo', 'TEXT');
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_data
-      ON movimentacoes(pneu_id, data_evento, id);
-    CREATE INDEX IF NOT EXISTS idx_medicoes_pneu_ciclo
-      ON medicoes(pneu_id, ciclo);
-    CREATE INDEX IF NOT EXISTS idx_movimentacoes_pneu_ciclo
-      ON movimentacoes(pneu_id, ciclo);
-    CREATE INDEX IF NOT EXISTS idx_movimentacoes_veiculo_periodo
-      ON movimentacoes(veiculo_id, data_evento);
-    CREATE INDEX IF NOT EXISTS idx_medicoes_veiculo_periodo
-      ON medicoes(veiculo_id, data_medicao);
-  `);
-  await restringirExclusaoHistoricoPneu();
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_veiculos_tipo_codigo ON veiculos(tipo_codigo);
-  `);
-  await seedEquipamentoTipos(db);
-  await backfillTipoCodigoVeiculos(db);
   await ensureColumn('tokens_acesso_rapido', 'tipo', "TEXT NOT NULL DEFAULT 'medir'");
   try {
     await db.exec(`

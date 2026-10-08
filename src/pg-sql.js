@@ -58,7 +58,7 @@ function convertPlaceholders(sql) {
  * Garante RETURNING id em INSERTs sem RETURNING (para lastInsertRowid)
  */
 /** Tabelas cuja PK não é `id` — RETURNING id quebraria o INSERT */
-const TABELAS_SEM_ID = /\bINTO\s+(configuracoes|equipamento_tipos)\b/i;
+const TABELAS_SEM_ID = /\bINTO\s+configuracoes\b/i;
 
 export function ensureReturningId(sql) {
   const trimmed = sql.trim().replace(/;+\s*$/, '');

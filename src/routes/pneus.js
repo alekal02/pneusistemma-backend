@@ -1,10 +1,13 @@
 import { Router } from 'express';
-import { getDb } from '../database.js';
+import { getDb, classificarSulco } from '../database.js';
 import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
-import { getLimites, limitesDoVeiculo, adicionarDias } from '../limites.js';
+import { getLimites, limitesDoVeiculo, menorSulco, adicionarDias } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
-import { percentualVida } from '../diagnostico.js';
-import { avaliarAlertaPerfil } from '../medicao-perfil.js';
+import {
+  diagnosticarPerfil,
+  sugerirAcao,
+  percentualVida,
+} from '../diagnostico.js';
 import {
   validarMontagem,
   papelPosicao,
@@ -35,8 +38,6 @@ import {
   placaDaLinha,
   encaixarPosicaoNoLayout,
 } from '../csv-utils.js';
-import { registrarMovimentacao, atualizarKmHrVeiculo, travarPneu } from '../services/pneu-movimentacao.js';
-import { calcularCiclos } from '../services/pneu-ciclo.js';
 import {
   trocarPorEstoque,
   moverOuTrocarNaFrota,
@@ -57,22 +58,89 @@ const TIPOS_MOVIMENTACAO = ['montagem', 'retirada', 'mudanca_posicao'];
 router.use(requireAuth);
 router.use(requireFilial);
 
-function usuarioDe(req) {
-  return req.user?.login || null;
+async function ultimaMovimentacaoVeiculo(db, pneuId, veiculoId) {
+  const row = await db.prepare(`
+    SELECT * FROM movimentacoes
+    WHERE pneu_id = ? AND veiculo_id = ?
+      AND tipo IN ('montagem', 'retirada', 'mudanca_posicao', 'desmontagem')
+    ORDER BY data_evento DESC, id DESC
+    LIMIT 1
+  `).get(pneuId, veiculoId);
+  return row || null;
 }
 
-async function ultimoSulcoPneu(db, pneuId) {
-  const row = await db.prepare(`
-    SELECT sulco_externo, sulco_central, sulco_interno, sulco_auxiliar, sulco_mm
-    FROM medicoes WHERE pneu_id = ?
-    ORDER BY data_medicao DESC, id DESC LIMIT 1
-  `).get(pneuId);
-  if (!row) return null;
-  const vals = [row.sulco_externo, row.sulco_central, row.sulco_interno, row.sulco_auxiliar, row.sulco_mm]
-    .map((v) => (v == null || v === '' ? NaN : Number(v)))
-    .filter((n) => Number.isFinite(n));
-  if (!vals.length) return null;
-  return Math.min(...vals);
+function deltaKmHr(anterior, kmAtual, hrAtual) {
+  let kmRodado = null;
+  let hrRodado = null;
+  if (anterior?.km_veiculo != null && kmAtual != null) {
+    const d = Number(kmAtual) - Number(anterior.km_veiculo);
+    if (d >= 0) kmRodado = d;
+  }
+  if (anterior?.hr_veiculo != null && hrAtual != null) {
+    const d = Number(hrAtual) - Number(anterior.hr_veiculo);
+    if (d >= 0) hrRodado = Math.round(d * 10) / 10;
+  }
+  return { kmRodado, hrRodado };
+}
+
+async function registrarMovimentacao(db, {
+  pneuId,
+  veiculoId,
+  tipo,
+  data,
+  km,
+  hr,
+  posicao,
+  posicaoAnterior = null,
+  detalhes = null,
+  sulcoMm = null,
+  placa = null,
+}) {
+  const anterior = veiculoId
+    ? await ultimaMovimentacaoVeiculo(db, pneuId, veiculoId)
+    : null;
+  const { kmRodado, hrRodado } = deltaKmHr(anterior, km, hr);
+  let placaFinal = placa || null;
+  if (!placaFinal && veiculoId) {
+    const v = await db.prepare('SELECT placa FROM veiculos WHERE id = ?').get(veiculoId);
+    placaFinal = v?.placa || null;
+  }
+
+  return db.prepare(`
+    INSERT INTO movimentacoes (
+      pneu_id, veiculo_id, tipo, data_evento, km_veiculo, hr_veiculo,
+      posicao, posicao_anterior, sulco_mm, detalhes, km_rodado, hr_rodado, veiculo_placa
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    pneuId,
+    veiculoId,
+    tipo,
+    data,
+    km,
+    hr,
+    posicao,
+    posicaoAnterior,
+    sulcoMm,
+    detalhes,
+    kmRodado,
+    hrRodado,
+    placaFinal
+  );
+}
+
+async function atualizarKmHrVeiculo(db, veiculoId, filialId, km, hr) {
+  if (km != null) {
+    await db.prepare(`
+      UPDATE veiculos SET km_atual = MAX(COALESCE(km_atual, 0), ?), updated_at = NOW()
+      WHERE id = ? AND filial_id = ?
+    `).run(km, veiculoId, filialId);
+  }
+  if (hr != null) {
+    await db.prepare(`
+      UPDATE veiculos SET hr_atual = MAX(COALESCE(hr_atual, 0), ?), updated_at = NOW()
+      WHERE id = ? AND filial_id = ?
+    `).run(hr, veiculoId, filialId);
+  }
 }
 
 function enriquecerPrazoRecap(pneu, statusSulco, limites) {
@@ -114,23 +182,19 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
     ? limitesDoVeiculo({ tipo: pneu.veiculo_tipo || pneu.tipo, layout_pneus: pneu.layout_pneus })
     : getLimites();
   const row = ultimaMedicao || {};
+  const menor = menorSulco(row);
   const papel = pneu.posicao ? papelPosicao(pneu.posicao) : null;
-  const aval = avaliarAlertaPerfil(row, {
-    tipo: pneu.veiculo_tipo || pneu.tipo || null,
-    layout: pneu.layout_pneus || null,
-    limites,
-    vidaRecap: pneu.vida_recap || 0,
-    candidatos: candidatos.filter((c) => Number(c.id) !== Number(pneu.id)),
-    posicao: pneu.posicao || null,
+  const diagnostico = diagnosticarPerfil(row, limites.diagnostico_tolerancia_mm, {
     papel,
-    hr_veiculo: row.hr_veiculo,
-    km_veiculo: row.km_veiculo,
+    posicao: pneu.posicao || null,
   });
-  const menor = aval.menor_sulco;
-  const diagnostico = aval.diagnostico;
-  const acao = aval.acao;
+  const acao = sugerirAcao(menor, limites, pneu.vida_recap || 0, {
+    pontos: ultimaMedicao ? row : null,
+    candidatos: candidatos.filter((c) => Number(c.id) !== Number(pneu.id)),
+    posicaoAtual: pneu.posicao || null,
+  });
   const sulcoRef = pneu.sulco_inicial_mm ?? limites.sulco_novo_mm;
-  const statusSulco = aval.status_sulco;
+  const statusSulco = classificarSulco(menor, limites);
   const prazo = enriquecerPrazoRecap(pneu, statusSulco, limites);
 
   return {
@@ -413,14 +477,10 @@ router.post('/import', async (req, res, next) => {
                   posicao,
                   detalhes: `Importação — montou em ${veiculo.placa} · ${labelPosicao(posicao)}`,
                   placa: veiculo.placa,
-                  apelido: veiculo.apelido || null,
-                  ciclo: Number.isFinite(vida) ? vida : 0,
-                  usuario: usuarioDe(req),
-                  custo: custoOk,
                 });
                 return criado;
               }
-              const criadoEstoque = await insertEstoque.run(
+              return insertEstoque.run(
                 filialId,
                 marca,
                 modelo,
@@ -435,18 +495,6 @@ router.post('/import', async (req, res, next) => {
                 custoOk,
                 nota
               );
-              await registrarMovimentacao(db, {
-                pneuId: criadoEstoque.lastInsertRowid,
-                veiculoId: null,
-                tipo: 'entrada_estoque',
-                data: hoje,
-                ciclo: Number.isFinite(vida) ? vida : 0,
-                usuario: usuarioDe(req),
-                custo: custoOk,
-                sulcoMm: sulcoOk,
-                detalhes: 'Importação — entrada no estoque',
-              });
-              return criadoEstoque;
             });
             if (veiculo) ocupacao.add(`${veiculo.id}:${posicao}`);
             inseridos.push({
@@ -634,17 +682,6 @@ router.post('/', async (req, res, next) => {
     ));
 
     const pneu = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(result.lastInsertRowid);
-    await registrarMovimentacao(db, {
-      pneuId: pneu.id,
-      veiculoId: null,
-      tipo: 'entrada_estoque',
-      data: new Date().toISOString().split('T')[0],
-      ciclo: pneu.vida_recap || 0,
-      usuario: usuarioDe(req),
-      custo: pneu.custo,
-      sulcoMm: pneu.sulco_inicial_mm,
-      detalhes: 'Entrada no estoque',
-    });
     res.status(201).json({
       mensagem: 'Pneu cadastrado no estoque',
       pneu: enriquecerPneu(pneu),
@@ -668,59 +705,39 @@ router.get('/:id', async (req, res, next) => {
       ? limitesDoVeiculo({ tipo: pneu.veiculo_tipo, layout_pneus: pneu.layout_pneus })
       : getLimites();
     const medicoes = await db.prepare(`
-    SELECT m.*
+    SELECT m.*,
+      COALESCE(m.veiculo_placa, v.placa) as veiculo_placa
     FROM medicoes m
+    LEFT JOIN pneus p ON p.id = m.pneu_id
+    LEFT JOIN veiculos v ON v.id = p.veiculo_id
     WHERE m.pneu_id = ?
     ORDER BY m.data_medicao DESC, m.id DESC
     LIMIT 50
   `).all(req.params.id);
 
     const medicoesComStatus = medicoes.map((m) => {
-      const aval = avaliarAlertaPerfil(m, {
-        tipo: pneu.veiculo_tipo || null,
-        layout: pneu.layout_pneus || null,
-        limites,
-        vidaRecap: pneu.vida_recap || 0,
-        posicao: pneu.posicao || null,
+      const menor = menorSulco(m);
+      const diag = diagnosticarPerfil(m, limites.diagnostico_tolerancia_mm, {
         papel: pneu.posicao ? papelPosicao(pneu.posicao) : null,
-        hr_veiculo: m.hr_veiculo,
-        km_veiculo: m.km_veiculo,
       });
       return {
         ...m,
-        menor_sulco: aval.menor_sulco,
-        status_sulco: aval.status_sulco,
-        diagnostico_label: aval.diagnostico.label,
-        acao_sugerida: aval.acao.codigo,
-        acao_label: aval.acao.label,
-        veiculo_placa: m.veiculo_placa || null,
-        veiculo_apelido: m.veiculo_apelido || null,
-        posicao: m.posicao || null,
-        ciclo: m.ciclo ?? null,
+        menor_sulco: menor,
+        status_sulco: classificarSulco(menor, limites),
+        diagnostico_label: diag.label,
+        veiculo_placa: m.veiculo_placa || pneu.placa || null,
       };
     });
 
     const movimentacoes = await db.prepare(`
-    SELECT m.*
+    SELECT m.*,
+      COALESCE(m.veiculo_placa, v.placa) as veiculo_placa
     FROM movimentacoes m
+    LEFT JOIN veiculos v ON v.id = m.veiculo_id
     WHERE m.pneu_id = ?
     ORDER BY m.data_evento DESC, m.id DESC
     LIMIT 80
   `).all(req.params.id);
-
-    const histMed = await db.prepare(`
-      SELECT id, data_medicao, km_veiculo, hr_veiculo,
-        sulco_externo, sulco_central, sulco_interno, sulco_auxiliar, sulco_mm,
-        veiculo_id, veiculo_placa, veiculo_apelido, posicao, ciclo, created_at
-      FROM medicoes WHERE pneu_id = ?
-    `).all(pneu.id);
-    const histMov = await db.prepare(`
-      SELECT id, tipo, data_evento, km_veiculo, hr_veiculo, posicao, sulco_mm,
-        sulco_antes, sulco_depois, veiculo_id, veiculo_placa, veiculo_apelido,
-        ciclo, custo, motivo, usuario, detalhes, created_at
-      FROM movimentacoes WHERE pneu_id = ?
-    `).all(pneu.id);
-    const ciclos = calcularCiclos({ movimentacoes: histMov, medicoes: histMed });
 
     const ultima = medicoes[0] || null;
     let candidatos = [];
@@ -745,13 +762,11 @@ router.get('/:id', async (req, res, next) => {
 
     const padraoLabel = labelTipoPneu(pneu.tipo_pneu);
     const labelsTipo = {
-      entrada_estoque: 'Entrou no estoque',
       montagem: 'Colocou no caminhão',
       retirada: 'Retirou do caminhão',
       desmontagem: 'Retirou do caminhão',
       mudanca_posicao: 'Mudou de posição (rodízio)',
       recap: 'Enviou à recapagem',
-      enviar_recap: 'Enviou à recapagem',
       retorno_recap: 'Recap concluído · voltou ao estoque',
       descarte: 'Enviou ao descarte',
     };
@@ -760,15 +775,13 @@ router.get('/:id', async (req, res, next) => {
       ...enriquecerPneu(pneu, ultima, candidatos),
       veiculo_placa: veiculoPlaca,
       medicoes: medicoesComStatus,
-      ciclos,
       movimentacoes: movimentacoes.map((m) => ({
         ...m,
         tipo_label: labelsTipo[m.tipo] || m.tipo,
         padrao: pneu.tipo_pneu,
         padrao_label: padraoLabel,
         condicao: pneu.condicao,
-        veiculo_placa: m.veiculo_placa || null,
-        veiculo_apelido: m.veiculo_apelido || null,
+        veiculo_placa: m.veiculo_placa || veiculoPlaca,
       })),
     });
   } catch (err) {
@@ -955,9 +968,6 @@ router.post('/:id/montar', async (req, res, next) => {
         posicao,
         detalhes: `Colocou no caminhão ${veiculo.placa} · ${labelPosicao(posicao)}`,
         placa: veiculo.placa,
-        apelido: veiculo.apelido || null,
-        usuario: usuarioDe(req),
-        ciclo: pneu.vida_recap || 0,
       });
       await atualizarKmHrVeiculo(db, veiculo_id, filialId, km, hr);
     });
@@ -1013,9 +1023,6 @@ router.post('/:id/desmontar', async (req, res, next) => {
         posicao,
         detalhes: detalhes?.trim() || `Retirou do caminhão ${veiculo?.placa || ''}`.trim(),
         placa: veiculo?.placa || null,
-        apelido: veiculo?.apelido || null,
-        usuario: usuarioDe(req),
-        ciclo: pneu.vida_recap || 0,
       });
       if (veiculoId) await atualizarKmHrVeiculo(db, veiculoId, filialId, km, hr);
     });
@@ -1145,9 +1152,6 @@ router.post('/:id/reposicionar', async (req, res, next) => {
         posicaoAnterior,
         detalhes: `${labelPosicao(posicaoAnterior)} → ${labelPosicao(posicao)} · ${veiculo.placa}`,
         placa: veiculo.placa,
-        apelido: veiculo.apelido || null,
-        usuario: usuarioDe(req),
-        ciclo: pneu.vida_recap || 0,
       });
       await atualizarKmHrVeiculo(db, pneu.veiculo_id, filialId, km, hr);
     });
@@ -1165,7 +1169,7 @@ router.post('/:id/reposicionar', async (req, res, next) => {
 
 /** Eventos especiais (recap/descarte/retorno) — rastreiam ciclo de vida do pneu */
 router.post('/:id/evento', async (req, res, next) => {
-  const { tipo, data_evento, km_veiculo, hr_veiculo, detalhes, sulco_mm, custo, motivo } = req.body;
+  const { tipo, data_evento, km_veiculo, hr_veiculo, detalhes, sulco_mm } = req.body;
   const tiposOk = ['recap', 'descarte', 'retorno_recap'];
   if (!tiposOk.includes(tipo)) {
     return res.status(400).json({
@@ -1181,10 +1185,6 @@ router.post('/:id/evento', async (req, res, next) => {
     const limites = getLimites();
     const data = data_evento || new Date().toISOString().split('T')[0];
     const filialId = filialScopeId(req);
-    const custoNum = custo != null && custo !== '' ? parseFloat(String(custo).replace(',', '.')) : null;
-    const custoOk = Number.isFinite(custoNum) ? custoNum : null;
-    const cicloAtual = pneu.vida_recap || 0;
-    const sulcoAntes = await ultimoSulcoPneu(db, pneu.id);
 
     if (tipo === 'retorno_recap') {
       if (pneu.status_pneu !== 'recapagem') {
@@ -1197,12 +1197,6 @@ router.post('/:id/evento', async (req, res, next) => {
         });
       }
       await db.transaction(async () => {
-        const locked = await travarPneu(db, pneu.id);
-        if (!locked || locked.status_pneu !== 'recapagem') {
-          const err = new Error('Pneu não está em recapagem');
-          err.status = 400;
-          throw err;
-        }
         await db.prepare(`
           UPDATE pneus SET
             status_pneu = 'estoque',
@@ -1212,7 +1206,7 @@ router.post('/:id/evento', async (req, res, next) => {
             sulco_inicial_mm = ?,
             data_instalacao = NULL,
             data_alerta_monitorar = NULL
-          WHERE id = ? AND status_pneu = 'recapagem'
+          WHERE id = ?
         `).run(sulcoInformado, pneu.id);
         await registrarMovimentacao(db, {
           pneuId: pneu.id,
@@ -1223,20 +1217,16 @@ router.post('/:id/evento', async (req, res, next) => {
           hr: null,
           posicao: null,
           sulcoMm: sulcoInformado,
-          sulcoDepois: sulcoInformado,
-          sulcoAntes,
           detalhes: detalhes || `Recap concluído · sulco ${sulcoInformado} mm · voltou ao estoque (${pneu.vida_recap || 1}ª vida)`,
           placa: null,
-          ciclo: cicloAtual,
-          usuario: usuarioDe(req),
-          custo: custoOk,
         });
+        // Nova medição de inventário — evita o card exibir sulco antigo da vida anterior
         await db.prepare(`
           INSERT INTO medicoes (
             pneu_id, data_medicao,
             sulco_externo, sulco_central, sulco_interno, sulco_auxiliar,
-            responsavel, observacoes, diagnostico, acao_sugerida, ciclo
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ok', 'ok', ?)
+            responsavel, observacoes, diagnostico, acao_sugerida
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ok', 'ok')
         `).run(
           pneu.id,
           data,
@@ -1244,9 +1234,8 @@ router.post('/:id/evento', async (req, res, next) => {
           sulcoInformado,
           sulcoInformado,
           sulcoInformado,
-          usuarioDe(req) || 'retorno_recap',
-          `Sulco após recap: ${sulcoInformado} mm`,
-          cicloAtual
+          'retorno_recap',
+          `Sulco após recap: ${sulcoInformado} mm`
         );
       });
     } else if (tipo === 'recap') {
@@ -1264,20 +1253,12 @@ router.post('/:id/evento', async (req, res, next) => {
       }
 
       let placaOrigem = null;
-      let apelidoOrigem = null;
       const veiculoOrigemId = pneu.veiculo_id || null;
       const posicaoOrigem = pneu.posicao || null;
       await db.transaction(async () => {
-        const locked = await travarPneu(db, pneu.id);
-        if (!locked || locked.status_pneu === 'recapagem' || locked.status_pneu === 'descarte') {
-          const err = new Error('Pneu já está em recapagem');
-          err.status = 400;
-          throw err;
-        }
         if (pneu.status_pneu === 'montado' && pneu.veiculo_id) {
           const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
           placaOrigem = veiculo?.placa || null;
-          apelidoOrigem = veiculo?.apelido || null;
           const km = km_veiculo != null ? parseInt(km_veiculo, 10) : (veiculo?.km_atual ?? null);
           const hr = hr_veiculo != null ? parseFloat(hr_veiculo) : (veiculo?.hr_atual ?? null);
           await registrarMovimentacao(db, {
@@ -1290,10 +1271,6 @@ router.post('/:id/evento', async (req, res, next) => {
             posicao: pneu.posicao,
             detalhes: 'Retirou para iniciar processo de recap',
             placa: placaOrigem,
-            apelido: apelidoOrigem,
-            usuario: usuarioDe(req),
-            ciclo: cicloAtual,
-            sulcoAntes,
           });
           await atualizarKmHrVeiculo(db, pneu.veiculo_id, filialId, km, hr);
         }
@@ -1307,7 +1284,7 @@ router.post('/:id/evento', async (req, res, next) => {
             data_instalacao = NULL,
             km_instalacao = COALESCE(?, km_instalacao),
             data_alerta_monitorar = NULL
-          WHERE id = ? AND status_pneu IS DISTINCT FROM 'recapagem'
+          WHERE id = ?
         `).run(
           novaVida,
           km_veiculo != null ? parseInt(km_veiculo, 10) : null,
@@ -1323,21 +1300,12 @@ router.post('/:id/evento', async (req, res, next) => {
           posicao: posicaoOrigem,
           detalhes: detalhes || `Enviado à recap (${novaVida}ª vida)`,
           placa: placaOrigem,
-          apelido: apelidoOrigem,
-          usuario: usuarioDe(req),
-          ciclo: cicloAtual,
-          sulcoAntes,
-          custo: custoOk,
         });
       });
     } else if (tipo === 'descarte') {
       await db.transaction(async () => {
-        let placaDescarte = null;
-        let apelidoDescarte = null;
         if (pneu.status_pneu === 'montado' && pneu.veiculo_id) {
           const veiculo = await db.prepare('SELECT * FROM veiculos WHERE id = ?').get(pneu.veiculo_id);
-          placaDescarte = veiculo?.placa || null;
-          apelidoDescarte = veiculo?.apelido || null;
           const km = km_veiculo != null ? parseInt(km_veiculo, 10) : (veiculo?.km_atual ?? null);
           const hr = hr_veiculo != null ? parseFloat(hr_veiculo) : (veiculo?.hr_atual ?? null);
           await registrarMovimentacao(db, {
@@ -1349,10 +1317,7 @@ router.post('/:id/evento', async (req, res, next) => {
             hr,
             posicao: pneu.posicao,
             detalhes: 'Retirou para descarte',
-            placa: placaDescarte,
-            apelido: apelidoDescarte,
-            usuario: usuarioDe(req),
-            ciclo: cicloAtual,
+            placa: veiculo?.placa || null,
           });
         }
         await db.prepare(`
@@ -1376,13 +1341,8 @@ router.post('/:id/evento', async (req, res, next) => {
           km: km_veiculo != null ? parseInt(km_veiculo, 10) : null,
           hr: hr_veiculo != null ? parseFloat(hr_veiculo) : null,
           posicao: pneu.posicao || null,
-          detalhes: motivo?.trim() || detalhes || 'Enviado ao estoque de descarte',
-          placa: placaDescarte,
-          apelido: apelidoDescarte,
-          usuario: usuarioDe(req),
-          ciclo: cicloAtual,
-          motivo: motivo?.trim() || detalhes || null,
-          sulcoAntes,
+          detalhes: detalhes || 'Enviado ao estoque de descarte',
+          placa: null,
         });
       });
     }
@@ -1398,7 +1358,6 @@ router.post('/:id/evento', async (req, res, next) => {
       pneu: enriquecerPneu(atualizado, await ultimaMedicaoDoPneu(db, pneu.id)),
     });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ erro: err.message });
     next(err);
   }
 });
