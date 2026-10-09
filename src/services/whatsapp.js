@@ -17,6 +17,19 @@ export function limparTelefone(phone) {
     .replace(/\D/g, '');
 }
 
+/**
+ * Telefone real do participante. LID e JID de grupo não identificam a pessoa.
+ * 15+ dígitos é o id numérico de grupo, não um celular.
+ */
+export function telefoneConfiavel(phone) {
+  const raw = String(phone || '').trim();
+  if (!raw) return '';
+  if (/@g\.us/i.test(raw) || /@lid/i.test(raw)) return '';
+  const digits = limparTelefone(raw);
+  if (digits.length < 10 || digits.length > 14) return '';
+  return digits;
+}
+
 /** Normaliza destino: número pessoal ou grupo WhatsApp */
 export function normalizarDestino(destino) {
   const raw = String(destino || '').trim();

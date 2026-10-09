@@ -136,6 +136,29 @@ export function pareceComandoNatural(texto) {
   return parseComandoNatural(texto) != null;
 }
 
+/**
+ * Consultas de leitura. Não interpreta "estoque FOGO" (isso continua sendo movimentação).
+ * @returns {{ tipo: 'estoque'|'placa'|'fogo', busca?: string|null, placa?: string, fogo?: string } | null}
+ */
+export function parseConsultaWhatsApp(texto) {
+  const n = norm(texto);
+  if (!n) return null;
+  if (/^(estoque|estoques)$/.test(n)) return { tipo: 'estoque', busca: null };
+  let m = n.match(/^(?:consultar|consulta|listar|ver)\s+estoque(?:\s+(.+))?$/);
+  if (m) return { tipo: 'estoque', busca: (m[1] || '').trim() || null };
+  m = n.match(/^(?:consultar|consulta|ver)\s+(?:a\s+)?placa\s+([a-z0-9-]{3,12})$/);
+  if (m) return { tipo: 'placa', placa: m[1] };
+  m = n.match(/^(?:consultar|consulta|ver)\s+fogo\s+([a-z0-9][a-z0-9\-_./]{1,23})$/);
+  if (m) return { tipo: 'fogo', fogo: m[1] };
+  m = n.match(/^(?:consultar|consulta|ver)\s+([a-z0-9][a-z0-9\-_./]{2,23})$/);
+  if (m) {
+    const tok = m[1];
+    if (tok.includes('-') || tok.length > 8) return { tipo: 'fogo', fogo: tok };
+    return { tipo: 'placa', placa: tok };
+  }
+  return null;
+}
+
 function parseNumeroSulco(token) {
   const t = String(token || '').trim();
   if (!t) return NaN;
@@ -210,15 +233,93 @@ function parecePlacaLinha(texto) {
   return true;
 }
 
+function tokenPosicao(tok) {
+  const posicao = String(tok || '').toUpperCase().replace(/[:.\-]+$/g, '');
+  if (!/^[A-Z0-9]{1,8}$/.test(posicao)) return null;
+  if (/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(posicao)) return null;
+  const parece = POSICOES_CONHECIDAS.has(posicao)
+    || /^[0-9][A-Z]{1,3}$/.test(posicao)
+    || /^E[0-9][A-Z]{1,2}$/.test(posicao);
+  return parece ? posicao : null;
+}
+
+function tokenGrupoSulco(tok) {
+  return /^(\d{1,2}([.,]\d+)?)([,;/](\d{1,2}([.,]\d+)?)){2,3}$/.test(String(tok || ''));
+}
+
+function tokenNumeroSulco(tok) {
+  return Number.isFinite(parseNumeroSulco(tok));
+}
+
+function tokenPlaca(tok) {
+  if (tokenPosicao(tok)) return false;
+  return parecePlacaLinha(tok);
+}
+
 /**
- * Placa + linhas `1E 14,14,14` (3 ou 4 valores).
+ * Quebra "ABC1D23 1E 14 14 14 1D 12 12 12" em linhas que o parser atual já valida.
+ * Número de sulco não abre posição. Linha já no formato antigo permanece igual.
+ * @returns {string[] | null}
+ */
+function expandirLinhaMedicao(line) {
+  const tokens = String(line || '').trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  const posicoes = tokens.map((t) => tokenPosicao(t)).filter(Boolean);
+  if (!posicoes.length) return null;
+  const soUmaPosicaoNoInicio = Boolean(tokenPosicao(tokens[0]))
+    && posicoes.length === 1
+    && tokens.slice(1).every((t) => tokenNumeroSulco(t) || tokenGrupoSulco(t));
+  if (soUmaPosicaoNoInicio) return null;
+
+  const blocos = [];
+  let i = 0;
+  while (i < tokens.length) {
+    if (/^(?:km|quilometragem)$/i.test(tokens[i]) && /^\d{1,8}$/.test(tokens[i + 1] || '')) {
+      blocos.push(`KM ${tokens[i + 1]}`);
+      i += 2;
+      continue;
+    }
+    const pos = tokenPosicao(tokens[i]);
+    if (pos) {
+      i += 1;
+      const vals = [];
+      while (
+        i < tokens.length
+        && !tokenPosicao(tokens[i])
+        && !tokenPlaca(tokens[i])
+        && !/^(?:km|quilometragem)$/i.test(tokens[i])
+      ) {
+        if (!(tokenNumeroSulco(tokens[i]) || tokenGrupoSulco(tokens[i]))) return null;
+        vals.push(tokens[i]);
+        i += 1;
+        if (tokenGrupoSulco(vals[vals.length - 1])) break;
+      }
+      blocos.push(`${pos} ${vals.join(' ')}`.trim());
+      continue;
+    }
+    if (tokenPlaca(tokens[i])) {
+      blocos.push(String(tokens[i]).replace(/[^A-Za-z0-9-]/g, '').toUpperCase());
+      i += 1;
+      continue;
+    }
+    return null;
+  }
+  return blocos.length ? blocos : null;
+}
+
+/**
+ * Placa + linhas `1E 14,14,14` (3 ou 4 valores), também numa linha só.
  * @returns {{ tipo: 'medir', placa: string|null, linhas: object[] } | null}
  */
 export function parseMedicaoWhatsApp(texto) {
-  const lines = String(texto || '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const lines = [];
+  for (const raw of String(texto || '').split(/\r?\n/)) {
+    const linha = raw.trim();
+    if (!linha) continue;
+    const exp = expandirLinhaMedicao(linha);
+    if (exp) lines.push(...exp);
+    else lines.push(linha);
+  }
   if (!lines.length) return null;
 
   let placa = null;

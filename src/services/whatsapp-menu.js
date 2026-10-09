@@ -7,7 +7,15 @@ import {
   obterSessao,
   salvarSessao,
   limparSessao,
+  reivindicarGravacaoMedicao,
 } from './whatsapp-sessao.js';
+import { getDb } from '../database.js';
+import {
+  telefoneConfiavel,
+  chipsWhatsappIguais,
+  normalizarDestino,
+  chipWhatsappGlobal,
+} from './whatsapp.js';
 import * as ops from './whatsapp-ops.js';
 import {
   gerarTokenAcessoRapido,
@@ -18,7 +26,12 @@ import {
   enviarERegistrar,
   enviarDocumentoERegistrar,
 } from './whatsapp.js';
-import { parseComandoNatural, parseMedicaoWhatsApp, parseKmWhatsApp } from './whatsapp-comandos.js';
+import {
+  parseComandoNatural,
+  parseConsultaWhatsApp,
+  parseMedicaoWhatsApp,
+  parseKmWhatsApp,
+} from './whatsapp-comandos.js';
 import { TIPOS_VEICULO } from '../config.js';
 import { listarTiposEquipamento, resolverTipoEquipamento } from '../equipamento-tipos.js';
 
@@ -128,6 +141,21 @@ function soNumero(texto) {
   return m ? m[1] : null;
 }
 
+function operacaoExigeRemetente(texto) {
+  const cmd = norm(texto);
+  if (/^(frota|placas|lista)$/i.test(cmd)) return false;
+  if (soNumero(texto) === '9') return false;
+  if (parseConsultaWhatsApp(texto)) return false;
+  return true;
+}
+
+function motivoDescarteValido(texto) {
+  const t = String(texto || '').trim();
+  if (!t) return false;
+  if (/^(?:-|\.|pular|skip)$/i.test(t)) return false;
+  return true;
+}
+
 function simNao(texto) {
   const c = norm(texto);
   if (/^(1|s|sim|ok|confirmar|confirma)$/.test(c)) return true;
@@ -137,6 +165,10 @@ function simNao(texto) {
 
 const comandosRecentes = new Map();
 const COMANDO_DEDUP_ID_MS = 120_000;
+
+export function limparDedupMemoriaTeste() {
+  comandosRecentes.clear();
+}
 
 function comandoDuplicado(ctx) {
   const id = ctx?.mensagemId;
@@ -330,7 +362,155 @@ async function aplicarLinhasMedicao(ctx, sessaoDados, linhas, kmNovo = undefined
   }));
 }
 
+function jidsGrupoIguais(a, b) {
+  const na = normalizarDestino(a);
+  const nb = normalizarDestino(b);
+  if (na?.isGroup && nb?.isGroup && na.logKey === nb.logKey) return true;
+  const da = String(a || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  const db = String(b || '').replace(/@g\.us$/i, '').replace(/[^\d-]/g, '');
+  return Boolean(da && db && da === db);
+}
+
+/**
+ * Unidade ativa cujo whatsapp_grupo é o JID da mensagem.
+ * Nome do grupo e texto da mensagem não entram nessa decisão.
+ */
+export async function resolverUnidadeOficial(chatJid) {
+  if (!normalizarDestino(chatJid)?.isGroup) return null;
+  const db = getDb();
+  const filiais = await db.prepare(`
+    SELECT id, nome, codigo, whatsapp, whatsapp_grupo
+    FROM filiais
+    WHERE ativo = 1
+      AND whatsapp_grupo IS NOT NULL
+      AND TRIM(whatsapp_grupo) <> ''
+  `).all();
+  const matches = (filiais || []).filter((f) => jidsGrupoIguais(f.whatsapp_grupo, chatJid));
+  if (matches.length > 1) {
+    console.warn('[whatsapp-menu] mais de uma unidade no mesmo JID — usando a primeira', {
+      chat: chatJid,
+      filiais: matches.map((f) => f.id),
+    });
+  }
+  return matches[0] || null;
+}
+
+async function telefoneEhDoChatbot(phone, chipUnidade) {
+  const chips = [chipUnidade, await chipWhatsappGlobal()];
+  return chips.some((c) => c && chipsWhatsappIguais(c, phone));
+}
+
+function auditoriaDe(participante) {
+  return {
+    telefone: participante.telefone,
+    grupo: participante.grupo,
+    unidade: participante.unidade,
+    filialId: participante.filialId,
+  };
+}
+
+function textoResponsavel(participante) {
+  return [
+    participante.telefone,
+    'WhatsApp',
+    `grupo ${participante.grupo}`,
+    `unidade ${participante.unidade}`,
+  ].join(' · ');
+}
+
+/**
+ * Qualquer participante identificável do grupo oficial da unidade.
+ * Não consulta usuarios.whatsapp nem papel.
+ */
+async function exigirParticipanteGrupo(ctx, assunto = 'a operação') {
+  const unidade = await resolverUnidadeOficial(ctx.chatJid);
+  if (!unidade || Number(unidade.id) !== Number(ctx.filialId)) {
+    await reply(ctx, `Este grupo não está vinculado a uma unidade ativa. Não gravei ${assunto}.`);
+    return null;
+  }
+  const phone = telefoneConfiavel(ctx.phone);
+  if (!phone || await telefoneEhDoChatbot(phone, unidade.whatsapp)) {
+    await reply(ctx, `Não identifiquei seu número neste grupo. Não gravei ${assunto}.`);
+    return null;
+  }
+  return {
+    telefone: phone,
+    grupo: String(unidade.whatsapp_grupo).trim(),
+    unidade: unidade.nome,
+    filialId: unidade.id,
+  };
+}
+
+async function gravarMovimentacaoConfirmada(ctx, { fluxos, passos, executar }) {
+  const participante = await exigirParticipanteGrupo(ctx, 'a movimentação');
+  if (!participante) return null;
+  const db = getDb();
+  try {
+    const resultado = await db.transaction(async () => {
+      await reivindicarGravacaoMedicao({
+        filialId: ctx.filialId,
+        telefone: ctx.phone,
+        chatJid: ctx.chatJid,
+        mensagemId: ctx.mensagemId,
+        fluxos,
+        passos,
+      });
+      return executar(auditoriaDe(participante));
+    });
+    await clear(ctx);
+    return resultado;
+  } catch (err) {
+    if (err.codigo === 'duplicada') {
+      await reply(ctx, 'Essa confirmação já foi registrada. Nada foi gravado de novo.');
+      return null;
+    }
+    await reply(ctx, `❌ ${err.message}\n*1* tenta de novo · *0* cancela`);
+    return null;
+  }
+}
+
+function decisaoConfirmacao(texto) {
+  const sn = simNao(texto);
+  if (sn === true) return 'confirma';
+  if (sn === false) return 'cancela';
+  return 'aguarda';
+}
+
+async function gravarMedicaoConfirmada(ctx, d) {
+  const participante = await exigirParticipanteGrupo(ctx);
+  if (!participante) return;
+  const db = getDb();
+  try {
+    const resultado = await db.transaction(async () => {
+      await reivindicarGravacaoMedicao({
+        filialId: ctx.filialId,
+        telefone: ctx.phone,
+        chatJid: ctx.chatJid,
+        mensagemId: ctx.mensagemId,
+      });
+      return ops.registrarMedicoesWhatsApp({
+        filialId: ctx.filialId,
+        veiculoId: d.veiculo_id,
+        itens: d.ok,
+        kmInformado: d.km_informado,
+        responsavel: textoResponsavel(participante),
+      });
+    });
+    await clear(ctx);
+    const kmTxt = resultado.km != null ? ` · KM ${resultado.km}` : '';
+    await reply(ctx, `✅ ${resultado.total} medições em *${resultado.placa}*${kmTxt}.`);
+  } catch (err) {
+    if (err.codigo === 'duplicada') {
+      await reply(ctx, 'Essa confirmação já foi registrada. Nada foi gravado de novo.');
+      return;
+    }
+    await reply(ctx, `❌ ${err.message}\n*1* tenta de novo · *0* cancela`);
+  }
+}
+
 async function iniciarMedicaoWhatsApp(ctx, med) {
+  const participante = await exigirParticipanteGrupo(ctx);
+  if (!participante) return;
   let veiculoId = null;
   let placa = med.placa || null;
   if (placa) {
@@ -414,20 +594,7 @@ async function passoMedicaoWhatsApp(ctx, sessao, texto) {
       await reply(ctx, `❌ ${d.km_erro}`);
       return;
     }
-    try {
-      const r = await ops.registrarMedicoesWhatsApp({
-        filialId: ctx.filialId,
-        veiculoId: d.veiculo_id,
-        itens: d.ok,
-        kmInformado: d.km_informado,
-        responsavel: `WhatsApp ${ctx.phone || ctx.destino || ''}`.trim(),
-      });
-      await clear(ctx);
-      const kmTxt = r.km != null ? ` · KM ${r.km}` : '';
-      await reply(ctx, `✅ ${r.total} medições em *${r.placa}*${kmTxt}.`);
-    } catch (err) {
-      await reply(ctx, `❌ ${err.message}\n*1* tenta de novo · *0* cancela`);
-    }
+    await gravarMedicaoConfirmada(ctx, d);
     return;
   }
 
@@ -608,14 +775,164 @@ async function concluirPreCadastroPneu(ctx, { fogo }) {
   await reply(ctx, textoPreCadastroPneu(created.numero_fogo || fogo, link));
 }
 
-async function iniciarPreCadastro(ctx, natural) {
-  if (natural.tipo === 'cadastrar_pneu') {
-    if (!natural.fogo) {
-      await setFluxo(ctx, 'pre_cadastro', 'fogo', { alvo: 'pneu' });
-      await reply(ctx, '🛞 Envie o *nº de fogo* do pneu.\n_0 = cancelar_');
+async function iniciarCadastroPneu(ctx, fogoInformado) {
+  if (!await exigirParticipanteGrupo(ctx, 'o cadastro')) return;
+  if (!fogoInformado) {
+    await setFluxo(ctx, 'cadastro_pneu', 'fogo', {});
+    await reply(ctx, '🛞 *Cadastro de pneu*\nEnvie o *nº de fogo*.\n_0 = cancelar_');
+    return;
+  }
+  await avancarFogoCadastro(ctx, fogoInformado);
+}
+
+async function avancarFogoCadastro(ctx, informado) {
+  const fogo = String(informado || '').replace(/^fogo\s+/i, '').trim();
+  if (fogo.length < 3) {
+    await reply(ctx, 'Envie o *nº de fogo* (mín. 3 caracteres).\n_0 = cancelar_');
+    return;
+  }
+  let prep;
+  try {
+    prep = await ops.prepararFogoCadastro(ctx.filialId, fogo);
+  } catch (err) {
+    await reply(ctx, `❌ ${err.message}\nEnvie outro nº ou *0*.`);
+    return;
+  }
+  if (prep.existente) {
+    await clear(ctx);
+    await reply(ctx, `❌ Já existe pneu *${prep.existente.numero_fogo}* nesta unidade. Nada foi cadastrado.`);
+    return;
+  }
+  await setFluxo(ctx, 'cadastro_pneu', 'modelo', { fogo: prep.numero_fogo });
+  await reply(ctx, `Fogo *${prep.numero_fogo}*.\nQual o *modelo*? (obrigatório)\n_0 = cancelar_`);
+}
+
+function tipoPneuDigitado(texto) {
+  const c = norm(texto);
+  if (/^(1|direcional|dianteira|direcao)$/.test(c)) return 'direcional';
+  if (/^(2|misto)$/.test(c)) return 'misto';
+  if (/^(3|borrachudo|tracao)$/.test(c)) return 'borrachudo';
+  return null;
+}
+
+function condicaoPneuDigitada(texto) {
+  const c = norm(texto);
+  if (/^(1|novo)$/.test(c)) return 'novo';
+  if (/^(2|recapado|recap|recauchutado)$/.test(c)) return 'recapado';
+  return null;
+}
+
+function textoResumoCadastroPneu(d) {
+  return [
+    'Cadastrar este pneu no estoque?',
+    `Fogo: *${d.fogo}*`,
+    `Modelo: *${d.modelo}*`,
+    `Marca: ${d.marca || '—'}`,
+    `Tipo: ${d.tipo_pneu}`,
+    `Condição: ${d.condicao}`,
+    `Sulco inicial: ${d.sulco_inicial_mm != null ? `${d.sulco_inicial_mm} mm` : '—'}`,
+    '',
+    '*1* confirma · *0* cancela',
+  ].join('\n');
+}
+
+async function passoCadastroPneu(ctx, sessao, texto) {
+  const d = { ...(sessao.dados || {}) };
+  if (sessao.passo === 'fogo') {
+    await avancarFogoCadastro(ctx, texto);
+    return;
+  }
+  if (sessao.passo === 'modelo') {
+    const modelo = String(texto || '').trim();
+    if (modelo.length < 2 || /^pendente$/i.test(modelo)) {
+      await reply(ctx, 'Informe o *modelo* do pneu (obrigatório).\n_0 = cancelar_');
       return;
     }
-    await pedirConfirmacaoPreCadastro(ctx, { alvo: 'pneu', fogo: natural.fogo });
+    await setFluxo(ctx, 'cadastro_pneu', 'marca', { ...d, modelo });
+    await reply(ctx, 'Marca / fabricante? (ou *pular*)\n_0 = cancelar_');
+    return;
+  }
+  if (sessao.passo === 'marca') {
+    const t = String(texto || '').trim();
+    if (!t) {
+      await reply(ctx, 'Informe a marca ou *pular*.\n_0 = cancelar_');
+      return;
+    }
+    const marca = /^(pular|skip|-|\.)$/i.test(t) ? null : t;
+    await setFluxo(ctx, 'cadastro_pneu', 'tipo', { ...d, marca });
+    await reply(ctx, 'Tipo: *1* direcional · *2* misto · *3* borrachudo\n_0 = cancelar_');
+    return;
+  }
+  if (sessao.passo === 'tipo') {
+    const tipo = tipoPneuDigitado(texto);
+    if (!tipo) {
+      await reply(ctx, 'Tipo inválido. *1* direcional · *2* misto · *3* borrachudo\n_0 = cancelar_');
+      return;
+    }
+    await setFluxo(ctx, 'cadastro_pneu', 'condicao', { ...d, tipo_pneu: tipo });
+    await reply(ctx, 'Condição: *1* novo · *2* recapado\n_0 = cancelar_');
+    return;
+  }
+  if (sessao.passo === 'condicao') {
+    const condicao = condicaoPneuDigitada(texto);
+    if (!condicao) {
+      await reply(ctx, 'Condição inválida. *1* novo · *2* recapado\n_0 = cancelar_');
+      return;
+    }
+    await setFluxo(ctx, 'cadastro_pneu', 'sulco', { ...d, condicao });
+    await reply(ctx, 'Sulco inicial em mm (ou *pular*)\n_0 = cancelar_');
+    return;
+  }
+  if (sessao.passo === 'sulco') {
+    const t = String(texto || '').trim();
+    let sulco = null;
+    if (!/^(pular|skip|-|\.)$/i.test(t)) {
+      const n = Number(t.replace(',', '.'));
+      if (!t || !Number.isFinite(n) || n < 0 || n > 40) {
+        await reply(ctx, 'Sulco inicial em mm (0 a 40) ou *pular*.\n_0 = cancelar_');
+        return;
+      }
+      sulco = n;
+    }
+    const dados = { ...d, sulco_inicial_mm: sulco };
+    await setFluxo(ctx, 'cadastro_pneu', 'confirma', dados);
+    await reply(ctx, textoResumoCadastroPneu(dados));
+    return;
+  }
+  if (sessao.passo === 'confirma') {
+    const sn = simNao(texto);
+    if (sn === false) {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado. Nada foi cadastrado.\n\n' + textoMenu());
+      return;
+    }
+    if (sn !== true) {
+      await reply(ctx, '*1* confirma · *0* cancela');
+      return;
+    }
+    const criado = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['cadastro_pneu'],
+      executar: (auditoria) => ops.criarPneuEstoque(ctx.filialId, {
+        numero_fogo: d.fogo,
+        marca: d.marca,
+        modelo: d.modelo,
+        tipo_pneu: d.tipo_pneu,
+        condicao: d.condicao,
+        sulco_inicial_mm: d.sulco_inicial_mm,
+        auditoria,
+      }),
+    });
+    if (!criado) return;
+    await reply(
+      ctx,
+      `✅ Pneu *${criado.numero_fogo}* cadastrado no estoque.\n${[criado.marca, criado.modelo].filter(Boolean).join(' ')}\n\n${textoMenu()}`
+    );
+  }
+}
+
+async function iniciarPreCadastro(ctx, natural) {
+  if (natural.tipo === 'cadastrar_pneu') {
+    await iniciarCadastroPneu(ctx, natural.fogo || null);
     return;
   }
 
@@ -696,6 +1013,7 @@ async function passoPreCadastro(ctx, sessao, texto) {
       await reply(ctx, '*1* confirma · *0* cancela');
       return;
     }
+    if (!await exigirParticipanteGrupo(ctx, 'o cadastro')) return;
     try {
       if (d.alvo === 'pneu') await concluirPreCadastroPneu(ctx, d);
       else await concluirPreCadastroVeiculo(ctx, d);
@@ -789,6 +1107,31 @@ async function pedirMontarEstoque(ctx, { veiculoId, posicao, placa, acaoLabel })
 
 async function passoMontarPos(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
+  if (sessao.passo === 'confirma') {
+    const decisao = decisaoConfirmacao(texto);
+    if (decisao === 'cancela') {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado. Nada foi alterado.');
+      return;
+    }
+    if (decisao !== 'confirma') {
+      await reply(ctx, '*1* confirma · *0* cancela');
+      return;
+    }
+    const r = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['montar_pos'],
+      executar: (auditoria) => ops.montarPneu({
+        filialId: ctx.filialId,
+        pneuId: d.pneu_id,
+        veiculoId: d.veiculo_id,
+        posicao: d.posicao,
+        auditoria,
+      }),
+    });
+    if (!r) return;
+    await reply(ctx, `✅ Fogo *${r.fogo}* montado em *${r.placa}* (${r.posicao}).\n\n` + textoMenu());
+    return;
+  }
   if (sessao.passo !== 'fogo') {
     await clear(ctx);
     await reply(ctx, textoMenu());
@@ -800,22 +1143,15 @@ async function passoMontarPos(ctx, sessao, texto) {
     await reply(ctx, 'Fogo não encontrado no *estoque*. Envie outro nº ou *0*.');
     return;
   }
-  try {
-    const r = await ops.montarPneu({
-      filialId: ctx.filialId,
-      pneuId: pneu.id,
-      veiculoId: d.veiculo_id,
-      posicao: d.posicao,
-    });
-    await clear(ctx);
-    await reply(
-      ctx,
-      `✅ Fogo *${r.fogo}* montado em *${r.placa}* (${r.posicao}).\n\n` + textoMenu()
-    );
-  } catch (err) {
-    await clear(ctx);
-    await reply(ctx, `❌ ${err.message}\n\n` + textoMenu());
-  }
+  await setFluxo(ctx, 'montar_pos', 'confirma', {
+    ...d,
+    pneu_id: pneu.id,
+    fogo: pneu.numero_fogo,
+  });
+  await reply(
+    ctx,
+    `Montar fogo *${pneu.numero_fogo}* em *${d.placa}* / *${d.posicao}*?\n*1* confirma · *0* cancela`
+  );
 }
 
 const MARCA_OPCAO = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
@@ -982,14 +1318,17 @@ async function iniciarOpcao(ctx, n) {
       await reply(ctx, '🔄 *Trocar / montar*\n\nEnvie a *placa* do caminhão.\n_0 = cancelar_');
       return;
     case '5':
+      if (!await exigirParticipanteGrupo(ctx, 'a movimentação')) return;
       await setFluxo(ctx, 'estoque', 'fogo', {});
       await reply(ctx, '📦 *Enviar ao estoque*\n\nEnvie o *nº de fogo* do pneu montado.\n_0 = cancelar_');
       return;
     case '6':
+      if (!await exigirParticipanteGrupo(ctx, 'a movimentação')) return;
       await setFluxo(ctx, 'recap', 'fogo', {});
       await reply(ctx, '♻️ *Recap*\n\nEnvie o *nº de fogo*.\n(Se já estiver em recap, você poderá devolver ao estoque.)\n_0 = cancelar_');
       return;
     case '7':
+      if (!await exigirParticipanteGrupo(ctx, 'a movimentação')) return;
       await setFluxo(ctx, 'descarte', 'fogo', {});
       await reply(ctx, '🗑️ *Descarte*\n\nEnvie o *nº de fogo*.\n_0 = cancelar_');
       return;
@@ -1008,6 +1347,34 @@ async function iniciarOpcao(ctx, n) {
 async function passoEstoque(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
 
+  if (sessao.passo === 'confirma') {
+    const decisao = decisaoConfirmacao(texto);
+    if (decisao === 'cancela') {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado. Nada foi alterado.');
+      return;
+    }
+    if (decisao !== 'confirma') {
+      await reply(ctx, '*1* confirma · *0* cancela');
+      return;
+    }
+    const r = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['estoque'],
+      executar: (auditoria) => ops.trocarPorEstoque({
+        filialId: ctx.filialId,
+        pneuMontadoId: d.pneu_id,
+        pneuEstoqueId: d.substituto_id,
+        auditoria,
+      }),
+    });
+    if (!r) return;
+    await reply(
+      ctx,
+      `✅ ${r.mensagem || `Fogo *${d.fogo}* foi para o estoque.`}\nFogo *${d.substituto_fogo}* montado em *${d.placa}* (${d.posicao}).\n\n` + textoMenu()
+    );
+    return;
+  }
+
   if (sessao.passo === 'substituto') {
     if (await recusarFogoInvalido(ctx, texto)) return;
     const sub = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
@@ -1022,15 +1389,14 @@ async function passoEstoque(ctx, sessao, texto) {
         veiculoId: d.veiculo_id,
         posicao: d.posicao,
       });
-      const r = await ops.trocarPorEstoque({
-        filialId: ctx.filialId,
-        pneuMontadoId: d.pneu_id,
-        pneuEstoqueId: sub.id,
+      await setFluxo(ctx, 'estoque', 'confirma', {
+        ...d,
+        substituto_id: sub.id,
+        substituto_fogo: sub.numero_fogo,
       });
-      await clear(ctx);
       await reply(
         ctx,
-        `✅ ${r.mensagem || `Fogo *${d.fogo}* foi para o estoque.`}\nFogo *${sub.numero_fogo}* montado em *${d.placa}* (${d.posicao}).\n\n` + textoMenu()
+        `Enviar *${d.fogo}* ao estoque e montar *${sub.numero_fogo}* em *${d.placa}* / *${d.posicao}*?\n*1* confirma · *0* cancela`
       );
     } catch (err) {
       await reply(ctx, `❌ ${err.message}\nEnvie outro nº de fogo ou *0* (original permanece montado).`);
@@ -1073,6 +1439,35 @@ async function passoEstoque(ctx, sessao, texto) {
 async function passoRecap(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
 
+  if (sessao.passo === 'confirma') {
+    const decisao = decisaoConfirmacao(texto);
+    if (decisao === 'cancela') {
+      await clear(ctx);
+      await reply(ctx, 'Cancelado. Nada foi alterado.');
+      return;
+    }
+    if (decisao !== 'confirma') {
+      await reply(ctx, '*1* confirma · *0* cancela');
+      return;
+    }
+    const r = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['recap'],
+      executar: (auditoria) => ops.registrarRecap({
+        filialId: ctx.filialId,
+        pneuId: d.pneu_id,
+        pneuEstoqueId: d.substituto_id || null,
+        auditoria,
+      }),
+    });
+    if (!r) return;
+    const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
+    const montou = r.substituto
+      ? `\nFogo *${r.substituto.fogo}* montado em *${r.substituto.placa}* (${r.substituto.posicao}).`
+      : '';
+    await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${montou}${lembrete}\n\n` + textoMenu());
+    return;
+  }
+
   if (sessao.passo === 'substituto') {
     if (await recusarFogoInvalido(ctx, texto)) return;
     const sub = await ops.buscarPneuPorFogo(ctx.filialId, String(texto).replace(/^fogo\s+/i, '').trim());
@@ -1087,17 +1482,15 @@ async function passoRecap(ctx, sessao, texto) {
         veiculoId: d.veiculo_id,
         posicao: d.posicao,
       });
-      const r = await ops.registrarRecap({
-        filialId: ctx.filialId,
-        pneuId: d.pneu_id,
-        pneuEstoqueId: sub.id,
+      await setFluxo(ctx, 'recap', 'confirma', {
+        ...d,
+        substituto_id: sub.id,
+        substituto_fogo: sub.numero_fogo,
       });
-      const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
-      const montou = r.substituto
-        ? `\nFogo *${r.substituto.fogo}* montado em *${r.substituto.placa}* (${r.substituto.posicao}).`
-        : '';
-      await clear(ctx);
-      await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${montou}${lembrete}\n\n` + textoMenu());
+      await reply(
+        ctx,
+        `Enviar *${d.fogo}* à recap e montar *${sub.numero_fogo}* em *${d.placa}* / *${d.posicao}*?\n*1* confirma · *0* cancela`
+      );
     } catch (err) {
       await reply(ctx, `❌ ${err.message}\nEnvie outro nº de fogo ou *0* (original permanece montado).`);
     }
@@ -1115,14 +1508,17 @@ async function passoRecap(ctx, sessao, texto) {
       await reply(ctx, 'Responda *1* para devolver ao estoque ou *0* para cancelar.');
       return;
     }
-    try {
-      const r = await ops.devolverRecapAoEstoque({ filialId: ctx.filialId, pneuId: d.pneu_id });
-      await clear(ctx);
-      await reply(ctx, `✅ ${r.mensagem}\nPronto para montar nos caminhões (*4*).\n\n` + textoMenu());
-    } catch (err) {
-      await clear(ctx);
-      await reply(ctx, `❌ ${err.message}\n\n` + textoMenu());
-    }
+    const r = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['recap'],
+      passos: ['devolver'],
+      executar: (auditoria) => ops.devolverRecapAoEstoque({
+        filialId: ctx.filialId,
+        pneuId: d.pneu_id,
+        auditoria,
+      }),
+    });
+    if (!r) return;
+    await reply(ctx, `✅ ${r.mensagem}\nPronto para montar nos caminhões (*4*).\n\n` + textoMenu());
     return;
   }
 
@@ -1171,15 +1567,8 @@ async function passoRecap(ctx, sessao, texto) {
     return;
   }
 
-  try {
-    const r = await ops.registrarRecap({ filialId: ctx.filialId, pneuId: pneu.id });
-    const lembrete = `\n\nQuando o recap voltar: digite *6* e o fogo *${r.fogo}* → opção *devolver ao estoque*.`;
-    await clear(ctx);
-    await reply(ctx, `✅ Fogo *${r.fogo}* em recapagem (${r.vida}ª vida).${lembrete}\n\n` + textoMenu());
-  } catch (err) {
-    await clear(ctx);
-    await reply(ctx, `❌ ${err.message}\n\n` + textoMenu());
-  }
+  await setFluxo(ctx, 'recap', 'confirma', { pneu_id: pneu.id, fogo: pneu.numero_fogo });
+  await reply(ctx, `Enviar fogo *${pneu.numero_fogo}* à recapagem?\n*1* confirma · *0* cancela`);
 }
 
 async function passoDescarte(ctx, sessao, texto) {
@@ -1225,27 +1614,36 @@ async function passoDescarte(ctx, sessao, texto) {
       await reply(ctx, 'Responda *1* ou *0*.');
       return;
     }
-    try {
-      const r = await ops.registrarDescarte({
+    if (!motivoDescarteValido(d.motivo)) {
+      await setFluxo(ctx, 'descarte', 'motivo', d);
+      await reply(ctx, 'Informe o motivo do descarte. Não use `-` nem deixe em branco.');
+      return;
+    }
+    const r = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['descarte'],
+      executar: (auditoria) => ops.registrarDescarte({
         filialId: ctx.filialId,
         pneuId: d.pneu_id,
         motivo: d.motivo,
         pneuEstoqueId: d.substituto_id || null,
-      });
-      const montou = r.substituto
-        ? `\nFogo *${r.substituto.fogo}* montado em *${r.substituto.placa}* (${r.substituto.posicao}).`
-        : '';
-      await clear(ctx);
-      await reply(ctx, `✅ Fogo *${r.fogo}* no descarte.${montou}\n\n` + textoMenu());
-    } catch (err) {
-      await reply(ctx, `❌ ${err.message}\nEnvie outro nº ou *0* (original permanece montado).`);
-    }
+        auditoria,
+      }),
+    });
+    if (!r) return;
+    const montou = r.substituto
+      ? `\nFogo *${r.substituto.fogo}* montado em *${r.substituto.placa}* (${r.substituto.posicao}).`
+      : '';
+    await reply(ctx, `✅ Fogo *${r.fogo}* no descarte.${montou}\n\n` + textoMenu());
     return;
   }
 
   if (sessao.passo === 'motivo') {
     const d = { ...(sessao.dados || {}) };
-    d.motivo = /^(?:-|\.|pular|skip)$/i.test(String(texto).trim()) ? null : String(texto).trim();
+    if (!motivoDescarteValido(texto)) {
+      await reply(ctx, 'Informe o motivo do descarte. Não use `-` nem deixe em branco.');
+      return;
+    }
+    d.motivo = String(texto).trim();
     if (d.estava_montado && d.veiculo_id && d.posicao) {
       await pedirSubstitutoObrigatorio(ctx, {
         fluxo: 'descarte',
@@ -1276,7 +1674,7 @@ async function passoDescarte(ctx, sessao, texto) {
     posicao: pneu.posicao || null,
     placa: pneu.placa || null,
   });
-  await reply(ctx, 'Motivo do descarte? (ou `-` para pular)');
+  await reply(ctx, 'Motivo do descarte? (obrigatório)');
 }
 
 function resumoOnde(p) {
@@ -1297,7 +1695,7 @@ function textoConfirmaNatural(tipo, d) {
   const sub = d.substituto_fogo
     ? ` e montar *${d.substituto_fogo}* em *${d.placa}* / *${d.posicao}*`
     : '';
-  if (tipo === 'descarte') return `Descartar *${d.fogo}*${sub}?\n*1* Sim · *0* Não`;
+  if (tipo === 'descarte') return `Descartar *${d.fogo}*${sub}?\nMotivo: ${d.motivo}\n*1* Sim · *0* Não`;
   if (tipo === 'recap') return `Enviar *${d.fogo}* à recap${sub}?\n*1* Sim · *0* Não`;
   if (tipo === 'estoque' || tipo === 'troca') {
     return `Enviar *${d.fogo}* ao estoque e montar *${d.substituto_fogo}* em *${d.placa}* / *${d.posicao}*?\n*1* Sim · *0* Não`;
@@ -1305,22 +1703,28 @@ function textoConfirmaNatural(tipo, d) {
   return `Confirmar?\n*1* Sim · *0* Não`;
 }
 
-async function executarComandoNatural(ctx, d) {
+async function executarComandoNatural(ctx, d, auditoria) {
   const filialId = ctx.filialId;
   if (d.tipo === 'recap') {
     const r = await ops.registrarRecap({
       filialId,
       pneuId: d.pneu_id,
       pneuEstoqueId: d.substituto_id || null,
+      auditoria,
     });
     const extra = r.substituto ? ` *${r.substituto.fogo}* em ${r.substituto.placa} (${r.substituto.posicao}).` : '';
     return `✅ *${r.fogo}* em recapagem (${r.vida}ª vida).${extra}`;
   }
   if (d.tipo === 'descarte') {
+    if (!motivoDescarteValido(d.motivo)) {
+      throw new Error('Informe o motivo do descarte');
+    }
     const r = await ops.registrarDescarte({
       filialId,
       pneuId: d.pneu_id,
+      motivo: d.motivo,
       pneuEstoqueId: d.substituto_id || null,
+      auditoria,
     });
     const extra = r.substituto ? ` *${r.substituto.fogo}* em ${r.substituto.placa} (${r.substituto.posicao}).` : '';
     return `✅ *${r.fogo}* no descarte.${extra}`;
@@ -1330,6 +1734,7 @@ async function executarComandoNatural(ctx, d) {
       filialId,
       pneuMontadoId: d.pneu_id,
       pneuEstoqueId: d.substituto_id,
+      auditoria,
     });
     return `✅ ${r.mensagem}`;
   }
@@ -1339,7 +1744,22 @@ async function executarComandoNatural(ctx, d) {
 async function iniciarAcaoNatural(ctx, tipo, pneu, extra = {}) {
   if (tipo === 'onde') {
     await clear(ctx);
-    await reply(ctx, `🛞 *${pneu.numero_fogo}* — ${resumoOnde(pneu)}`);
+    const detalhe = await ops.textoConsultaFogo(ctx.filialId, pneu.numero_fogo);
+    await reply(ctx, detalhe || `🛞 *${pneu.numero_fogo}* — ${resumoOnde(pneu)}`);
+    return;
+  }
+  if (tipo === 'descarte' && !motivoDescarteValido(extra.motivo)) {
+    await setFluxo(ctx, 'cmd_natural', 'motivo', {
+      tipo,
+      pneu_id: pneu.id,
+      fogo: pneu.numero_fogo,
+      veiculo_id: pneu.veiculo_id || null,
+      posicao: pneu.posicao || null,
+      placa: pneu.placa || null,
+      substituto_id: extra.substituto?.id || null,
+      substituto_fogo: extra.substituto?.numero_fogo || null,
+    });
+    await reply(ctx, 'Motivo do descarte? (obrigatório)');
     return;
   }
   if (tipo === 'recap' && pneu.status_pneu === 'recapagem') {
@@ -1374,6 +1794,7 @@ async function iniciarAcaoNatural(ctx, tipo, pneu, extra = {}) {
           veiculo_id: pneu.veiculo_id,
           posicao: pneu.posicao,
           placa: pneu.placa,
+          motivo: extra.motivo || null,
         });
         return;
       }
@@ -1384,6 +1805,7 @@ async function iniciarAcaoNatural(ctx, tipo, pneu, extra = {}) {
         veiculo_id: pneu.veiculo_id,
         posicao: pneu.posicao,
         placa: pneu.placa,
+        motivo: extra.motivo || null,
         substituto_id: extra.substituto.id,
         substituto_fogo: extra.substituto.numero_fogo,
       };
@@ -1401,6 +1823,7 @@ async function iniciarAcaoNatural(ctx, tipo, pneu, extra = {}) {
         veiculo_id: pneu.veiculo_id,
         posicao: pneu.posicao,
         placa: pneu.placa,
+        motivo: extra.motivo || null,
       },
       titulo: tituloAcaoNatural(tipo, pneu),
       placa: pneu.placa,
@@ -1415,7 +1838,7 @@ async function iniciarAcaoNatural(ctx, tipo, pneu, extra = {}) {
     return;
   }
 
-  const dados = { tipo, pneu_id: pneu.id, fogo: pneu.numero_fogo };
+  const dados = { tipo, pneu_id: pneu.id, fogo: pneu.numero_fogo, motivo: extra.motivo || null };
   await setFluxo(ctx, 'cmd_natural', 'confirma', dados);
   await reply(ctx, textoConfirmaNatural(tipo, dados));
 }
@@ -1437,6 +1860,10 @@ async function pedirEscolhaPneus(ctx, dados, lista) {
 }
 
 async function resolverEIniciarComando(ctx, tipo, fogo, fogo2) {
+  if (tipo !== 'onde') {
+    const participante = await exigirParticipanteGrupo(ctx, 'a movimentação');
+    if (!participante) return;
+  }
   const lista = await ops.buscarPneusPorFogo(ctx.filialId, fogo);
   if (!lista.length) {
     await reply(ctx, `Pneu *${fogo}* não encontrado nesta unidade.`);
@@ -1476,6 +1903,24 @@ async function resolverEIniciarComando(ctx, tipo, fogo, fogo2) {
 async function passoComandoNatural(ctx, sessao, texto) {
   const d = { ...(sessao.dados || {}) };
 
+  if (sessao.passo === 'motivo') {
+    if (!motivoDescarteValido(texto)) {
+      await reply(ctx, 'Informe o motivo do descarte. Não use `-` nem deixe em branco.');
+      return;
+    }
+    const pneu = await ops.buscarPneuPorFogo(ctx.filialId, d.fogo);
+    if (!pneu) {
+      await clear(ctx);
+      await reply(ctx, 'Pneu não encontrado.');
+      return;
+    }
+    const substituto = d.substituto_id
+      ? { id: d.substituto_id, numero_fogo: d.substituto_fogo }
+      : null;
+    await iniciarAcaoNatural(ctx, d.tipo, pneu, { motivo: String(texto).trim(), substituto });
+    return;
+  }
+
   if (sessao.passo === 'escolher') {
     const cands = d.candidatos || [];
     const n = soNumero(texto);
@@ -1501,7 +1946,7 @@ async function passoComandoNatural(ctx, sessao, texto) {
       numero_fogo: full.numero_fogo || fogoEsc,
     };
     if (d.escolher === 'substituto' && d.pneu_alvo) {
-      await iniciarAcaoNatural(ctx, d.tipo, d.pneu_alvo, { substituto: row });
+      await iniciarAcaoNatural(ctx, d.tipo, d.pneu_alvo, { substituto: row, motivo: d.motivo });
       return;
     }
     let sub = null;
@@ -1517,7 +1962,7 @@ async function passoComandoNatural(ctx, sessao, texto) {
         return;
       }
     }
-    await iniciarAcaoNatural(ctx, d.tipo, row, { substituto: sub });
+    await iniciarAcaoNatural(ctx, d.tipo, row, { substituto: sub, motivo: d.motivo });
     return;
   }
 
@@ -1568,14 +2013,17 @@ async function passoComandoNatural(ctx, sessao, texto) {
       await reply(ctx, '*1* devolver · *0* cancelar');
       return;
     }
-    try {
-      const r = await ops.devolverRecapAoEstoque({ filialId: ctx.filialId, pneuId: d.pneu_id });
-      await clear(ctx);
-      await reply(ctx, `✅ ${r.mensagem}`);
-    } catch (err) {
-      await clear(ctx);
-      await reply(ctx, `❌ ${err.message}`);
-    }
+    const r = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['cmd_natural'],
+      passos: ['devolver'],
+      executar: (auditoria) => ops.devolverRecapAoEstoque({
+        filialId: ctx.filialId,
+        pneuId: d.pneu_id,
+        auditoria,
+      }),
+    });
+    if (!r) return;
+    await reply(ctx, `✅ ${r.mensagem}`);
     return;
   }
 
@@ -1609,33 +2057,50 @@ async function passoComandoNatural(ctx, sessao, texto) {
       await reply(ctx, '*1* confirma · *0* cancela');
       return;
     }
-    try {
-      const msg = await executarComandoNatural(ctx, d);
-      await clear(ctx);
-      await reply(ctx, msg);
-    } catch (err) {
-      await reply(ctx, `❌ ${err.message}\n*1* tenta de novo · *0* cancela`);
-    }
+    const msg = await gravarMovimentacaoConfirmada(ctx, {
+      fluxos: ['cmd_natural'],
+      executar: (auditoria) => executarComandoNatural(ctx, d, auditoria),
+    });
+    if (!msg) return;
+    await reply(ctx, msg);
   }
+}
+
+async function responderConsulta(ctx, consulta) {
+  if (consulta.tipo === 'estoque') {
+    await reply(ctx, await ops.textoEstoqueUnidade(ctx.filialId, consulta.busca));
+    return;
+  }
+  if (consulta.tipo === 'placa') {
+    await reply(ctx, await ops.textoConsultaPlaca(ctx.filialId, consulta.placa));
+    return;
+  }
+  const direto = await ops.textoConsultaFogo(ctx.filialId, consulta.fogo);
+  if (direto) {
+    await reply(ctx, direto);
+    return;
+  }
+  const hits = await ops.buscarPneusPorFogo(ctx.filialId, consulta.fogo);
+  if (hits.length === 1) {
+    await reply(ctx, await ops.textoConsultaFogo(ctx.filialId, hits[0].numero_fogo));
+    return;
+  }
+  if (hits.length > 1) {
+    const linhas = hits.slice(0, 8).map((p) => `• *${p.numero_fogo}* — ${resumoOnde(p)}`);
+    await reply(ctx, `Vários pneus:\n${linhas.join('\n')}\nEnvie *consultar fogo* com o número completo.`);
+    return;
+  }
+  await reply(ctx, `Pneu *${consulta.fogo}* não encontrado nesta unidade.`);
 }
 
 async function atalhoFogo(ctx, texto) {
   const fogo = String(texto).replace(/^fogo\s+/i, '').trim();
+  const detalhe = await ops.textoConsultaFogo(ctx.filialId, fogo);
+  if (!detalhe) return false;
   const pneu = await ops.buscarPneuPorFogo(ctx.filialId, fogo);
-  if (!pneu) return false;
-
-  let onde = 'estoque';
-  if (pneu.status_pneu === 'montado') {
-    onde = `montado em *${pneu.placa || '?'}* (${pneu.posicao || '?'})`;
-  } else if (pneu.status_pneu === 'recapagem') {
-    onde = 'em recapagem';
-  } else if (pneu.status_pneu === 'descarte') {
-    onde = 'no descarte';
-  }
 
   const linhas = [
-    `🛞 Fogo *${pneu.numero_fogo}* — ${onde}`,
-    pneu.marca || pneu.modelo ? `• ${[pneu.marca, pneu.modelo].filter(Boolean).join(' ')}` : null,
+    detalhe,
     '',
   ];
   if (pneu.status_pneu === 'recapagem') {
@@ -1675,6 +2140,8 @@ async function continuarSessao(ctx, sessao, texto) {
         return await passoComandoNatural(ctx, sessao, texto);
       case 'pre_cadastro':
         return await passoPreCadastro(ctx, sessao, texto);
+      case 'cadastro_pneu':
+        return await passoCadastroPneu(ctx, sessao, texto);
       case 'medir_wa':
         return await passoMedicaoWhatsApp(ctx, sessao, texto);
       case 'relatorio':
@@ -1697,12 +2164,17 @@ export async function processarMensagemMenu(ctx) {
   const texto = String(ctx.texto || '').trim();
   if (!texto) return { handled: false };
 
+  const unidade = await resolverUnidadeOficial(ctx.chatJid);
+  if (!unidade) {
+    await reply(ctx, 'Este grupo não está vinculado a uma unidade ativa.');
+    return { handled: true, bloqueado: 'grupo' };
+  }
+  ctx.filialId = unidade.id;
+  ctx.unidadeNome = unidade.nome;
+  ctx.grupoOficial = String(unidade.whatsapp_grupo).trim();
+
   const cmd = norm(texto);
   const filialId = ctx.filialId;
-  if (!filialId) {
-    await reply(ctx, '❌ Unidade do chat não identificada. Configure o grupo no painel WhatsApp.');
-    return { handled: true };
-  }
 
   if (comandoDuplicado(ctx)) {
     console.info('[whatsapp-menu] duplicada ignorada', {
@@ -1717,6 +2189,14 @@ export async function processarMensagemMenu(ctx) {
     await clear(ctx);
     await reply(ctx, textoMenu());
     return { handled: true };
+  }
+
+  if (operacaoExigeRemetente(texto)) {
+    const phone = telefoneConfiavel(ctx.phone);
+    if (!phone || await telefoneEhDoChatbot(phone, unidade.whatsapp)) {
+      await reply(ctx, 'Não identifiquei seu número neste grupo. Não gravei nada.');
+      return { handled: true, bloqueado: 'remetente' };
+    }
   }
 
   const sessao = await obterSessao(filialId, ctx.phone, ctx.chatJid);
@@ -1746,6 +2226,12 @@ export async function processarMensagemMenu(ctx) {
   }
   if (/^(frota|placas|lista)\b/i.test(cmd)) {
     await enviarFrota(ctx);
+    return { handled: true };
+  }
+
+  const consulta = parseConsultaWhatsApp(texto);
+  if (consulta) {
+    await responderConsulta(ctx, consulta);
     return { handled: true };
   }
 

@@ -92,6 +92,8 @@ async function main() {
   await initDatabase();
   const db = getDb();
   const filialId = (await db.prepare(`SELECT id FROM filiais WHERE codigo = 'MATRIZ'`).get()).id;
+  const grupo = '120363017137@g.us';
+  await db.prepare(`UPDATE filiais SET whatsapp_grupo = ? WHERE id = ?`).run(grupo, filialId);
   await db.prepare(`INSERT INTO filiais (nome, codigo, ativo) VALUES (?, ?, 1)`).run('Londrina Teste', 'LDT');
   const outra = await db.prepare(`SELECT id FROM filiais WHERE codigo = 'LDT'`).get();
 
@@ -101,9 +103,9 @@ async function main() {
     const p = phone || String((phoneSeq += 1));
     const id = mensagemId === undefined ? `m-${(msgSeq += 1)}` : mensagemId;
     const r = await processarMensagemMenu({
-      filialId, phone: p, destino: p, chatJid: '', texto, mensagemId: id,
+      filialId, phone: p, destino: p, chatJid: grupo, texto, mensagemId: id,
     });
-    const sessao = await obterSessao(filialId, p, '');
+    const sessao = await obterSessao(filialId, p, grupo);
     const notif = await ultimaMsg(db, p);
     return { r, phone: p, sessao, msg: notif?.mensagem || '' };
   }
@@ -114,14 +116,14 @@ async function main() {
 
   const cancel = await falar('cadastrar trator TR-015');
   await processarMensagemMenu({
-    filialId, phone: cancel.phone, destino: cancel.phone, chatJid: '', texto: '0', mensagemId: `m-${(msgSeq += 1)}`,
+    filialId, phone: cancel.phone, destino: cancel.phone, chatJid: grupo, texto: '0', mensagemId: `m-${(msgSeq += 1)}`,
   });
   log(!(await ops.buscarPlacaFilial(filialId, 'TR015')) && !(await ops.buscarPlacaFilial(filialId, 'TR-015')),
     'Cancelamento: nada gravado');
 
   const okPre = await falar('cadastrar caminhão ABC1D23');
   await processarMensagemMenu({
-    filialId, phone: okPre.phone, destino: okPre.phone, chatJid: '', texto: '1', mensagemId: `m-${(msgSeq += 1)}`,
+    filialId, phone: okPre.phone, destino: okPre.phone, chatJid: grupo, texto: '1', mensagemId: `m-${(msgSeq += 1)}`,
   });
   const veiculo = await ops.buscarPlacaFilial(filialId, 'ABC1D23');
   const msgOk = (await ultimaMsg(db, okPre.phone))?.mensagem || '';
@@ -391,18 +393,21 @@ async function main() {
     'Formulário AR: confirmar substituição de pneu'
   );
 
-  const pneuPre = await falar('cadastrar pneu 10700050');
-  await processarMensagemMenu({
-    filialId, phone: pneuPre.phone, destino: pneuPre.phone, chatJid: '', texto: '1', mensagemId: `m-${(msgSeq += 1)}`,
+  const pneuInc = await ops.criarPneuEstoque(filialId, {
+    numero_fogo: '10700050',
+    modelo: 'Pendente',
+    preCadastro: true,
   });
-  const pneuInc = await db.prepare(`
-    SELECT * FROM pneus WHERE filial_id = ? AND cadastro_completo = 0
-    ORDER BY id DESC LIMIT 1
-  `).get(filialId);
   log(pneuInc && Number(pneuInc.cadastro_completo) === 0, 'Pré-cadastro de pneu incompleto');
   const est = await ops.listarEstoque(filialId, 50);
   log(!est.some((p) => p.id === pneuInc.id), 'Pneu incompleto fora do estoque operacional');
 
+  await ar.gerarTokenAcessoRapido({
+    tipo: 'cadastrar_pneu',
+    pneuId: pneuInc.id,
+    filialId,
+    whatsappOrigem: '5511900000099',
+  });
   const tokPneuRow = await db.prepare(`
     SELECT * FROM tokens_acesso_rapido
     WHERE pneu_id = ? AND tipo = 'cadastrar_pneu'
@@ -427,13 +432,13 @@ async function main() {
   );
 
   const d1 = await processarMensagemMenu({
-    filialId, phone: '11980001111', destino: '11980001111', chatJid: '', texto: '1', mensagemId: 'same-id',
+    filialId, phone: '11980001111', destino: '11980001111', chatJid: grupo, texto: '1', mensagemId: 'same-id',
   });
   const d2 = await processarMensagemMenu({
-    filialId, phone: '11980001112', destino: '11980001112', chatJid: '', texto: '1', mensagemId: 'same-id',
+    filialId, phone: '11980001112', destino: '11980001112', chatJid: grupo, texto: '1', mensagemId: 'same-id',
   });
   const d3 = await processarMensagemMenu({
-    filialId, phone: '11980001113', destino: '11980001113', chatJid: '', texto: '1', mensagemId: 'other-id',
+    filialId, phone: '11980001113', destino: '11980001113', chatJid: grupo, texto: '1', mensagemId: 'other-id',
   });
   log(d1.handled === true && d1.duplicado !== true, 'Dedup menu: 1ª confirmação com ID passa');
   log(d2.duplicado === true, 'Dedup menu: mesmo ID bloqueia');

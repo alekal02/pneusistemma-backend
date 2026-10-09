@@ -92,6 +92,8 @@ async function main() {
   const db = getDb();
   const filial = await db.prepare(`SELECT id FROM filiais WHERE codigo = 'MATRIZ'`).get();
   const filialId = filial.id;
+  const grupo = '120363017337@g.us';
+  await db.prepare(`UPDATE filiais SET whatsapp_grupo = ? WHERE id = ?`).run(grupo, filialId);
 
   await db.prepare(`INSERT INTO filiais (nome, codigo, ativo) VALUES (?, ?, 1)`).run('Londrina Teste', 'LDT');
   const outra = await db.prepare(`SELECT id FROM filiais WHERE codigo = 'LDT'`).get();
@@ -163,7 +165,7 @@ async function main() {
   await salvarSessao({
     filialId,
     telefone: '11988887777',
-    chatJid: '',
+    chatJid: grupo,
     fluxo: 'recap',
     passo: 'substituto',
     dados: {
@@ -178,7 +180,7 @@ async function main() {
     filialId,
     phone: '11988887777',
     destino: '11988887777',
-    chatJid: '',
+    chatJid: grupo,
     texto: '0',
   });
   const aCancel = await estadoPneu(db, origA.id);
@@ -310,7 +312,7 @@ async function main() {
   await salvarSessao({
     filialId,
     telefone: '11977770001',
-    chatJid: '',
+    chatJid: grupo,
     fluxo: 'estoque',
     passo: 'fogo',
     dados: {},
@@ -319,7 +321,7 @@ async function main() {
     filialId,
     phone: '11977770001',
     destino: '11977770001',
-    chatJid: '',
+    chatJid: grupo,
     texto: origA.numero_fogo,
   });
   const aposFogoM5 = await estadoPneu(db, origA.id);
@@ -331,7 +333,7 @@ async function main() {
   await salvarSessao({
     filialId,
     telefone: '11977770002',
-    chatJid: '',
+    chatJid: grupo,
     fluxo: 'estoque',
     passo: 'substituto',
     dados: {
@@ -346,7 +348,7 @@ async function main() {
     filialId,
     phone: '11977770002',
     destino: '11977770002',
-    chatJid: '',
+    chatJid: grupo,
     texto: 'cancelar',
   });
   log(
@@ -357,7 +359,7 @@ async function main() {
   await salvarSessao({
     filialId,
     telefone: '11977770003',
-    chatJid: '',
+    chatJid: grupo,
     fluxo: 'estoque',
     passo: 'substituto',
     dados: {
@@ -372,7 +374,7 @@ async function main() {
     filialId,
     phone: '11977770003',
     destino: '11977770003',
-    chatJid: '',
+    chatJid: grupo,
     texto: subIncomp.numero_fogo,
   });
   log(
@@ -395,10 +397,14 @@ async function main() {
   log((await estadoPneu(db, origA.id)).status_pneu === 'montado', 'Gestão outra filial: original intacto');
 
   const subM5 = await pneuEstoque('MATRIZ-8820');
+  await db.prepare(`
+    INSERT INTO usuarios (login, senha_hash, papel, cargo, filial_id, ativo, whatsapp)
+    VALUES ('opm5', 'x', 'filial', 'funcionario', ?, 1, '11977770004')
+  `).run(filialId);
   await salvarSessao({
     filialId,
     telefone: '11977770004',
-    chatJid: '',
+    chatJid: grupo,
     fluxo: 'estoque',
     passo: 'substituto',
     dados: {
@@ -413,8 +419,22 @@ async function main() {
     filialId,
     phone: '11977770004',
     destino: '11977770004',
-    chatJid: '',
+    chatJid: grupo,
     texto: subM5.numero_fogo,
+    mensagemId: 'm5-sub',
+  });
+  log(
+    (await estadoPneu(db, origA.id)).status_pneu === 'montado'
+      && (await estadoPneu(db, subM5.id)).status_pneu === 'estoque',
+    'Menu 5: substituto só pede confirmação'
+  );
+  await processarMensagemMenu({
+    filialId,
+    phone: '11977770004',
+    destino: '11977770004',
+    chatJid: grupo,
+    texto: '1',
+    mensagemId: 'm5-ok',
   });
   const stM5orig = await estadoPneu(db, origA.id);
   const stM5sub = await estadoPneu(db, subM5.id);

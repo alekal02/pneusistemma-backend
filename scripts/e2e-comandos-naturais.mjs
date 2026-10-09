@@ -88,6 +88,8 @@ async function main() {
   await initDatabase();
   const db = getDb();
   const filialId = (await db.prepare(`SELECT id FROM filiais WHERE codigo = 'MATRIZ'`).get()).id;
+  const grupo = '120363017237@g.us';
+  await db.prepare(`UPDATE filiais SET whatsapp_grupo = ? WHERE id = ?`).run(grupo, filialId);
   await db.prepare(`INSERT INTO filiais (nome, codigo, ativo) VALUES (?, ?, 1)`).run('Londrina Teste', 'LDT');
   const outra = await db.prepare(`SELECT id FROM filiais WHERE codigo = 'LDT'`).get();
 
@@ -114,13 +116,23 @@ async function main() {
   await ops.montarPneu({ filialId, pneuId: pAmb.id, veiculoId: truck.id, posicao: '2EE' });
 
   let phoneSeq = 11970000000;
+  async function autorizar(phone) {
+    const login = `nat${String(phone).replace(/\D/g, '')}`.slice(0, 48);
+    await db.prepare(`
+      INSERT INTO usuarios (login, senha_hash, papel, cargo, filial_id, ativo, whatsapp)
+      VALUES (?, 'x', 'filial', 'funcionario', ?, 1, ?)
+      ON CONFLICT (login) DO UPDATE SET
+        whatsapp = EXCLUDED.whatsapp, ativo = 1, papel = 'filial', filial_id = EXCLUDED.filial_id
+    `).run(login, filialId, String(phone));
+  }
   async function falar(texto) {
     phoneSeq += 1;
     const phone = String(phoneSeq);
+    await autorizar(phone);
     const r = await processarMensagemMenu({
-      filialId, phone, destino: phone, chatJid: '', texto,
+      filialId, phone, destino: phone, chatJid: grupo, texto,
     });
-    const sessao = await obterSessao(filialId, phone, '');
+    const sessao = await obterSessao(filialId, phone, grupo);
     return { r, phone, sessao };
   }
 
@@ -143,10 +155,10 @@ async function main() {
 
   const movAntes = await qtdMov(db, pA.id);
   const cancel = await falar('10700002 descarte');
-  log(cancel.sessao?.passo === 'substituto' || cancel.sessao?.passo === 'confirma', 'Descarte montado pede substituto/confirma antes de gravar');
+  log(cancel.sessao?.passo === 'motivo' || cancel.sessao?.passo === 'substituto' || cancel.sessao?.passo === 'confirma', 'Descarte montado pede motivo antes de gravar');
   log((await estadoPneu(db, pA.id)).status_pneu === 'montado' && (await qtdMov(db, pA.id)) === movAntes, 'Antes da confirmação: original intacto');
   await processarMensagemMenu({
-    filialId, phone: cancel.phone, destino: cancel.phone, chatJid: '', texto: '0',
+    filialId, phone: cancel.phone, destino: cancel.phone, chatJid: grupo, texto: '0',
   });
   log((await estadoPneu(db, pA.id)).status_pneu === 'montado', 'Cancelamento: nada alterado');
 
@@ -162,7 +174,7 @@ async function main() {
   log(troca.sessao?.passo === 'confirma', 'Troca natural chega na confirmação');
   log((await estadoPneu(db, pA.id)).status_pneu === 'montado', 'Troca: ainda montado antes do sim');
   await processarMensagemMenu({
-    filialId, phone: troca.phone, destino: troca.phone, chatJid: '', texto: '1',
+    filialId, phone: troca.phone, destino: troca.phone, chatJid: grupo, texto: '1',
   });
   log(
     (await estadoPneu(db, pA.id)).status_pneu === 'estoque'
@@ -177,7 +189,7 @@ async function main() {
   const rb = await falar(`trocar ${pC.numero_fogo} por ${pD.numero_fogo}`);
   process.env.PNEU_TEST_FALHAR_TX = '1';
   await processarMensagemMenu({
-    filialId, phone: rb.phone, destino: rb.phone, chatJid: '', texto: 'sim',
+    filialId, phone: rb.phone, destino: rb.phone, chatJid: grupo, texto: 'sim',
   });
   delete process.env.PNEU_TEST_FALHAR_TX;
   log(
@@ -190,9 +202,9 @@ async function main() {
   log(menuAberto.sessao?.fluxo === 'medir' && menuAberto.sessao?.passo === 'placa', 'Menu 1 abre medição por placa');
   const movMenu = await qtdMov(db, pA.id);
   await processarMensagemMenu({
-    filialId, phone: menuAberto.phone, destino: menuAberto.phone, chatJid: '', texto: '10700002 descarte',
+    filialId, phone: menuAberto.phone, destino: menuAberto.phone, chatJid: grupo, texto: '10700002 descarte',
   });
-  const sessaoMenu = await obterSessao(filialId, menuAberto.phone, '');
+  const sessaoMenu = await obterSessao(filialId, menuAberto.phone, grupo);
   log(
     sessaoMenu?.fluxo === 'medir'
       && (await estadoPneu(db, pA.id)).status_pneu === 'estoque'
@@ -200,18 +212,18 @@ async function main() {
     'Comando natural não interrompe o menu de medição'
   );
   await processarMensagemMenu({
-    filialId, phone: menuAberto.phone, destino: menuAberto.phone, chatJid: '', texto: '4',
+    filialId, phone: menuAberto.phone, destino: menuAberto.phone, chatJid: grupo, texto: '4',
   });
-  const sessaoQuatro = await obterSessao(filialId, menuAberto.phone, '');
+  const sessaoQuatro = await obterSessao(filialId, menuAberto.phone, grupo);
   log(sessaoQuatro?.fluxo === 'medir', 'Opção 4 dentro da medição não abre o menu de troca');
 
   const pConf = await pneuEstoque('MATRIZ-10700777');
   const emConfirma = await falar(`trocar ${pAmb.numero_fogo} por ${pConf.numero_fogo}`);
   log(emConfirma.sessao?.fluxo === 'cmd_natural' && emConfirma.sessao?.passo === 'confirma', 'Troca em confirmação antes do segundo comando');
   await processarMensagemMenu({
-    filialId, phone: emConfirma.phone, destino: emConfirma.phone, chatJid: '', texto: '10700012 descarte',
+    filialId, phone: emConfirma.phone, destino: emConfirma.phone, chatJid: grupo, texto: '10700012 descarte',
   });
-  const sessaoConf = await obterSessao(filialId, emConfirma.phone, '');
+  const sessaoConf = await obterSessao(filialId, emConfirma.phone, grupo);
   log(
     sessaoConf?.fluxo === 'cmd_natural'
       && sessaoConf?.passo === 'confirma'

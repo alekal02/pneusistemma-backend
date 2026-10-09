@@ -90,6 +90,10 @@ async function main() {
   const filialId = (await db.prepare(`SELECT id FROM filiais WHERE codigo = 'MATRIZ'`).get()).id;
   await db.prepare(`INSERT INTO filiais (nome, codigo, ativo) VALUES (?, ?, 1)`).run('Londrina Teste', 'LDT');
   const outra = await db.prepare(`SELECT id FROM filiais WHERE codigo = 'LDT'`).get();
+  const grupo = '120363017037@g.us';
+  const grupoOutra = '120363017038@g.us';
+  await db.prepare(`UPDATE filiais SET whatsapp_grupo = ? WHERE id = ?`).run(grupo, filialId);
+  await db.prepare(`UPDATE filiais SET whatsapp_grupo = ? WHERE id = ?`).run(grupoOutra, outra.id);
 
   const truck = await ops.criarVeiculo(filialId, { placa: 'ABC1D23', tipo: 'Truck / Tração', km_atual: 1200 });
   const posicoes = ['1E', '1D', '2EE', '2EI', '2DI', '2DE'];
@@ -104,14 +108,28 @@ async function main() {
 
   let phoneSeq = 11981000000;
   let msgSeq = 0;
+  async function autorizar(phone, filial) {
+    const login = `op${String(phone).replace(/\D/g, '')}`.slice(0, 48);
+    await db.prepare(`
+      INSERT INTO usuarios (login, senha_hash, papel, cargo, filial_id, ativo, whatsapp)
+      VALUES (?, 'x', 'filial', 'funcionario', ?, 1, ?)
+      ON CONFLICT (login) DO UPDATE SET
+        whatsapp = EXCLUDED.whatsapp,
+        ativo = 1,
+        papel = 'filial',
+        filial_id = EXCLUDED.filial_id
+    `).run(login, filial, String(phone));
+  }
   async function falar(texto, { phone, mensagemId, filial } = {}) {
     const p = phone || String((phoneSeq += 1));
     const id = mensagemId === undefined ? `med-${(msgSeq += 1)}` : mensagemId;
     const fid = filial || filialId;
+    const chat = Number(fid) === Number(outra.id) ? grupoOutra : grupo;
+    await autorizar(p, fid);
     const r = await processarMensagemMenu({
-      filialId: fid, phone: p, destino: p, chatJid: '', texto, mensagemId: id,
+      filialId: fid, phone: p, destino: p, chatJid: chat, texto, mensagemId: id,
     });
-    const sessao = await obterSessao(fid, p, '');
+    const sessao = await obterSessao(fid, p, chat);
     return { r, phone: p, sessao };
   }
 
@@ -129,13 +147,13 @@ async function main() {
 
   const cancel = await falar(LOTE);
   await processarMensagemMenu({
-    filialId, phone: cancel.phone, destino: cancel.phone, chatJid: '', texto: '0', mensagemId: `med-${(msgSeq += 1)}`,
+    filialId, phone: cancel.phone, destino: cancel.phone, chatJid: grupo, texto: '0', mensagemId: `med-${(msgSeq += 1)}`,
   });
   log((await qtdMed(pneus['1E'].id)) === 0, 'Cancelamento: histórico intacto');
 
   const conf = await falar(LOTE);
   await processarMensagemMenu({
-    filialId, phone: conf.phone, destino: conf.phone, chatJid: '', texto: '1', mensagemId: `med-${(msgSeq += 1)}`,
+    filialId, phone: conf.phone, destino: conf.phone, chatJid: grupo, texto: '1', mensagemId: `med-${(msgSeq += 1)}`,
   });
   const m1e = await db.prepare(`
     SELECT * FROM medicoes WHERE pneu_id = ? ORDER BY id DESC LIMIT 1
@@ -154,19 +172,20 @@ async function main() {
   log((await qtdMed(pneus['2DE'].id)) === 1, 'Confirmação: lote inteiro gravado');
 
   const sepPhone = String((phoneSeq += 1));
+  await autorizar(sepPhone, filialId);
   await processarMensagemMenu({
-    filialId, phone: sepPhone, destino: sepPhone, chatJid: '',
+    filialId, phone: sepPhone, destino: sepPhone, chatJid: grupo,
     texto: 'ABC1D23\n1E 15,15,15', mensagemId: `med-${(msgSeq += 1)}`,
   });
   await processarMensagemMenu({
-    filialId, phone: sepPhone, destino: sepPhone, chatJid: '',
+    filialId, phone: sepPhone, destino: sepPhone, chatJid: grupo,
     texto: '1D 14,14,14,13', mensagemId: `med-${(msgSeq += 1)}`,
   });
-  const sepSess = await obterSessao(filialId, sepPhone, '');
+  const sepSess = await obterSessao(filialId, sepPhone, grupo);
   log(sepSess?.passo === 'confirma' && sepSess.dados?.ok?.length === 2, 'Separadas: acumula 1E + 1D (4 valores)');
   log((await qtdMed(pneus['1E'].id)) === 1, 'Separadas: não grava até confirmar');
   await processarMensagemMenu({
-    filialId, phone: sepPhone, destino: sepPhone, chatJid: '', texto: '1', mensagemId: `med-${(msgSeq += 1)}`,
+    filialId, phone: sepPhone, destino: sepPhone, chatJid: grupo, texto: '1', mensagemId: `med-${(msgSeq += 1)}`,
   });
   const m1e2 = await db.prepare(`SELECT sulco_externo, sulco_auxiliar FROM medicoes WHERE pneu_id = ? ORDER BY id DESC LIMIT 1`).get(pneus['1E'].id);
   const m1d = await db.prepare(`SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = ? ORDER BY id DESC LIMIT 1`).get(pneus['1D'].id);
@@ -179,7 +198,7 @@ async function main() {
   const kmOk = await falar('ABC1D23\nKM 150000\n1E 14.5,14.5,14.5');
   log(kmOk.sessao?.passo === 'confirma' && kmOk.sessao.dados?.km_informado === 150000, 'KM 150000 aceito no resumo');
   await processarMensagemMenu({
-    filialId, phone: kmOk.phone, destino: kmOk.phone, chatJid: '', texto: '1', mensagemId: `med-${(msgSeq += 1)}`,
+    filialId, phone: kmOk.phone, destino: kmOk.phone, chatJid: grupo, texto: '1', mensagemId: `med-${(msgSeq += 1)}`,
   });
   const medKm = await db.prepare(`
     SELECT sulco_externo, km_veiculo FROM medicoes WHERE pneu_id = ? ORDER BY id DESC LIMIT 1
@@ -213,10 +232,10 @@ async function main() {
   );
 
   const d1 = await processarMensagemMenu({
-    filialId, phone: '11981001111', destino: '11981001111', chatJid: '', texto: LOTE, mensagemId: 'dup-med',
+    filialId, phone: '11981001111', destino: '11981001111', chatJid: grupo, texto: LOTE, mensagemId: 'dup-med',
   });
   const d2 = await processarMensagemMenu({
-    filialId, phone: '11981001112', destino: '11981001112', chatJid: '', texto: LOTE, mensagemId: 'dup-med',
+    filialId, phone: '11981001112', destino: '11981001112', chatJid: grupo, texto: LOTE, mensagemId: 'dup-med',
   });
   log(d1.handled === true && d1.duplicado !== true, 'Dedup: 1ª medição com ID passa');
   log(d2.duplicado === true, 'Dedup: reenvio do mesmo ID bloqueia');
