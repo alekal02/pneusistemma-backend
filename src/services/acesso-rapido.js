@@ -77,7 +77,7 @@ export async function gerarTokenAcessoRapido({
   return { token, link, tipo: tipoOk };
 }
 
-export async function validarTokenAcessoRapido(token, tiposPermitidos = null) {
+export async function validarTokenAcessoRapido(token, tiposPermitidos = null, { permitirUsado = false } = {}) {
   if (!token) return null;
   const db = getDb();
   const row = await db.prepare(`
@@ -89,7 +89,7 @@ export async function validarTokenAcessoRapido(token, tiposPermitidos = null) {
   if (Array.isArray(tiposPermitidos) && tiposPermitidos.length && !tiposPermitidos.includes(tipo)) {
     return null;
   }
-  if ((tipo === 'cadastrar_veiculo' || tipo === 'cadastrar_pneu') && row.usado_em) {
+  if (!permitirUsado && (tipo === 'cadastrar_veiculo' || tipo === 'cadastrar_pneu') && row.usado_em) {
     return null;
   }
   if (row.veiculo_id) {
@@ -103,13 +103,62 @@ export async function validarTokenAcessoRapido(token, tiposPermitidos = null) {
   return { ...row, tipo };
 }
 
-export async function marcarTokenUsado(tokenId) {
+export async function marcarTokenUsado(tokenId, vinculo = {}) {
   const db = getDb();
   await db.prepare(`
     UPDATE tokens_acesso_rapido
-    SET usado_em = COALESCE(usado_em, datetime('now', 'localtime'))
+    SET usado_em = COALESCE(usado_em, datetime('now', 'localtime')),
+        veiculo_id = COALESCE(?, veiculo_id),
+        pneu_id = COALESCE(?, pneu_id)
     WHERE id = ?
-  `).run(tokenId);
+  `).run(vinculo.veiculoId ?? null, vinculo.pneuId ?? null, tokenId);
+}
+
+/**
+ * Link de cadastro já consumido: confirma o registro gravado em vez de
+ * responder como se o salvamento tivesse falhado.
+ */
+export async function confirmarCadastroJaGravado(row) {
+  const tipo = row?.tipo || '';
+  if (tipo !== 'cadastrar_veiculo' && tipo !== 'cadastrar_pneu') return null;
+  if (!row?.usado_em) return null;
+  const db = getDb();
+  if ((row.tipo || '') === 'cadastrar_veiculo' && row.veiculo_id) {
+    const v = await db.prepare(`
+      SELECT id, placa FROM veiculos WHERE id = ? AND filial_id = ? AND ativo = 1
+    `).get(row.veiculo_id, row.filial_id);
+    if (!v) {
+      return {
+        status: 409,
+        erro: 'Este link já foi usado e o veículo não está nesta unidade. Confira a lista antes de cadastrar de novo.',
+      };
+    }
+    return {
+      ja_gravado: true,
+      mensagem: `Veículo ${v.placa} já estava cadastrado`,
+      veiculo_id: v.id,
+    };
+  }
+  if ((row.tipo || '') === 'cadastrar_pneu' && row.pneu_id) {
+    const p = await db.prepare(`
+      SELECT id, numero_fogo FROM pneus WHERE id = ? AND filial_id = ?
+    `).get(row.pneu_id, row.filial_id);
+    if (!p) {
+      return {
+        status: 409,
+        erro: 'Este link já foi usado e o pneu não está nesta unidade. Confira o estoque antes de cadastrar de novo.',
+      };
+    }
+    return {
+      ja_gravado: true,
+      mensagem: `Pneu fogo ${p.numero_fogo || p.id} já estava no estoque`,
+      pneu_id: p.id,
+    };
+  }
+  return {
+    status: 409,
+    erro: 'Este link já foi usado. Confira a lista da unidade antes de pedir outro — o cadastro pode já estar salvo.',
+  };
 }
 
 function sanitizarBuscaEstoque(busca) {

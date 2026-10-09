@@ -614,50 +614,94 @@ router.post('/', async (req, res, next) => {
   const custoNum = custo != null && custo !== '' ? parseFloat(String(custo).replace(',', '.')) : null;
 
   try {
-    const { result } = await comRetryFogoUnico(db, filialId, numero_fogo, (fogoOk) => (
-      db.prepare(`
+    const pneu = await db.transaction(async () => {
+      const { result, numero_fogo: fogoOk } = await comRetryFogoUnico(db, filialId, numero_fogo, (fogo) => (
+        comSavepoint(db, () => db.prepare(`
       INSERT INTO pneus (
         veiculo_id, posicao, filial_id, marca, modelo, medida, dot, numero_fogo,
         tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo, observacoes,
         custo, nota_fiscal
       ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1, ?, ?, ?)
     `).run(
-        filialId,
-        marca?.trim() || null,
-        modelo.trim(),
-        medida?.trim() || null,
-        dot?.trim() || null,
-        fogoOk,
-        tipo,
-        cond,
-        Number.isFinite(vida) ? vida : 0,
-        sulco_inicial_mm != null ? parseFloat(sulco_inicial_mm) : null,
-        observacoes?.trim() || null,
-        Number.isFinite(custoNum) ? custoNum : null,
-        nota_fiscal?.trim() || null
-      )
-    ));
+          filialId,
+          marca?.trim() || null,
+          modelo.trim(),
+          medida?.trim() || null,
+          dot?.trim() || null,
+          fogo,
+          tipo,
+          cond,
+          Number.isFinite(vida) ? vida : 0,
+          sulco_inicial_mm != null ? parseFloat(sulco_inicial_mm) : null,
+          observacoes?.trim() || null,
+          Number.isFinite(custoNum) ? custoNum : null,
+          nota_fiscal?.trim() || null
+        ))
+      ));
 
-    const pneu = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(result.lastInsertRowid);
-    await registrarMovimentacao(db, {
-      pneuId: pneu.id,
-      veiculoId: null,
-      tipo: 'entrada_estoque',
-      data: new Date().toISOString().split('T')[0],
-      ciclo: pneu.vida_recap || 0,
-      usuario: usuarioDe(req),
-      custo: pneu.custo,
-      sulcoMm: pneu.sulco_inicial_mm,
-      detalhes: 'Entrada no estoque',
+      const gravado = await db.prepare('SELECT * FROM pneus WHERE id = ? AND filial_id = ?').get(
+        result.lastInsertRowid,
+        filialId
+      );
+      if (!gravado?.id) {
+        const err = new Error('O banco não confirmou o pneu');
+        err.status = 500;
+        throw err;
+      }
+      await registrarMovimentacao(db, {
+        pneuId: gravado.id,
+        veiculoId: null,
+        tipo: 'entrada_estoque',
+        data: new Date().toISOString().split('T')[0],
+        ciclo: gravado.vida_recap || 0,
+        usuario: usuarioDe(req),
+        custo: gravado.custo,
+        sulcoMm: gravado.sulco_inicial_mm,
+        detalhes: 'Entrada no estoque',
+      });
+      return { ...gravado, numero_fogo: gravado.numero_fogo || fogoOk };
     });
+    let resposta = pneu;
+    try {
+      resposta = enriquecerPneu(pneu);
+    } catch (err) {
+      console.error('[pneus] cadastro confirmado; falha ao montar a resposta', err);
+    }
     res.status(201).json({
-      mensagem: 'Pneu cadastrado no estoque',
-      pneu: enriquecerPneu(pneu),
+      mensagem: `Pneu fogo ${pneu.numero_fogo} cadastrado no estoque`,
+      pneu: resposta,
     });
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ erro: err.message });
+    if (err.status) {
+      const body = { erro: err.message };
+      if (err.status === 409) {
+        body.codigo = 'duplicado';
+        const fogo = String(numero_fogo || '').trim();
+        if (fogo) {
+          const existente = await db.prepare(`
+            SELECT id FROM pneus
+            WHERE filial_id = ? AND LOWER(TRIM(numero_fogo)) = LOWER(TRIM(?))
+            LIMIT 1
+          `).get(filialId, fogo);
+          if (existente) body.id = existente.id;
+        }
+      }
+      return res.status(body.erro ? err.status : 500).json(body);
+    }
     if (ehViolacaoUnique(err)) {
-      return res.status(409).json({ erro: 'Já existe um pneu com este nº de fogo na filial' });
+      const fogo = String(numero_fogo || '').trim();
+      const existente = fogo
+        ? await db.prepare(`
+            SELECT id FROM pneus
+            WHERE filial_id = ? AND LOWER(TRIM(numero_fogo)) = LOWER(TRIM(?))
+            LIMIT 1
+          `).get(filialId, fogo)
+        : null;
+      return res.status(409).json({
+        erro: 'Já existe um pneu com este nº de fogo na filial',
+        codigo: 'duplicado',
+        ...(existente ? { id: existente.id } : {}),
+      });
     }
     next(err);
   }

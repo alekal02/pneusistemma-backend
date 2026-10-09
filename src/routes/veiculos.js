@@ -562,45 +562,85 @@ router.post('/', async (req, res, next) => {
 
   const db = getDb();
   const filialId = filialScopeId(req);
+  const placaOk = placa.trim().toUpperCase();
   try {
     const tipoCampos = camposTipoVeiculo(normalizarTipoVeiculo(tipo) || 'Truck / Tração');
     const layoutId = layoutParaNovoVeiculo(tipoCampos.tipo, layout_pneus, {
       posicoesCustom: posicoes_custom,
     });
-    const result = await db.prepare(`
+    const existente = await db.prepare(`
+      SELECT id, filial_id, ativo FROM veiculos
+      WHERE UPPER(TRIM(placa)) = ?
+      LIMIT 1
+    `).get(placaOk);
+    if (existente) {
+      return res.status(409).json({
+        erro: 'Placa já cadastrada',
+        codigo: 'duplicado',
+        ...(Number(existente.filial_id) === Number(filialId) && existente.ativo ? { id: existente.id } : {}),
+      });
+    }
+
+    const salvo = await db.transaction(async () => {
+      const result = await db.prepare(`
       INSERT INTO veiculos (placa, apelido, tipo, tipo_codigo, marca, modelo, ano, km_atual, hr_atual, observacoes, layout_pneus, filial_id, dia_medicao)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      placa.trim().toUpperCase(),
-      apelido?.trim() || null,
-      tipoCampos.tipo,
-      tipoCampos.tipo_codigo,
-      marca?.trim() || null,
-      modelo?.trim() || null,
-      ano || null,
-      km_atual || 0,
-      hr_atual || 0,
-      observacoes?.trim() || null,
-      layoutId,
-      filialId,
-      normalizarDiaMedicao(dia_medicao)
-    );
-
-    const posicoes = await aplicarLayoutPneus(
-      db,
-      result.lastInsertRowid,
-      layoutId,
-      posicoes_custom?.length ? posicoes_custom : null
-    );
+        placaOk,
+        apelido?.trim() || null,
+        tipoCampos.tipo,
+        tipoCampos.tipo_codigo,
+        marca?.trim() || null,
+        modelo?.trim() || null,
+        ano || null,
+        km_atual || 0,
+        hr_atual || 0,
+        observacoes?.trim() || null,
+        layoutId,
+        filialId,
+        normalizarDiaMedicao(dia_medicao)
+      );
+      const id = result.lastInsertRowid;
+      if (!id) {
+        const err = new Error('O banco não confirmou o veículo');
+        err.status = 500;
+        throw err;
+      }
+      const posicoes = await aplicarLayoutPneus(
+        db,
+        id,
+        layoutId,
+        posicoes_custom?.length ? posicoes_custom : null
+      );
+      const gravado = await db.prepare(`
+        SELECT id, placa FROM veiculos WHERE id = ? AND filial_id = ?
+      `).get(id, filialId);
+      if (!gravado) {
+        const err = new Error('O banco não confirmou o veículo');
+        err.status = 500;
+        throw err;
+      }
+      return { id: gravado.id, total_posicoes: posicoes.length };
+    });
 
     res.status(201).json({
-      id: result.lastInsertRowid,
-      total_posicoes: posicoes.length,
-      mensagem: `Veículo cadastrado com ${posicoes.length} posições — monte pneus do estoque`,
+      id: salvo.id,
+      total_posicoes: salvo.total_posicoes,
+      mensagem: `Veículo ${placaOk} cadastrado com ${salvo.total_posicoes} posições`,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
     if (ehViolacaoUnique(err)) {
-      return res.status(409).json({ erro: 'Placa já cadastrada' });
+      const existente = await db.prepare(`
+        SELECT id, filial_id, ativo FROM veiculos WHERE UPPER(TRIM(placa)) = ? LIMIT 1
+      `).get(placaOk);
+      return res.status(409).json({
+        erro: 'Placa já cadastrada',
+        codigo: 'duplicado',
+        ...(existente && Number(existente.filial_id) === Number(filialId) && existente.ativo
+          ? { id: existente.id }
+          : {}),
+      });
     }
     next(err);
   }

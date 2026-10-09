@@ -5,6 +5,7 @@ import { Router } from 'express';
 import {
   validarTokenAcessoRapido,
   marcarTokenUsado,
+  confirmarCadastroJaGravado,
   montarDetalheVeiculo,
   listarEstoqueFilial,
 } from '../services/acesso-rapido.js';
@@ -26,8 +27,8 @@ import { consultarProximoFogo } from '../numero-fogo.js';
 
 const router = Router();
 
-async function tokenOuErro(token, tipos) {
-  const row = await validarTokenAcessoRapido(String(token || ''), tipos);
+async function tokenOuErro(token, tipos, { permitirUsado = false } = {}) {
+  const row = await validarTokenAcessoRapido(String(token || ''), tipos, { permitirUsado });
   if (!row) {
     const err = new Error('Link inválido ou expirado');
     err.status = 401;
@@ -38,7 +39,9 @@ async function tokenOuErro(token, tipos) {
 
 router.get('/', async (req, res, next) => {
   try {
-    const row = await tokenOuErro(req.query.token);
+    const row = await tokenOuErro(req.query.token, null, { permitirUsado: true });
+    const ja = await confirmarCadastroJaGravado(row);
+    if (ja?.status) return res.status(ja.status).json({ erro: ja.erro });
     const db = getDb();
     const filial = await db.prepare(`
       SELECT id, nome, codigo FROM filiais WHERE id = ? AND ativo = 1
@@ -50,6 +53,7 @@ router.get('/', async (req, res, next) => {
       token: row.token,
       filial,
       expira_em: row.expira_em,
+      ...(ja?.ja_gravado ? { ja_gravado: true, mensagem: ja.mensagem } : {}),
     };
 
     if (row.tipo === 'cadastrar_veiculo') {
@@ -137,7 +141,10 @@ router.get('/proximo-fogo', async (req, res, next) => {
 router.post('/veiculo', async (req, res, next) => {
   try {
     const { token, placa, apelido, tipo, km_atual, hr_atual, layout_pneus, marca, modelo } = req.body || {};
-    const row = await tokenOuErro(token, ['cadastrar_veiculo']);
+    const row = await tokenOuErro(token, ['cadastrar_veiculo'], { permitirUsado: true });
+    const ja = await confirmarCadastroJaGravado(row);
+    if (ja?.ja_gravado) return res.status(200).json(ja);
+    if (ja?.status) return res.status(ja.status).json({ erro: ja.erro });
     if (!String(modelo || '').trim()) {
       return res.status(400).json({ erro: 'Modelo é obrigatório' });
     }
@@ -147,26 +154,34 @@ router.post('/veiculo', async (req, res, next) => {
     if (!layout_pneus) {
       return res.status(400).json({ erro: 'Configuração dos eixos é obrigatória' });
     }
-
-    let created;
-    if (row.veiculo_id) {
-      created = await ops.completarVeiculo(row.filial_id, row.veiculo_id, {
-        placa, apelido, tipo, km_atual, layout_pneus, marca, modelo,
-      });
-    } else {
-      if (!placa?.trim()) return res.status(400).json({ erro: 'Placa é obrigatória' });
-      created = await ops.criarVeiculo(row.filial_id, {
-        placa: placa.trim(),
-        apelido: apelido || null,
-        tipo: tipo || 'Truck / Tração',
-        km_atual: km_atual ?? 0,
-        hr_atual: hr_atual ?? 0,
-        layout_pneus: layout_pneus || null,
-        marca,
-        modelo,
-      });
+    if (!row.veiculo_id && !placa?.trim()) {
+      return res.status(400).json({ erro: 'Placa é obrigatória' });
     }
-    await marcarTokenUsado(row.id);
+
+    const db = getDb();
+    const created = await db.transaction(async () => {
+      const salvo = row.veiculo_id
+        ? await ops.completarVeiculo(row.filial_id, row.veiculo_id, {
+          placa, apelido, tipo, km_atual, layout_pneus, marca, modelo,
+        })
+        : await ops.criarVeiculo(row.filial_id, {
+          placa: placa.trim(),
+          apelido: apelido || null,
+          tipo: tipo || 'Truck / Tração',
+          km_atual: km_atual ?? 0,
+          hr_atual: hr_atual ?? 0,
+          layout_pneus: layout_pneus || null,
+          marca,
+          modelo,
+        });
+      if (!salvo?.id) {
+        const err = new Error('O banco não confirmou o veículo');
+        err.status = 500;
+        throw err;
+      }
+      await marcarTokenUsado(row.id, { veiculoId: salvo.id });
+      return salvo;
+    });
 
     const placaOk = created.placa || String(placa || '').trim().toUpperCase();
     const cat = resolverTipoEquipamento(tipo);
@@ -187,7 +202,10 @@ router.post('/pneu', async (req, res, next) => {
     const {
       token, numero_fogo, marca, modelo, tipo_pneu, condicao, sulco_inicial_mm,
     } = req.body || {};
-    const row = await tokenOuErro(token, ['cadastrar_pneu']);
+    const row = await tokenOuErro(token, ['cadastrar_pneu'], { permitirUsado: true });
+    const ja = await confirmarCadastroJaGravado(row);
+    if (ja?.ja_gravado) return res.status(200).json(ja);
+    if (ja?.status) return res.status(ja.status).json({ erro: ja.erro });
     if (!String(modelo || '').trim()) {
       return res.status(400).json({ erro: 'Modelo é obrigatório' });
     }
@@ -200,27 +218,33 @@ router.post('/pneu', async (req, res, next) => {
       return res.status(400).json({ erro: `Condição inválida: ${CONDICOES_PNEU.join(', ')}` });
     }
 
-    let created;
-    if (row.pneu_id) {
-      created = await ops.completarPneu(row.filial_id, row.pneu_id, {
-        numero_fogo,
-        marca: marca || null,
-        modelo: String(modelo).trim(),
-        tipo_pneu: tipo,
-        condicao: cond,
-        sulco_inicial_mm: sulco_inicial_mm ?? null,
-      });
-    } else {
-      created = await ops.criarPneuEstoque(row.filial_id, {
-        numero_fogo,
-        marca: marca || null,
-        modelo: String(modelo).trim(),
-        tipo_pneu: tipo,
-        condicao: cond,
-        sulco_inicial_mm: sulco_inicial_mm ?? null,
-      });
-    }
-    await marcarTokenUsado(row.id);
+    const db = getDb();
+    const created = await db.transaction(async () => {
+      const salvo = row.pneu_id
+        ? await ops.completarPneu(row.filial_id, row.pneu_id, {
+          numero_fogo,
+          marca: marca || null,
+          modelo: String(modelo).trim(),
+          tipo_pneu: tipo,
+          condicao: cond,
+          sulco_inicial_mm: sulco_inicial_mm ?? null,
+        })
+        : await ops.criarPneuEstoque(row.filial_id, {
+          numero_fogo,
+          marca: marca || null,
+          modelo: String(modelo).trim(),
+          tipo_pneu: tipo,
+          condicao: cond,
+          sulco_inicial_mm: sulco_inicial_mm ?? null,
+        });
+      if (!salvo?.id) {
+        const err = new Error('O banco não confirmou o pneu');
+        err.status = 500;
+        throw err;
+      }
+      await marcarTokenUsado(row.id, { pneuId: salvo.id });
+      return salvo;
+    });
 
     res.status(201).json({
       mensagem: `Pneu fogo ${created.numero_fogo || numero_fogo} no estoque`,

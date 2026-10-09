@@ -3,7 +3,7 @@
  */
 import { getDb } from '../database.js';
 import { registrarMovimentacao, travarPneu } from './pneu-movimentacao.js';
-import { ehViolacaoUnique } from '../db-utils.js';
+import { comSavepoint, ehViolacaoUnique } from '../db-utils.js';
 import { getLimites, classificarSulco, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { diagnosticarPerfil, sugerirAcao, desgastePorKm } from '../diagnostico.js';
 import { notificarGerentesAposMedicao } from './alertas-whatsapp.js';
@@ -227,33 +227,37 @@ export async function criarVeiculo(filialId, {
   const tipoCampos = camposTipoVeiculo(tipoNorm);
   const layoutId = preCadastro ? null : layoutParaNovoVeiculo(tipoNorm, layout_pneus);
   const temCadastro = await colunaExiste(db, 'veiculos', 'cadastro_completo');
+  const placaOk = String(placa).trim().toUpperCase();
   try {
-    const result = await db.prepare(`
+    return await db.transaction(async () => {
+      const result = await db.prepare(`
       INSERT INTO veiculos (
         placa, apelido, tipo, tipo_codigo, marca, modelo, km_atual, hr_atual, layout_pneus,
         filial_id, ativo${temCadastro ? ', cadastro_completo' : ''}
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1${temCadastro ? ', ?' : ''})
     `).run(
-      ...[
-        String(placa).trim().toUpperCase(),
-        apelido?.trim() || null,
-        tipoCampos.tipo,
-        tipoCampos.tipo_codigo,
-        marca?.trim() || null,
-        modelo?.trim() || null,
-        Number(km_atual) || 0,
-        Number(hr_atual) || 0,
-        layoutId,
-        filialId,
-        ...(temCadastro ? [preCadastro ? 0 : 1] : []),
-      ]
-    );
-    const id = result.lastInsertRowid;
-    if (preCadastro) {
-      return { id, layoutId: null, total_posicoes: 0, preCadastro: true };
-    }
-    const posicoes = await aplicarLayoutPneus(db, id, layoutId, null);
-    return { id, layoutId, total_posicoes: posicoes.length, preCadastro: false };
+        ...[
+          placaOk,
+          apelido?.trim() || null,
+          tipoCampos.tipo,
+          tipoCampos.tipo_codigo,
+          marca?.trim() || null,
+          modelo?.trim() || null,
+          Number(km_atual) || 0,
+          Number(hr_atual) || 0,
+          layoutId,
+          filialId,
+          ...(temCadastro ? [preCadastro ? 0 : 1] : []),
+        ]
+      );
+      const id = result.lastInsertRowid;
+      if (!id) throw erroOps('O banco não confirmou o veículo', 500);
+      if (preCadastro) {
+        return { id, placa: placaOk, layoutId: null, total_posicoes: 0, preCadastro: true };
+      }
+      const posicoes = await aplicarLayoutPneus(db, id, layoutId, null);
+      return { id, placa: placaOk, layoutId, total_posicoes: posicoes.length, preCadastro: false };
+    });
   } catch (err) {
     if (ehViolacaoUnique(err)) {
       const e = new Error('Placa já cadastrada');
@@ -282,24 +286,26 @@ export async function completarVeiculo(filialId, veiculoId, {
   if (!layoutId) throw erroOps('Configuração dos eixos é obrigatória', 400);
 
   const temCadastro = await colunaExiste(db, 'veiculos', 'cadastro_completo');
-  await db.prepare(`
+  return db.transaction(async () => {
+    await db.prepare(`
     UPDATE veiculos SET
       marca = ?, modelo = ?, tipo = ?, tipo_codigo = ?,
       km_atual = COALESCE(?, km_atual), apelido = COALESCE(?, apelido),
       ano = COALESCE(?, ano)${temCadastro ? ', cadastro_completo = 1' : ''}, updated_at = NOW()
     WHERE id = ?
   `).run(
-    marcaOk,
-    modeloOk,
-    tipoCampos.tipo,
-    tipoCampos.tipo_codigo,
-    km_atual != null ? Number(km_atual) : null,
-    apelido != null ? (String(apelido).trim() || null) : null,
-    ano != null ? Number(ano) : null,
-    veiculoId
-  );
-  const posicoes = await aplicarLayoutPneus(db, veiculoId, layoutId, null);
-  return { id: veiculoId, layoutId, total_posicoes: posicoes.length, placa: veiculo.placa };
+      marcaOk,
+      modeloOk,
+      tipoCampos.tipo,
+      tipoCampos.tipo_codigo,
+      km_atual != null ? Number(km_atual) : null,
+      apelido != null ? (String(apelido).trim() || null) : null,
+      ano != null ? Number(ano) : null,
+      veiculoId
+    );
+    const posicoes = await aplicarLayoutPneus(db, veiculoId, layoutId, null);
+    return { id: veiculoId, layoutId, total_posicoes: posicoes.length, placa: veiculo.placa };
+  });
 }
 
 export async function criarPneuEstoque(filialId, {
@@ -315,41 +321,44 @@ export async function criarPneuEstoque(filialId, {
   const vida = cond === 'recapado' ? 1 : 0;
   const temCadastro = await colunaExiste(db, 'pneus', 'cadastro_completo');
   try {
-    const { result } = await comRetryFogoUnico(db, filialId, numero_fogo, (fogo) => (
-      db.prepare(`
+    return await db.transaction(async () => {
+      const { result } = await comRetryFogoUnico(db, filialId, numero_fogo, (fogo) => (
+        comSavepoint(db, () => db.prepare(`
       INSERT INTO pneus (
         veiculo_id, posicao, filial_id, marca, modelo, numero_fogo,
         tipo_pneu, condicao, vida_recap, sulco_inicial_mm, status_pneu, ativo
         ${temCadastro ? ', cadastro_completo' : ''}
       ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'estoque', 1${temCadastro ? ', ?' : ''})
     `).run(
-        ...[
-          filialId,
-          marca?.trim() || null,
-          modeloOk,
-          fogo,
-          tipo,
-          cond,
-          vida,
-          sulco_inicial_mm != null ? Number(sulco_inicial_mm) : null,
-          ...(temCadastro ? [preCadastro ? 0 : 1] : []),
-        ]
-      )
-    ));
-    const row = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(result.lastInsertRowid);
-    if (!preCadastro && (auditoria?.telefone || auditoria?.login)) {
-      const trilha = trilhaWhatsApp(auditoria, 'Cadastro no estoque');
-      await registrarMovimentacao(db, {
-        pneuId: row.id,
-        tipo: 'entrada_estoque',
-        data: hojeIso(),
-        ciclo: row.vida_recap || 0,
-        usuario: trilha.usuario,
-        sulcoMm: row.sulco_inicial_mm,
-        detalhes: trilha.detalhes,
-      });
-    }
-    return row;
+          ...[
+            filialId,
+            marca?.trim() || null,
+            modeloOk,
+            fogo,
+            tipo,
+            cond,
+            vida,
+            sulco_inicial_mm != null ? Number(sulco_inicial_mm) : null,
+            ...(temCadastro ? [preCadastro ? 0 : 1] : []),
+          ]
+        ))
+      ));
+      const row = await db.prepare('SELECT * FROM pneus WHERE id = ?').get(result.lastInsertRowid);
+      if (!row?.id) throw erroOps('O banco não confirmou o pneu', 500);
+      if (!preCadastro && (auditoria?.telefone || auditoria?.login)) {
+        const trilha = trilhaWhatsApp(auditoria, 'Cadastro no estoque');
+        await registrarMovimentacao(db, {
+          pneuId: row.id,
+          tipo: 'entrada_estoque',
+          data: hojeIso(),
+          ciclo: row.vida_recap || 0,
+          usuario: trilha.usuario,
+          sulcoMm: row.sulco_inicial_mm,
+          detalhes: trilha.detalhes,
+        });
+      }
+      return row;
+    });
   } catch (err) {
     if (err.status) throw err;
     if (ehViolacaoUnique(err)) {
