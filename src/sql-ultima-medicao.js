@@ -5,7 +5,7 @@
 export const SQL_LATERAL_ULTIMA_MEDICAO = `
 LEFT JOIN LATERAL (
   SELECT sulco_externo, sulco_central, sulco_interno, sulco_auxiliar, sulco_mm,
-         inspecao_danos, data_medicao, created_at, diagnostico, acao_sugerida, id, km_veiculo, hr_veiculo
+         inspecao_danos, pressao_psi, data_medicao, created_at, diagnostico, acao_sugerida, id, km_veiculo, hr_veiculo
   FROM medicoes
   WHERE pneu_id = p.id
   ORDER BY data_medicao DESC, id DESC

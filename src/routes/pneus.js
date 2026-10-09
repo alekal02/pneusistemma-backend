@@ -173,6 +173,7 @@ function enriquecerPneu(pneu, ultimaMedicao = null, candidatos = []) {
         sulco_central: ultimaMedicao.sulco_central ?? ultimaMedicao.ult_sulco_cent ?? null,
         sulco_interno: ultimaMedicao.sulco_interno ?? ultimaMedicao.ult_sulco_int ?? null,
         sulco_auxiliar: ultimaMedicao.sulco_auxiliar ?? ultimaMedicao.ult_sulco_aux ?? null,
+        pressao_psi: ultimaMedicao.pressao_psi ?? ultimaMedicao.ult_pressao_psi ?? null,
         menor_sulco: menor,
       }
       : null,
@@ -553,6 +554,7 @@ router.get('/', async (req, res, next) => {
       um.sulco_central as ult_sulco_cent,
       um.sulco_interno as ult_sulco_int,
       um.sulco_auxiliar as ult_sulco_aux,
+      um.pressao_psi as ult_pressao_psi,
       um.data_medicao as ult_medicao
     FROM pneus p
     LEFT JOIN veiculos v ON v.id = p.veiculo_id
@@ -579,6 +581,7 @@ router.get('/', async (req, res, next) => {
           sulco_central: p.ult_sulco_cent,
           sulco_interno: p.ult_sulco_int,
           sulco_auxiliar: p.ult_sulco_aux,
+          pressao_psi: p.ult_pressao_psi,
         }
         : null;
       return enriquecerPneu(p, ultima);

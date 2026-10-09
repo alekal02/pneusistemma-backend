@@ -421,6 +421,7 @@ router.post('/', requireAuthOrAcessoRapido, async (req, res, next) => {
       desgaste_mm_hora: prep.desgaste_mm_hora,
       km_veiculo: prep.km_veiculo,
       hr_veiculo: prep.hr_veiculo,
+      pressao_psi: prep.pressao_psi,
       veiculo_placa: placa,
       prazo_recap_dias: prazoDias,
       data_limite_recap: dataLimiteRecap,

@@ -581,6 +581,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
       um.sulco_auxiliar as ult_sulco_aux,
       um.sulco_mm as ult_sulco_mm,
       um.inspecao_danos as ult_inspecao_danos,
+      um.pressao_psi as ult_pressao_psi,
       um.diagnostico as ult_diagnostico,
       um.acao_sugerida as ult_acao,
       um.data_medicao as ult_medicao,
@@ -647,6 +648,7 @@ router.get('/:id/veiculos/:veiculoId', async (req, res, next) => {
             sulco_interno: p.ult_sulco_int,
             sulco_auxiliar: p.ult_sulco_aux,
             sulco_mm: p.ult_sulco_mm,
+            pressao_psi: p.ult_pressao_psi ?? null,
             menor_sulco: menor,
           }
           : null,
