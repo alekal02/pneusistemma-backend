@@ -80,14 +80,39 @@ function normalizarPlacaTexto(texto) {
     .replace(/[^A-Z0-9]/g, '');
 }
 
+function idRequisicao(req) {
+  const id = req.get('rndr-id') || req.get('x-request-id');
+  return id ? String(id) : null;
+}
+
+function jidMascarado(jid) {
+  const id = String(jid || '').replace(/@.*$/, '').replace(/\D/g, '');
+  if (!id) return null;
+  return `…${id.slice(-4)}`;
+}
+
+function classeComando(texto) {
+  const bruto = String(texto || '').trim();
+  if (!bruto) return null;
+  const cmd = bruto.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  if (/^(menu|ajuda|help|\?)$/.test(cmd)) return 'menu';
+  if (/^[0-9]$/.test(cmd)) return 'numero';
+  return 'outro';
+}
+
+function logWebhook(req, campos) {
+  console.info('[webhook]', { req: idRequisicao(req), ...campos });
+}
+
 function validarHmacWebhook(req) {
   const secret = config.wuzapiWebhookSecret;
   if (!secret) return true;
 
   const signature = req.headers['x-hmac-signature'] || req.headers['x-hub-signature'];
   if (!signature) {
-    // Secret no .env sem HMAC ativo no WuzAPI — não bloquear o fluxo placa→link
-    console.warn('[webhook] HMAC configurado mas assinatura ausente — aceitando mensagem');
+    // O WuzAPI só manda x-hmac-signature quando o usuário tem chave HMAC.
+    // Sem o header, o segredo do Render não consegue validar este POST.
+    logWebhook(req, { hmac: 'ausente', motivo: 'assinatura_ausente' });
     return true;
   }
 
@@ -318,13 +343,37 @@ router.post('/whatsapp', async (req, res) => {
 
     // Só Message. ReadReceipt/HistorySync às vezes trazem o mesmo texto e repetem o menu.
     if (eventName && !/^message$/i.test(String(eventName).trim())) {
+      logWebhook(req, {
+        tipo: String(eventName).slice(0, 40),
+        fromMe: ehMensagemPropria(event),
+        grupo: null,
+        comando: null,
+        motivo: 'tipo',
+        envio: 'nao_tentado',
+      });
       return res.status(200).json({ ok: true, ignored: true, tipo: eventName });
     }
     if (!eventName && !temMensagem) {
+      logWebhook(req, {
+        tipo: '(vazio)',
+        fromMe: ehMensagemPropria(event),
+        grupo: null,
+        comando: null,
+        motivo: 'vazio',
+        envio: 'nao_tentado',
+      });
       return res.status(200).json({ ok: true, ignored: true, tipo: '(vazio)' });
     }
 
     if (deveIgnorarMensagemPropria(event)) {
+      logWebhook(req, {
+        tipo: eventName || '(sem nome)',
+        fromMe: true,
+        grupo: jidMascarado(extrairChatJid(event)),
+        comando: classeComando(extrairTextoMensagem(event)),
+        motivo: 'from_me',
+        envio: 'nao_tentado',
+      });
       return res.status(200).json({ ok: true, ignored: 'from_me' });
     }
 
@@ -334,32 +383,28 @@ router.post('/whatsapp', async (req, res) => {
     const body = extrairTextoMensagem(event);
     const msgId = extrairIdMensagem(event);
 
-    console.log('[webhook] msg', {
-      event: eventName || '(sem nome)',
-      id: msgId,
-      chat: chatJid,
-      isGroup,
-      phone,
-      body: body ? String(body).slice(0, 80) : null,
-      filial_hint: null,
-      from_me: ehMensagemPropria(event),
-    });
+    const resumo = {
+      tipo: eventName || '(sem nome)',
+      fromMe: false,
+      grupo: jidMascarado(chatJid),
+      grupoReconhecido: null,
+      comando: classeComando(body),
+      remetente: phone ? 'ok' : 'ausente',
+    };
 
     if (!body) {
+      logWebhook(req, { ...resumo, motivo: 'sem_texto', envio: 'nao_tentado' });
       return res.status(200).json({ ok: true, ignored: 'sem_texto' });
     }
 
     const canal = await resolverCanalFilial(chatJid);
 
     if (!canal) {
-      console.info('[webhook] ignorado (fora do grupo selecionado)', {
-        chat: chatJid,
-        isGroup,
-        filial_hint: null,
-      });
+      const motivo = isGroup ? 'grupo_nao_selecionado' : 'somente_grupo_selecionado';
+      logWebhook(req, { ...resumo, grupoReconhecido: false, motivo, envio: 'nao_tentado' });
       return res.status(200).json({
         ok: true,
-        ignored: isGroup ? 'grupo_nao_selecionado' : 'somente_grupo_selecionado',
+        ignored: motivo,
         chat: chatJid,
       });
     }
@@ -370,11 +415,12 @@ router.post('/whatsapp', async (req, res) => {
       filialId: canal.escopoFilialId,
       body,
     })) {
-      console.info('[webhook] ignorado (duplicada)', {
-        id: msgId,
-        chat: chatJid,
+      logWebhook(req, {
+        ...resumo,
+        grupoReconhecido: true,
         filial: canal.escopoFilialId,
-        body: String(body).slice(0, 40),
+        motivo: 'duplicada',
+        envio: 'nao_tentado',
       });
       return res.status(200).json({ ok: true, ignored: 'duplicada', id: msgId });
     }
@@ -382,13 +428,26 @@ router.post('/whatsapp', async (req, res) => {
     phone = extrairTelefone(event, [canal.filial.whatsapp]);
     const destinoEnvio = canal.replyTo;
     if (!destinoEnvio) {
+      logWebhook(req, {
+        ...resumo,
+        grupoReconhecido: true,
+        filial: canal.escopoFilialId,
+        motivo: 'sem_destino',
+        envio: 'nao_tentado',
+      });
       return res.status(200).json({ ok: true, ignored: 'sem_destino' });
     }
 
     // Rate limit por remetente (não pelo grupo — evita bloquear a frota inteira)
     const rateKey = phone || destinoEnvio;
     if (!rateLimitOk(rateKey)) {
-      console.warn(`[webhook] Rate limit: ${rateKey}`);
+      logWebhook(req, {
+        ...resumo,
+        grupoReconhecido: true,
+        filial: canal.escopoFilialId,
+        motivo: 'rate_limit',
+        envio: 'tentado',
+      });
       await enviarERegistrar({
         tipo: 'link_veiculo',
         destinatario: destinoEnvio,
@@ -402,6 +461,13 @@ router.post('/whatsapp', async (req, res) => {
     const texto = String(body || '').trim();
 
     // Menu numerado + fluxos A/B/C (medir, cadastros, troca, recap, descarte, relatório…)
+    logWebhook(req, {
+      ...resumo,
+      grupoReconhecido: true,
+      filial: canal.escopoFilialId,
+      motivo: null,
+      envio: 'agendado',
+    });
     res.status(200).json({ ok: true, aceito: true, via: 'menu' });
     processarMensagemMenu({
       texto,
@@ -412,16 +478,28 @@ router.post('/whatsapp', async (req, res) => {
       mensagemId: msgId || null,
     }).then((r) => {
       if (r?.handled) {
-        console.log('[webhook] menu handled', {
-          phone,
+        logWebhook(req, {
+          ...resumo,
+          grupoReconhecido: true,
           filial: canal?.escopoFilialId || null,
-          texto: texto.slice(0, 40),
+          motivo: r.bloqueado || r.duplicado ? (r.bloqueado || 'duplicada') : null,
+          envio: 'processado',
         });
         return;
       }
-      // Conversa livre no grupo — não responde
-      console.log('[webhook] ignorado (conversa)', { texto: texto.slice(0, 40) });
+      logWebhook(req, {
+        ...resumo,
+        grupoReconhecido: true,
+        motivo: 'conversa',
+        envio: 'nao_tentado',
+      });
     }).catch((err) => {
+      logWebhook(req, {
+        ...resumo,
+        grupoReconhecido: true,
+        motivo: 'erro',
+        envio: 'falhou',
+      });
       console.error('[webhook] menu falhou:', err.message);
       enviarERegistrar({
         tipo: 'link_veiculo',
