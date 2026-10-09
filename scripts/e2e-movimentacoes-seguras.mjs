@@ -108,6 +108,7 @@ async function main() {
   );
   const frota = await falar('frota', { phone: '5511966554433' });
   log(frota.r.handled === true && (await estado(consulta.id)).status_pneu === 'montado', 'Consulta: frota sem autorização de escrita');
+  await falar('menu', { phone: '5511966554433' });
   const rel = await falar('8', { phone: '5511966554433' });
   log(rel.sessao?.fluxo === 'relatorio' && (await estado(consulta.id)).status_pneu === 'montado', 'Relatório: abre sem autorização de escrita');
 
@@ -121,6 +122,7 @@ async function main() {
     'Atalho: participante sem cadastro pede confirmação e não grava',
   );
   await falar('0', { phone: '5511966554444' });
+  await falar('menu', { phone: '5511977777777' });
   const menu5 = await falar('5', { phone: '5511977777777' });
   log(
     menu5.sessao?.fluxo === 'estoque' && (await estado(bloqueio.id)).status_pneu === 'montado',
@@ -128,7 +130,9 @@ async function main() {
   );
   await falar('0', { phone: '5511977777777' });
   const chip = await falar('5', { phone: '5511900001111' });
-  log(chip.r.bloqueado === 'remetente' && !chip.sessao, 'Menu 5: número do chatbot não abre movimentação');
+  log(chip.r.handled === false && !chip.sessao, 'Número 5 sem sessão não abre movimentação');
+  const chipMenu = await falar('menu', { phone: '5511900001111' });
+  log(chipMenu.r.bloqueado === 'remetente' && !chipMenu.sessao, 'Menu: número do chatbot não abre sessão');
 
   const origTroca = await pneu('2EE');
   const subTroca = await pneu();
@@ -155,6 +159,7 @@ async function main() {
 
   const origRet = await pneu('2EI');
   const subRet = await pneu();
+  await falar('menu');
   await falar('5');
   await falar(origRet.numero_fogo);
   await falar(subRet.numero_fogo);
@@ -194,6 +199,7 @@ async function main() {
   );
 
   const recap = await pneu();
+  await falar('menu');
   await falar('6');
   await falar(recap.numero_fogo);
   log((await estado(recap.id)).status_pneu === 'estoque', 'Recap: pede 1 antes de enviar');
@@ -206,6 +212,7 @@ async function main() {
       && /WhatsApp/i.test(ultRecap?.detalhes || ''),
     'Recap: envio gravado com login e origem',
   );
+  await falar('menu');
   await falar('6');
   await falar(recap.numero_fogo);
   log((await obterSessao(filialId, op, '120363018888@g.us'))?.passo === 'devolver', 'Recap: retorno pede 1');
@@ -219,6 +226,7 @@ async function main() {
   );
 
   const desc = await pneu();
+  await falar('menu');
   await falar('7');
   await falar(desc.numero_fogo);
   await falar('corte lateral');

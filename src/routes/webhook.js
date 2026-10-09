@@ -7,6 +7,11 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { config } from '../config.js';
 import { enviarERegistrar, normalizarDestino, telefoneConfiavel } from '../services/whatsapp.js';
 import { processarMensagemMenu, resolverUnidadeOficial } from '../services/whatsapp-menu.js';
+import {
+  parseComandoNatural,
+  parseConsultaWhatsApp,
+  parseMedicaoWhatsApp,
+} from '../services/whatsapp-comandos.js';
 
 const router = Router();
 
@@ -94,10 +99,20 @@ function jidMascarado(jid) {
 function classeComando(texto) {
   const bruto = String(texto || '').trim();
   if (!bruto) return null;
-  const cmd = bruto.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  const cmd = bruto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (/^(menu|ajuda|help|\?)$/.test(cmd)) return 'menu';
+  if (/^(frota|placas|lista|relatorio|report|pdf)$/.test(cmd)) return 'consulta';
+  if (/^medir pneu$/.test(cmd)) return 'medir';
+  if (parseConsultaWhatsApp(bruto)) return 'consulta';
+  if (parseMedicaoWhatsApp(bruto)) return 'medicao';
+  if (parseComandoNatural(bruto)) return 'comando';
   if (/^[0-9]$/.test(cmd)) return 'numero';
-  return 'outro';
+  return null;
 }
 
 function logWebhook(req, campos) {

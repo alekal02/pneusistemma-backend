@@ -269,6 +269,7 @@ async function main() {
   log(Number(b4?.sulco_externo) === 4, 'Grupo: B confirma a própria medição');
 
   const antesMenu = await qtd(pneus['1E'].id);
+  await falar('menu', { phone: opA, mensagemId: 'menu-abre' });
   const menu = await falar('1', { phone: opA, mensagemId: 'menu-1' });
   log(menu.sessao?.fluxo === 'medir', 'Menu 1: continua pedindo a placa');
   await falar('ABC1D23', { phone: opA, mensagemId: 'menu-placa' });

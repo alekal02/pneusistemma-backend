@@ -85,12 +85,27 @@ function parecePlacaOperacional(texto) {
   return true;
 }
 
-function ehCancelar(cmd) {
-  return /^(0|cancelar|cancela|sair|voltar|menu)$/i.test(cmd);
+function ehSair(cmd) {
+  return /^(cancelar|cancela|sair|voltar)$/.test(cmd);
 }
 
 function ehMenu(cmd) {
-  return /^(menu|ajuda|help|\?)$/i.test(cmd);
+  return /^(menu|ajuda|help|\?)$/.test(cmd);
+}
+
+/** Frase de conversa. Não é dado de placa, fogo, motivo ou confirmação. */
+function pareceFraseComum(texto) {
+  const bruto = String(texto || '').trim();
+  if (!bruto) return false;
+  if (/[?]/.test(bruto)) return true;
+  const n = norm(bruto)
+    .replace(/[^\p{L}\p{N}\s\-_./]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const palavras = n.split(' ').filter(Boolean);
+  if (palavras.length < 2) return false;
+  return /^(pra|para|preciso|precisa|precisamos|vou|vamos|vai|temos|tenho|tem|alguem|consegue|consigo|quero|queria|podemos|pode|favor|por)$/.test(palavras[0])
+    || (palavras.length >= 3 && /^(o|a|os|as)$/.test(palavras[0]));
 }
 
 /** “fechou”, “rlx”, “flws” e similares — conversa, não operação. */
@@ -110,7 +125,7 @@ export function pareceFogoAvulso(texto) {
   const t = String(texto || '').trim();
   if (!t || /^[0-9]$/.test(t)) return false;
   const cmd = norm(t);
-  if (ehMenu(cmd) || ehCancelar(cmd) || ehConversaLivre(t)) return false;
+  if (ehMenu(cmd) || ehSair(cmd) || cmd === '0' || ehConversaLivre(t)) return false;
   if (/^(frota|placas|lista|relatorio|report|pdf)$/i.test(cmd)) return false;
   const fogo = t.replace(/^fogo\s+/i, '').trim();
   if (!fogo || /\s/.test(fogo)) return false;
@@ -212,6 +227,30 @@ async function setFluxo(ctx, fluxo, passo, dados = {}) {
 
 async function clear(ctx) {
   await limparSessao(ctx.filialId, ctx.phone, ctx.chatJid);
+}
+
+async function abrirMenu(ctx) {
+  await setFluxo(ctx, 'menu', 'opcao', {});
+  await reply(ctx, textoMenu());
+}
+
+function comandoExplicito(texto) {
+  const cmd = norm(texto);
+  if (!cmd || soNumero(texto) !== null) return false;
+  if (ehMenu(cmd) || ehSair(cmd)) return true;
+  if (/^(frota|placas|lista|relatorio|report|pdf|medir pneu)$/.test(cmd)) return true;
+  if (parseConsultaWhatsApp(texto) || parseMedicaoWhatsApp(texto) || parseComandoNatural(texto)) return true;
+  if (parecePlacaBrasil(texto) || parecePlacaOperacional(texto) || pareceFogoAvulso(texto)) return true;
+  return false;
+}
+
+async function remetenteOperacaoOk(ctx, unidade) {
+  const phone = telefoneConfiavel(ctx.phone);
+  if (!phone || await telefoneEhDoChatbot(phone, unidade.whatsapp)) {
+    await reply(ctx, 'Não identifiquei seu número neste grupo. Não gravei nada.');
+    return false;
+  }
+  return true;
 }
 
 async function resolverVeiculoPorTexto(filialId, texto) {
@@ -2146,6 +2185,16 @@ async function continuarSessao(ctx, sessao, texto) {
         return await passoMedicaoWhatsApp(ctx, sessao, texto);
       case 'relatorio':
         return await passoTipoRelatorio(ctx, texto);
+      case 'menu': {
+        const n = soNumero(texto);
+        if (n === null) return;
+        if (n === '0') {
+          await reply(ctx, textoMenu());
+          return;
+        }
+        await iniciarOpcao(ctx, n);
+        return;
+      }
       default:
         await clear(ctx);
         await reply(ctx, textoMenu());
@@ -2185,47 +2234,61 @@ export async function processarMensagemMenu(ctx) {
     return { handled: true, duplicado: true };
   }
 
-  if (ehCancelar(cmd) || ehMenu(cmd)) {
-    await clear(ctx);
-    await reply(ctx, textoMenu());
+  let sessao = await obterSessao(filialId, ctx.phone, ctx.chatJid);
+
+  if (ehMenu(cmd) || ehSair(cmd)) {
+    if (operacaoExigeRemetente(texto) && !await remetenteOperacaoOk(ctx, unidade)) {
+      return { handled: true, bloqueado: 'remetente' };
+    }
+    await abrirMenu(ctx);
     return { handled: true };
   }
 
-  if (operacaoExigeRemetente(texto)) {
-    const phone = telefoneConfiavel(ctx.phone);
-    if (!phone || await telefoneEhDoChatbot(phone, unidade.whatsapp)) {
-      await reply(ctx, 'Não identifiquei seu número neste grupo. Não gravei nada.');
-      return { handled: true, bloqueado: 'remetente' };
-    }
+  if (!sessao && !comandoExplicito(texto)) {
+    return { handled: false };
   }
 
-  const sessao = await obterSessao(filialId, ctx.phone, ctx.chatJid);
+  if (sessao && pareceFraseComum(texto) && !comandoExplicito(texto)) {
+    return { handled: false };
+  }
+
+  if (sessao?.fluxo === 'menu' && soNumero(texto) === null && !comandoExplicito(texto)) {
+    return { handled: false };
+  }
+
+  if (sessao?.fluxo === 'menu' && soNumero(texto) === null && comandoExplicito(texto)) {
+    await clear(ctx);
+    sessao = null;
+  }
+
+  if (sessao && sessao.fluxo !== 'menu' && cmd === '0') {
+    if (operacaoExigeRemetente(texto) && !await remetenteOperacaoOk(ctx, unidade)) {
+      return { handled: true, bloqueado: 'remetente' };
+    }
+    await abrirMenu(ctx);
+    return { handled: true };
+  }
+
+  if (operacaoExigeRemetente(texto) && !await remetenteOperacaoOk(ctx, unidade)) {
+    return { handled: true, bloqueado: 'remetente' };
+  }
+
   if (sessao) {
     await continuarSessao(ctx, sessao, texto);
     return { handled: true };
   }
 
-  const n = soNumero(texto);
-  if (n !== null) {
-    if (n === '0') {
-      await reply(ctx, textoMenu());
-      return { handled: true };
-    }
-    try {
-      await iniciarOpcao(ctx, n);
-    } catch (err) {
-      console.error('[whatsapp-menu] opcao', n, err);
-      await reply(ctx, `❌ ${err.message}\n\n` + textoMenu());
-    }
-    return { handled: true };
-  }
-
-  if (/^(relatorio|report|pdf)\b/i.test(cmd)) {
+  if (/^(relatorio|report|pdf)$/.test(cmd)) {
     await pedirTipoRelatorio(ctx);
     return { handled: true };
   }
-  if (/^(frota|placas|lista)\b/i.test(cmd)) {
+  if (/^(frota|placas|lista)$/.test(cmd)) {
     await enviarFrota(ctx);
+    return { handled: true };
+  }
+  if (/^medir pneu$/.test(cmd)) {
+    await setFluxo(ctx, 'medir', 'placa', {});
+    await reply(ctx, '📏 Envie a *placa* (ou as medições: *1E 14,14,14*).\n*0* cancela');
     return { handled: true };
   }
 

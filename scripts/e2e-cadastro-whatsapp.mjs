@@ -432,13 +432,13 @@ async function main() {
   );
 
   const d1 = await processarMensagemMenu({
-    filialId, phone: '11980001111', destino: '11980001111', chatJid: grupo, texto: '1', mensagemId: 'same-id',
+    filialId, phone: '11980001111', destino: '11980001111', chatJid: grupo, texto: 'menu', mensagemId: 'same-id',
   });
   const d2 = await processarMensagemMenu({
-    filialId, phone: '11980001112', destino: '11980001112', chatJid: grupo, texto: '1', mensagemId: 'same-id',
+    filialId, phone: '11980001112', destino: '11980001112', chatJid: grupo, texto: 'menu', mensagemId: 'same-id',
   });
   const d3 = await processarMensagemMenu({
-    filialId, phone: '11980001113', destino: '11980001113', chatJid: grupo, texto: '1', mensagemId: 'other-id',
+    filialId, phone: '11980001113', destino: '11980001113', chatJid: grupo, texto: 'menu', mensagemId: 'other-id',
   });
   log(d1.handled === true && d1.duplicado !== true, 'Dedup menu: 1ª confirmação com ID passa');
   log(d2.duplicado === true, 'Dedup menu: mesmo ID bloqueia');

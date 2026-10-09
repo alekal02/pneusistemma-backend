@@ -18,8 +18,6 @@ const RE_RECAP = /^(recap|recapagem|recapar|recape|recapeamento|rec)$/;
 const RE_EST = /^(estoque|stock|desmontar|desmonta|estq|est)$/;
 const RE_ONDE = /^(onde|localizar|localiza|achar|acha|encontrar|cad[eê]|status|situacao)$/;
 const RE_TROCA = /^(trocar|troca|substituir|substitui|subst)$/;
-const RE_CAD = /^(cadastrar|cadastro|cadastre|cadastra|cad)$/;
-const RE_PNEU = /^(pneu|pneus|tire)$/;
 const RE_LIXO = /^(pneu|por|pelo|pela|pro|pra|para|ao|a|o|um|uma|do|da|de|no|na|com|em|este|essa|esse|foi|vai|enviar|envie|manda|mandar|o|os)$/;
 
 const TIPOS_CADASTRO_VEICULO = [
@@ -31,36 +29,115 @@ const TIPOS_CADASTRO_VEICULO = [
   [/^(veiculo|veiculos)$/, null],
 ];
 
-function parseCadastrar(parts) {
-  const iCad = parts.findIndex((p) => RE_CAD.test(p));
-  const semCad = parts.filter((_, i) => i !== iCad);
-  const iPneu = semCad.findIndex((p) => RE_PNEU.test(p));
-  if (iPneu >= 0) {
-    const resto = semCad.filter((_, i) => i !== iPneu);
-    const fogos = fogosDe(resto);
-    return { tipo: 'cadastrar_pneu', fogo: fogos[0] || null };
+function linhaComando(texto) {
+  return norm(texto)
+    .replace(/[^\p{L}\p{N}\-_./]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function capturarFogo(tok) {
+  return pareceTokenFogo(tok) ? tok : null;
+}
+
+/**
+ * O texto inteiro precisa ser o comando. "pra cadastrar" não entra.
+ * @returns {{ tipo: string, fogo?: string|null, placa?: string|null, tipoVeiculo?: string|null } | null}
+ */
+function parseCadastrarExato(linha) {
+  const m = linha.match(/^(?:cadastrar|cadastro|cadastre|cadastra|cad)(?: (.*))?$/);
+  if (!m) return null;
+  const resto = (m[1] || '').trim();
+  if (!resto) {
+    return { tipo: 'cadastrar_veiculo', placa: null, tipoVeiculo: null };
   }
 
+  const pneu = resto.match(/^(?:pneu|pneus|tire)(?: ([a-z0-9][a-z0-9\-_./]{1,23}))?$/);
+  if (pneu) {
+    if (!pneu[1]) return { tipo: 'cadastrar_pneu', fogo: null };
+    const fogo = capturarFogo(pneu[1]);
+    return fogo ? { tipo: 'cadastrar_pneu', fogo } : null;
+  }
+
+  const tv = resto.match(/^(\p{L}+)(?: ([a-z0-9][a-z0-9\-_./]{1,23}))?$/u);
+  if (!tv) return null;
   let tipoVeiculo;
-  let iTipo = -1;
-  for (let i = 0; i < semCad.length; i += 1) {
-    for (const [re, tipo] of TIPOS_CADASTRO_VEICULO) {
-      if (re.test(semCad[i])) {
-        tipoVeiculo = tipo;
-        iTipo = i;
-        break;
-      }
+  let achou = false;
+  for (const [re, tipo] of TIPOS_CADASTRO_VEICULO) {
+    if (re.test(tv[1])) {
+      tipoVeiculo = tipo;
+      achou = true;
+      break;
     }
-    if (iTipo >= 0) break;
   }
-
-  const placaParts = semCad.filter((_, i) => i !== iTipo);
-  const placa = placaParts.join('') || null;
+  if (!achou) return null;
+  const placa = tv[2] ? tv[2].toUpperCase() : null;
+  if (placa && !/[0-9]/.test(placa)) return null;
   return {
     tipo: 'cadastrar_veiculo',
-    placa: placa && /[0-9]/.test(placa) ? placa.toUpperCase() : null,
+    placa,
     tipoVeiculo: tipoVeiculo === undefined ? null : tipoVeiculo,
   };
+}
+
+function parseUmFogo(linha, verbs, tipo) {
+  let m = linha.match(new RegExp(`^(?:${verbs}) ([a-z0-9][a-z0-9\\-_./]{1,23})$`));
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    return fogo ? { tipo, fogo } : null;
+  }
+  m = linha.match(new RegExp(`^([a-z0-9][a-z0-9\\-_./]{1,23}) (?:${verbs})$`));
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    return fogo ? { tipo, fogo } : null;
+  }
+  return undefined;
+}
+
+function parseAcaoExata(linha) {
+  let m = linha.match(/^(?:manda|mandar|enviar|envie) o ([a-z0-9][a-z0-9\-_./]{1,23}) para o (?:estoque|stock|desmontar|desmonta|estq|est)$/);
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    return fogo ? { tipo: 'estoque', fogo } : null;
+  }
+
+  m = linha.match(/^(?:pneu|pneus|tire) ([a-z0-9][a-z0-9\-_./]{1,23}) (?:estoque|stock|desmontar|desmonta|estq|est)$/);
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    return fogo ? { tipo: 'estoque', fogo } : null;
+  }
+
+  const verbTroca = 'trocar|troca|substituir|substitui|subst';
+  m = linha.match(new RegExp(`^(?:${verbTroca}) ([a-z0-9][a-z0-9\\-_./]{1,23}) (?:por|pelo|pela) ([a-z0-9][a-z0-9\\-_./]{1,23})$`));
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    const fogo2 = capturarFogo(m[2]);
+    if (fogo && fogo2) return { tipo: 'troca', fogo, fogo2 };
+    return null;
+  }
+  m = linha.match(new RegExp(`^(?:${verbTroca}) ([a-z0-9][a-z0-9\\-_./]{1,23})$`));
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    return fogo ? { tipo: 'troca', fogo } : null;
+  }
+
+  const verbOnde = 'onde|localizar|localiza|achar|acha|encontrar|cade|status|situacao';
+  m = linha.match(new RegExp(`^(?:${verbOnde})(?: esta)?(?: (?:o|a|do|da))?(?: pneu)? ([a-z0-9][a-z0-9\\-_./]{1,23})$`));
+  if (m) {
+    const fogo = capturarFogo(m[1]);
+    return fogo ? { tipo: 'onde', fogo } : null;
+  }
+
+  const verbDesc = 'descarte|descartar|descarta|lixo|sucata|sucatear|desc';
+  const verbRecap = 'recap|recapagem|recapar|recape|recapeamento|rec';
+  const verbEst = 'estoque|stock|desmontar|desmonta|estq|est';
+  const desc = parseUmFogo(linha, verbDesc, 'descarte');
+  if (desc !== undefined) return desc;
+  const recap = parseUmFogo(linha, verbRecap, 'recap');
+  if (recap !== undefined) return recap;
+  const est = parseUmFogo(linha, verbEst, 'estoque');
+  if (est !== undefined) return est;
+  return null;
 }
 
 function pareceTokenFogo(t) {
@@ -76,60 +153,17 @@ function pareceTokenFogo(t) {
   return true;
 }
 
-function tokensDe(texto) {
-  const n = norm(texto)
-    .replace(/[^\p{L}\p{N}\-_./]+/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return n ? n.split(' ') : [];
-}
-
-function fogosDe(parts) {
-  return parts.filter((p) => pareceTokenFogo(p));
-}
-
 /**
  * @returns {{ tipo: string, fogo?: string, fogo2?: string, placa?: string|null, tipoVeiculo?: string|null } | null}
  */
 export function parseComandoNatural(texto) {
-  const parts = tokensDe(texto);
-  if (!parts.length) return null;
-
-  if (parts.some((p) => RE_CAD.test(p))) {
-    return parseCadastrar(parts);
+  const linha = linhaComando(texto);
+  if (!linha) return null;
+  if (/^(?:cadastrar|cadastro|cadastre|cadastra|cad)(?: |$)/.test(linha)) {
+    return parseCadastrarExato(linha);
   }
-
-  if (parts.length < 2) return null;
-
-  const fogos = fogosDe(parts);
-  const iTroca = parts.findIndex((p) => RE_TROCA.test(p));
-  const iPor = parts.findIndex((p) => p === 'por' || p === 'pelo' || p === 'pela');
-
-  if (iTroca >= 0 && fogos.length >= 2) {
-    return { tipo: 'troca', fogo: fogos[0], fogo2: fogos[1] };
-  }
-  if (iTroca >= 0 && fogos.length === 1) {
-    return { tipo: 'troca', fogo: fogos[0] };
-  }
-  if (iPor > 0 && iTroca >= 0 && pareceTokenFogo(parts[iPor - 1]) && pareceTokenFogo(parts[iPor + 1])) {
-    return { tipo: 'troca', fogo: parts[iPor - 1], fogo2: parts[iPor + 1] };
-  }
-
-  if (!fogos.length) return null;
-
-  if (parts.some((p) => RE_ONDE.test(p))) {
-    return { tipo: 'onde', fogo: fogos[0] };
-  }
-  if (parts.some((p) => RE_DESC.test(p))) {
-    return { tipo: 'descarte', fogo: fogos[0] };
-  }
-  if (parts.some((p) => RE_RECAP.test(p))) {
-    return { tipo: 'recap', fogo: fogos[0] };
-  }
-  if (parts.some((p) => RE_EST.test(p))) {
-    return { tipo: 'estoque', fogo: fogos[0] };
-  }
-  return null;
+  if (!linha.includes(' ')) return null;
+  return parseAcaoExata(linha);
 }
 
 export function pareceComandoNatural(texto) {

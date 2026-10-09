@@ -198,7 +198,11 @@ async function main() {
     'Rollback: falha na gravação restaura original e substituto'
   );
 
-  const menuAberto = await falar('1');
+  const menuAberto = await falar('menu');
+  await processarMensagemMenu({
+    filialId, phone: menuAberto.phone, destino: menuAberto.phone, chatJid: grupo, texto: '1',
+  });
+  menuAberto.sessao = await obterSessao(filialId, menuAberto.phone, grupo);
   log(menuAberto.sessao?.fluxo === 'medir' && menuAberto.sessao?.passo === 'placa', 'Menu 1 abre medição por placa');
   const movMenu = await qtdMov(db, pA.id);
   await processarMensagemMenu({

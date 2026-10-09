@@ -117,7 +117,7 @@ async function main() {
   log((await contar('MATRIZ-9401')) === 0, 'Cadastro: antes do 1 o pneu não existe');
   const cancelado = await falar('0');
   log(
-    (await contar('MATRIZ-9401')) === 0 && !cancelado.sessao && /Medir pneu/.test(cancelado.msg),
+    (await contar('MATRIZ-9401')) === 0 && cancelado.sessao?.fluxo === 'menu' && /Medir pneu/.test(cancelado.msg),
     'Cadastro: 0 cancela e não grava',
   );
 
@@ -256,6 +256,7 @@ async function main() {
   async function statusDesc() {
     return (await db.prepare(`SELECT status_pneu FROM pneus WHERE id = ?`).get(desc.id)).status_pneu;
   }
+  await falar('menu');
   await falar('7');
   await falar(desc.numero_fogo);
   for (const ruim of ['-', '.', 'pular']) {
