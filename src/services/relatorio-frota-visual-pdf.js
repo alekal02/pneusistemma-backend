@@ -1,7 +1,9 @@
 /**
- * Páginas visuais do relatório — mesmo desenho do Preview-Frota-Visual.pdf
- * (caminhão vista de cima, centralizado no card + log + ações/diagnósticos).
+ * Páginas visuais do relatório.
+ * O diagrama de cada veículo usa o layout do catálogo (layout_pneus).
+ * Layout personalizado, vazio ou desconhecido desenha só os pneus montados.
  */
+import { LAYOUTS_PNEU, ordenarPosicoes } from '../pneus-layouts.js';
 const MM = 2.834645669;
 
 const C = {
@@ -22,37 +24,163 @@ const C = {
   chassis: '#c5d0c8',
 };
 
-const PNEU_W = 15;
-const PNEU_H = 20;
+const PNEU_H = 16;
+const GAP_X = 3;
+const GAP_Y = 4;
 
-/** Vista de cima truck 10: (codigo, dx, dy) — dy cresce da frente para trás */
-const LAYOUT_10 = [
-  ['1E', 28, 22], ['1D', 78, 22],
-  ['2EE', 16, 52], ['2EI', 36, 52], ['2DI', 70, 52], ['2DE', 90, 52],
-  ['3EE', 16, 82], ['3EI', 36, 82], ['3DI', 70, 82], ['3DE', 90, 82],
-];
-
-const LAYOUT_BOX = (() => {
-  const xs = LAYOUT_10.map(([, dx]) => dx);
-  const ys = LAYOUT_10.map(([, , dy]) => dy);
-  const minX = Math.min(...xs);
-  const minY = Math.min(...ys);
-  return {
-    minX,
-    minY,
-    w: Math.max(...xs) + PNEU_W - minX,
-    h: Math.max(...ys) + PNEU_H - minY,
+/**
+ * Eixo e lado a partir do código, sem trocar um eixo simples por duplo.
+ * ordem 0 = externo; ordem 1 = interno.
+ */
+function classificarPosicao(codigo) {
+  const c = String(codigo || '').trim().toUpperCase();
+  if (!c) return null;
+  if (c === 'ESTEPE') return { eixo: 90, lado: 'C', ordem: 0 };
+  if (c === 'D') return { eixo: 1, lado: 'C', ordem: 0 };
+  if (c === 'T') return { eixo: 2, lado: 'C', ordem: 0 };
+  const legado = {
+    DE: { eixo: 1, lado: 'E', ordem: 0 },
+    DD: { eixo: 1, lado: 'D', ordem: 0 },
+    TE: { eixo: 2, lado: 'E', ordem: 0 },
+    TD: { eixo: 2, lado: 'D', ordem: 0 },
+    TEE: { eixo: 2, lado: 'E', ordem: 0 },
+    TEI: { eixo: 2, lado: 'E', ordem: 1 },
+    TDI: { eixo: 2, lado: 'D', ordem: 1 },
+    TDE: { eixo: 2, lado: 'D', ordem: 0 },
   };
-})();
+  if (legado[c]) return legado[c];
+  const m = c.match(/^(?:E|S|G)?(\d)(EE|EI|DE|DI|E|D)$/);
+  if (!m) return null;
+  const sufixo = {
+    EE: { lado: 'E', ordem: 0 },
+    EI: { lado: 'E', ordem: 1 },
+    E: { lado: 'E', ordem: 0 },
+    DI: { lado: 'D', ordem: 1 },
+    DE: { lado: 'D', ordem: 0 },
+    D: { lado: 'D', ordem: 0 },
+  }[m[2]];
+  if (!sufixo) return null;
+  return { eixo: Number(m[1]), ...sufixo };
+}
 
-const POS_ALIAS = {
-  DE: '1E', DD: '1D',
-  E2EE: '2EE', E2EI: '2EI', E2DI: '2DI', E2DE: '2DE',
-  E3EE: '3EE', E3EI: '3EI', E3DI: '3DI', E3DE: '3DE',
-  TEE: '2EE', TEI: '2EI', TDI: '2DI', TDE: '2DE',
-  '2E': '2EE', '2D': '2DE',
-  '3E': '3EE', '3D': '3DE',
-};
+/**
+ * Posições do diagrama: catálogo do layout, ou só pneus montados.
+ */
+export function posicoesDiagramaVeiculo(veiculo = {}) {
+  const id = String(veiculo.layout || veiculo.layout_pneus || '').trim();
+  const catalogo = LAYOUTS_PNEU[id];
+  if (catalogo?.posicoes?.length) return [...catalogo.posicoes];
+
+  const vistos = new Set();
+  const montadas = [];
+  for (const pneu of veiculo.pneus || []) {
+    const codigo = String(pneu.posicao || '').trim().toUpperCase();
+    if (!codigo || vistos.has(codigo)) continue;
+    vistos.add(codigo);
+    montadas.push(codigo);
+  }
+  return ordenarPosicoes(montadas);
+}
+
+function larguraPneu(codigos) {
+  const maior = codigos.reduce((acc, codigo) => Math.max(acc, String(codigo).length), 1);
+  return Math.min(28, Math.max(16, maior * 3.15 + 3));
+}
+
+/**
+ * Caixas do diagrama em pontos lógicos, já ajustadas à área do card.
+ * Não inclui posição que não esteja na lista recebida.
+ */
+export function geometriaDiagrama(posicoes, areaW, areaH) {
+  const lista = [];
+  const vistos = new Set();
+  for (const codigo of posicoes || []) {
+    const c = String(codigo || '').trim().toUpperCase();
+    if (!c || vistos.has(c)) continue;
+    vistos.add(c);
+    lista.push(c);
+  }
+  if (!lista.length || !(areaW > 0) || !(areaH > 0)) {
+    return { slots: [], minX: 0, minY: 0, w: 0, h: 0, scale: 1 };
+  }
+
+  const conhecidas = [];
+  const desconhecidas = [];
+  for (const codigo of lista) {
+    const info = classificarPosicao(codigo);
+    if (!info) desconhecidas.push(codigo);
+    else conhecidas.push({ codigo, ...info });
+  }
+
+  const eixos = [...new Set(conhecidas.map((p) => p.eixo))].sort((a, b) => a - b);
+  let maxE = 0;
+  let maxD = 0;
+  for (const eixo of eixos) {
+    const doEixo = conhecidas.filter((p) => p.eixo === eixo);
+    maxE = Math.max(maxE, doEixo.filter((p) => p.lado === 'E').length);
+    maxD = Math.max(maxD, doEixo.filter((p) => p.lado === 'D').length);
+  }
+  const colunas = Math.max(1, maxE + maxD);
+
+  function indiceX(item, nLado) {
+    if (item.lado === 'C') return (colunas - 1) / 2;
+    if (item.lado === 'E') {
+      if (nLado <= 1 && maxE > 1) return (maxE - 1) / 2;
+      if (nLado <= 1) return 0;
+      return item.ordem === 0 ? 0 : Math.min(item.ordem, maxE - 1);
+    }
+    const base = maxE;
+    if (nLado <= 1 && maxD > 1) return base + (maxD - 1) / 2;
+    if (nLado <= 1) return base;
+    if (item.ordem === 0) return base + maxD - 1;
+    return base + Math.max(0, maxD - 1 - item.ordem);
+  }
+
+  const grades = [];
+  for (const eixo of eixos) {
+    const doEixo = conhecidas.filter((p) => p.eixo === eixo);
+    const nE = doEixo.filter((p) => p.lado === 'E').length;
+    const nD = doEixo.filter((p) => p.lado === 'D').length;
+    const row = eixos.indexOf(eixo);
+    for (const item of doEixo) {
+      const nLado = item.lado === 'E' ? nE : item.lado === 'D' ? nD : 1;
+      grades.push({ codigo: item.codigo, col: indiceX(item, nLado), row });
+    }
+  }
+  desconhecidas.forEach((codigo, i) => {
+    grades.push({
+      codigo,
+      col: i % 2,
+      row: eixos.length + Math.floor(i / 2),
+    });
+  });
+
+  const tw = larguraPneu(grades.map((g) => g.codigo));
+  const th = PNEU_H;
+  const placed = grades.map((g) => ({
+    codigo: g.codigo,
+    x: g.col * (tw + GAP_X),
+    y: g.row * (th + GAP_Y),
+    w: tw,
+    h: th,
+  }));
+  const minX = Math.min(...placed.map((p) => p.x));
+  const minY = Math.min(...placed.map((p) => p.y));
+  const maxX = Math.max(...placed.map((p) => p.x + p.w));
+  const maxY = Math.max(...placed.map((p) => p.y + p.h));
+  const bw = Math.max(1, maxX - minX);
+  const bh = Math.max(1, maxY - minY);
+  const scale = Math.min(areaW / bw, areaH / bh, 1.35);
+  return { slots: placed, minX, minY, w: bw, h: bh, scale };
+}
+
+/** vazio | sem_medicao | medido. Zero milímetro continua medido. */
+export function rotuloSulcoSlot(pneu) {
+  if (!pneu) return { tipo: 'vazio', mm: null };
+  if (pneu.menor_sulco == null || pneu.menor_sulco === '') return { tipo: 'sem_medicao', mm: null };
+  const mm = Number(pneu.menor_sulco);
+  return { tipo: 'medido', mm: Number.isFinite(mm) ? mm : null };
+}
 
 function rrect(doc, x, y, w, h, r, fill, stroke) {
   if (fill) {
@@ -87,15 +215,11 @@ function labelStatus(status) {
   return 'Sem medicao';
 }
 
-function normPos(pos) {
-  const p = String(pos || '').toUpperCase();
-  return POS_ALIAS[p] || p;
-}
-
 function pneusPorPos(pneus = []) {
   const map = new Map();
   for (const p of pneus) {
-    map.set(normPos(p.posicao), p);
+    const codigo = String(p.posicao || '').trim().toUpperCase();
+    if (codigo) map.set(codigo, p);
   }
   return map;
 }
@@ -122,12 +246,46 @@ function txt(doc, str, x, y, opts = {}) {
   doc.y = savedY;
 }
 
-function drawPneu(doc, x, y, cor, label, mmTxt) {
-  rrect(doc, x, y, PNEU_W, PNEU_H, 3, cor, cor === C.ok ? '#14532d' : null);
-  doc.fillColor(C.branco).font('Helvetica-Bold').fontSize(5);
-  txt(doc, label, x, y + 3.2, { width: PNEU_W, align: 'center' });
-  doc.fontSize(4.8);
-  txt(doc, mmTxt, x, y + 11.2, { width: PNEU_W, align: 'center' });
+function fonteQueCabe(doc, texto, largura, inicio) {
+  let size = inicio;
+  doc.font('Helvetica-Bold').fontSize(size);
+  while (size > 3.2 && doc.widthOfString(texto) > largura - 1.2) {
+    size = Math.round((size - 0.2) * 10) / 10;
+    doc.fontSize(size);
+  }
+  return size;
+}
+
+function drawPneu(doc, x, y, w, h, aparencia, label) {
+  rrect(doc, x, y, w, h, 3, aparencia.fill, aparencia.stroke);
+  const rotulo = String(label);
+  const tamRotulo = fonteQueCabe(doc, rotulo, w, Math.min(6, h * 0.34));
+  doc.fillColor(aparencia.texto).font('Helvetica-Bold').fontSize(tamRotulo);
+  const yRotulo = aparencia.mm == null ? y + (h - tamRotulo) / 2 - 0.4 : y + h * 0.16;
+  txt(doc, rotulo, x, yRotulo, { width: w, align: 'center' });
+  if (aparencia.mm != null) {
+    const mmTxt = String(aparencia.mm);
+    const tamMm = fonteQueCabe(doc, mmTxt, w, Math.min(5.5, h * 0.3));
+    doc.fillColor(aparencia.texto).font('Helvetica-Bold').fontSize(tamMm);
+    txt(doc, mmTxt, x, y + h * 0.52, { width: w, align: 'center' });
+  }
+}
+
+function aparenciaSlot(pneu) {
+  const rotulo = rotuloSulcoSlot(pneu);
+  if (rotulo.tipo === 'vazio') {
+    return { fill: '#f1f5f9', stroke: '#94a3b8', texto: '#475569', mm: null };
+  }
+  if (rotulo.tipo === 'sem_medicao') {
+    return { fill: C.cinza, stroke: null, texto: C.branco, mm: '-' };
+  }
+  const cor = fillStatus(pneu.status_sulco || pneu.status_label);
+  return {
+    fill: cor,
+    stroke: cor === C.ok ? '#14532d' : null,
+    texto: C.branco,
+    mm: String(rotulo.mm),
+  };
 }
 
 /** Card no estilo do preview: desenho centralizado, texto só na faixa de baixo. */
@@ -169,27 +327,42 @@ function drawCardCaminhao(doc, x, y, w, h, veiculo) {
 
   const areaTop = y + frenteH + 2;
   const areaBot = y + h - footer - 4;
-  const areaH = areaBot - areaTop;
-  const pad = 8;
-  const ox = x + (w - LAYOUT_BOX.w) / 2 - LAYOUT_BOX.minX;
-  const oy = areaTop + (areaH - LAYOUT_BOX.h) / 2 - LAYOUT_BOX.minY;
+  const areaH = Math.max(8, areaBot - areaTop);
+  const pad = 5;
+  const geo = geometriaDiagrama(
+    posicoesDiagramaVeiculo(veiculo),
+    Math.max(20, w - 16 - pad * 2),
+    Math.max(12, areaH - pad * 2),
+  );
+  if (!geo.slots.length) return;
+
+  const scale = geo.scale;
+  const boxW = geo.w * scale;
+  const boxH = geo.h * scale;
+  const ox = x + (w - boxW) / 2 - geo.minX * scale;
+  const oy = areaTop + (areaH - boxH) / 2 - geo.minY * scale;
 
   doc.lineWidth(1.1).strokeColor(C.chassis)
     .roundedRect(
-      ox + LAYOUT_BOX.minX - pad,
-      oy + LAYOUT_BOX.minY - pad,
-      LAYOUT_BOX.w + pad * 2,
-      LAYOUT_BOX.h + pad * 2,
-      10,
+      ox + geo.minX * scale - pad,
+      oy + geo.minY * scale - pad,
+      boxW + pad * 2,
+      boxH + pad * 2,
+      8,
     ).stroke();
 
   const byPos = pneusPorPos(veiculo.pneus);
-  for (const [codigo, dx, dy] of LAYOUT_10) {
-    const p = byPos.get(codigo);
-    const cor = p ? fillStatus(p.status_sulco || p.status_label) : C.cinza;
-    const mmTxt = p?.menor_sulco != null ? String(p.menor_sulco) : '-';
-    const label = codigo.length > 2 ? codigo.slice(-2) : codigo;
-    drawPneu(doc, ox + dx, oy + dy, cor, label, mmTxt);
+  for (const slot of geo.slots) {
+    const pneu = byPos.get(slot.codigo);
+    drawPneu(
+      doc,
+      ox + slot.x * scale,
+      oy + slot.y * scale,
+      slot.w * scale,
+      slot.h * scale,
+      aparenciaSlot(pneu),
+      slot.codigo,
+    );
   }
 }
 
