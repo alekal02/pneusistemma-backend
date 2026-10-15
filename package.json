@@ -11,7 +11,8 @@
     "fix-encoding": "node src/fix-encoding.js",
     "smoke": "node scripts/smoke-api.mjs",
     "smoke:filial": "node scripts/smoke-filial-login.mjs",
-    "test:diagnostico": "node scripts/test-diagnostico-fotos.mjs"
+    "test:diagnostico": "node scripts/test-diagnostico-fotos.mjs",
+    "test:diagnostico-frota": "node scripts/test-diagnostico-frota.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

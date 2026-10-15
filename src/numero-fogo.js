@@ -56,11 +56,21 @@ const RE_SO_DIGITOS = /^\d+$/;
 const RE_PREFIXO_SEQ = /^(.+)-(\d+)$/;
 const RE_PLACEHOLDER_FOGO = /^(s\/?n|sem\s*n(ume?ro)?|sem\s*fogo|n\/?a|-|null|undefined)$/i;
 
-/** S/N, vazio e similares — gera automático em vez de gravar o placeholder. */
+function textoFogo(informado) {
+  return String(informado || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+/** S/N, vazio, "Sem identificação" e similares — não são marca de fogo. */
 export function ehPlaceholderFogo(informado) {
   const bruto = String(informado || '').trim();
   if (!bruto) return true;
-  return RE_PLACEHOLDER_FOGO.test(bruto);
+  if (RE_PLACEHOLDER_FOGO.test(bruto)) return true;
+  return /^sem identificacao\s*\d*$/.test(textoFogo(bruto));
 }
 
 /**

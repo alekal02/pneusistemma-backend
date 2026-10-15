@@ -11,6 +11,11 @@ import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import { toCsv } from '../csv-utils.js';
 import { gerarRelatorioSemanalPdfBuffer } from '../services/relatorio-semanal-pdf.js';
 import {
+  consultarDiagnosticoFrota,
+  rejeitarFilialForaDoEscopo,
+} from '../services/diagnostico-frota.js';
+import { gerarPdfDiagnosticoFrota } from '../services/diagnostico-frota-pdf.js';
+import {
   acumularAlerta,
   avaliarPneuPainel,
   filtroTipoAtivo,
@@ -272,6 +277,74 @@ router.get('/diretoria.csv', requireAdmin, async (req, res, next) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="relatorio-diretoria-pneus.csv"');
     res.send(csv);
+  } catch (err) {
+    next(err);
+  }
+});
+
+function filtrosDiagnostico(query) {
+  const data = (valor) => {
+    if (valor == null || valor === '') return null;
+    const s = String(valor).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+    return s;
+  };
+  const inicio = data(query.periodo_inicio);
+  const fim = data(query.periodo_fim);
+  if (inicio === false || fim === false) {
+    return { erro: 'Período inválido. Use AAAA-MM-DD.' };
+  }
+  if (inicio && fim && inicio > fim) {
+    return { erro: 'A data inicial do período é posterior à final.' };
+  }
+  const pendencia = String(query.pendencia || '').trim().toLowerCase();
+  if (pendencia && !['critica', 'atencao', 'cadastral'].includes(pendencia)) {
+    return { erro: 'Pendência inválida.' };
+  }
+  return {
+    filtros: {
+      filial_id: query.filial_id,
+      placa: query.placa,
+      tipo: query.tipo,
+      pendencia,
+      periodo_inicio: inicio,
+      periodo_fim: fim,
+    },
+  };
+}
+
+async function diagnosticoNoEscopo(req) {
+  const escopo = filiaisEscopoIds(req);
+  const fora = rejeitarFilialForaDoEscopo(escopo, req.query.filial_id);
+  if (fora) return fora;
+  const parsed = filtrosDiagnostico(req.query);
+  if (parsed.erro) return { status: 400, erro: parsed.erro };
+  const relatorio = await consultarDiagnosticoFrota(getDb(), {
+    escopo,
+    filtros: parsed.filtros,
+  });
+  return { relatorio };
+}
+
+router.get('/diagnostico-frota', requireGerenteOuAdmin, async (req, res, next) => {
+  try {
+    const out = await diagnosticoNoEscopo(req);
+    if (out.erro) return res.status(out.status).json({ erro: out.erro });
+    res.json(out.relatorio);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/diagnostico-frota.pdf', requireGerenteOuAdmin, async (req, res, next) => {
+  try {
+    const out = await diagnosticoNoEscopo(req);
+    if (out.erro) return res.status(out.status).json({ erro: out.erro });
+    const buffer = await gerarPdfDiagnosticoFrota(out.relatorio);
+    const dia = (out.relatorio.semana?.hoje || new Date().toISOString().slice(0, 10));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="diagnostico-frota-${dia}.pdf"`);
+    res.send(buffer);
   } catch (err) {
     next(err);
   }
