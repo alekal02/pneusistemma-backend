@@ -320,6 +320,24 @@ function linhaUtil(c) {
   return c.sulco_inicial != null && c.sulco_atual != null && c.sulco_inicial !== c.sulco_atual;
 }
 
+/**
+ * Separa medições pelo mesmo critério de ciclo de calcularCiclos.
+ * Não grava nada. Medições sem ciclo delimitado ficam no grupo "sem".
+ */
+export function separarPorCiclo({ movimentacoes = [], medicoes = [] } = {}) {
+  const itens = normalizar(movimentacoes, medicoes);
+  const medicoesPorCiclo = new Map();
+  let delimitado = false;
+  for (const item of itens) {
+    if (cicloExplicito(item) != null || papelRecap(item)) delimitado = true;
+    if (item._kind !== 'med') continue;
+    const chave = item._ciclo == null ? 'sem' : String(item._ciclo);
+    if (!medicoesPorCiclo.has(chave)) medicoesPorCiclo.set(chave, []);
+    medicoesPorCiclo.get(chave).push(item);
+  }
+  return { medicoesPorCiclo, delimitado };
+}
+
 export function linhasEvolucao(pneuId, numeroFogo, ciclos) {
   return (ciclos || []).filter(linhaUtil).map((c) => ({
     pneu_id: pneuId,

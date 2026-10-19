@@ -15,6 +15,8 @@ import {
   rejeitarFilialForaDoEscopo,
 } from '../services/diagnostico-frota.js';
 import { gerarPdfDiagnosticoFrota } from '../services/diagnostico-frota-pdf.js';
+import { carregarRelatorioSaude } from '../services/saude-desgaste-relatorio.js';
+import { gerarPdfSaudeBuffer, nomeArquivoSaude } from '../services/saude-desgaste-pdf.js';
 import {
   acumularAlerta,
   avaliarPneuPainel,
@@ -344,6 +346,39 @@ router.get('/diagnostico-frota.pdf', requireGerenteOuAdmin, async (req, res, nex
     const dia = (out.relatorio.semana?.hoje || new Date().toISOString().slice(0, 10));
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="diagnostico-frota-${dia}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Saúde e desgaste — visão do presidente (admin total já existente). Somente leitura.
+ * GET /api/relatorios/saude-desgaste
+ * GET /api/relatorios/saude-desgaste.pdf
+ */
+router.get('/saude-desgaste', requireAdmin, async (req, res, next) => {
+  try {
+    const filialId = req.query.filial_id != null && req.query.filial_id !== ''
+      ? Number(req.query.filial_id)
+      : null;
+    res.json(await carregarRelatorioSaude(getDb(), { filialId }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/saude-desgaste.pdf', requireAdmin, async (req, res, next) => {
+  try {
+    const filialId = req.query.filial_id != null && req.query.filial_id !== ''
+      ? Number(req.query.filial_id)
+      : null;
+    const rel = await carregarRelatorioSaude(getDb(), { filialId });
+    const buffer = await gerarPdfSaudeBuffer(rel);
+    const filename = nomeArquivoSaude(rel.gerado_em);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length);
     res.send(buffer);
   } catch (err) {
     next(err);
