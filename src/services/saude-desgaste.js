@@ -460,6 +460,22 @@ export function labelCicloNumero(numero) {
   return `R${numero}`;
 }
 
+/**
+ * Histórico dos sulcos, em milímetros. Não é a dimensão comercial do pneu.
+ * Três profundidades de banda fecham a leitura. Uma ou duas são parciais.
+ */
+export function leituraSulco(pneu, semana) {
+  const pontos = [pneu?.sulcos?.externo, pneu?.sulcos?.central, pneu?.sulcos?.interno]
+    .filter((valor) => valor != null).length;
+  const data = pneu?.data_medicao || null;
+  if (pontos === 0 && !data) return 'sem_historico';
+  if (pontos === 0) return 'invalida';
+  if (pontos < 3) return 'parcial';
+  if (!data) return 'invalida';
+  if (semana?.inicio && data >= semana.inicio && data <= semana.fim) return 'na_semana';
+  return 'desatualizada';
+}
+
 /** Iguala grafias da mesma medida só na conta. O valor gravado permanece. */
 export function normalizarMedida(medida) {
   let t = String(medida || '').trim().replace(/\s+/g, '').replace(/,/g, '.').toLowerCase();

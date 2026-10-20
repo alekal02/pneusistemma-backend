@@ -9,6 +9,7 @@ import {
   gerarPdfSaudeBuffer,
   textoCompraNova,
   textoConsolidadoFrota,
+  textoLeituraSulco,
   textoVeiculosUnidade,
 } from '../src/services/saude-desgaste-pdf.js';
 import {
@@ -19,6 +20,7 @@ import {
   faixaRecapagemCaminhao,
   menorSulcoBanda,
   montarAnalisePneu,
+  leituraSulco,
   montarPrevisaoFilial,
   necessidadeCompra,
   normalizarMedida,
@@ -27,6 +29,8 @@ import {
   alertaCompraIncompleta,
   contextoEquipamento,
   filialForaDoIndicadorExecutivo,
+  montadoIncompleto,
+  resumirLeituraSulco,
 } from '../src/services/saude-desgaste-relatorio.js';
 
 function med(parcial) {
@@ -294,6 +298,8 @@ assert.equal(filialForaDoIndicadorExecutivo({ codigo: 'E2E9', nome: 'E2E ativa',
 const alerta = alertaCompraIncompleta(21);
 assert.equal(alerta.definitivo, false);
 assert.match(alerta.texto, /não é definitiva/);
+assert.match(alerta.texto, /necessidade técnica/);
+assert.doesNotMatch(alerta.texto, /ignora/);
 assert.equal(alertaCompraIncompleta(0).definitivo, true);
 assert.equal(alertaCompraIncompleta(0).texto, null);
 
@@ -349,6 +355,58 @@ assert.equal(textoCompraNova({ recomendacao_definitiva: true, montados_sem_medid
 assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Veículos cadastrados: 5/);
 assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Com pneu montado: 2/);
 assert.equal(textoVeiculosUnidade({ veiculos_cadastrados: 5, veiculos: 2 }), '5 cadastrado(s), 2 com pneu montado');
+
+const semanaTeste = { inicio: '2026-10-19', fim: '2026-10-25' };
+const sulcoCompleto = { externo: 2.5, central: 3, interno: 2.8 };
+assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-10-17' }, semanaTeste), 'desatualizada');
+assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-10-20' }, semanaTeste), 'na_semana');
+assert.equal(leituraSulco({ sulcos: { externo: null, central: null, interno: null }, data_medicao: null }, semanaTeste), 'sem_historico');
+assert.equal(leituraSulco({ sulcos: { externo: null, central: null, interno: null }, data_medicao: '2026-10-17' }, semanaTeste), 'invalida');
+assert.equal(leituraSulco({ sulcos: { externo: 4, central: null, interno: null }, data_medicao: '2026-10-20' }, semanaTeste), 'parcial');
+assert.equal(leituraSulco({
+  sulcos: sulcoCompleto,
+  data_medicao: '2026-10-17',
+  medida: null,
+  faixa: 'critico',
+}, semanaTeste), 'desatualizada');
+const antigoSemDimensao = {
+  status_pneu: 'montado',
+  sulcos: sulcoCompleto,
+  data_medicao: '2026-10-17',
+  medida: '',
+  faixa: 'critico',
+  leitura_sulco: 'desatualizada',
+  dimensao_comercial: false,
+};
+assert.equal(montadoIncompleto(antigoSemDimensao), false);
+assert.equal(montadoIncompleto({
+  status_pneu: 'montado',
+  leitura_sulco: 'sem_historico',
+}), true);
+assert.deepEqual(resumirLeituraSulco([
+  { leitura_sulco: 'desatualizada' },
+  { leitura_sulco: 'desatualizada' },
+  { leitura_sulco: 'na_semana' },
+  { leitura_sulco: 'sem_historico' },
+], semanaTeste), {
+  sem_historico: 1,
+  invalida: 0,
+  parcial: 0,
+  desatualizada: 2,
+  na_semana: 1,
+});
+assert.match(textoLeituraSulco({
+  leitura_sulco: { sem_historico: 0, desatualizada: 144, na_semana: 0, parcial: 0, invalida: 0 },
+  sem_dimensao_comercial: 144,
+}), /sulco desatualizado 144/);
+assert.match(textoLeituraSulco({
+  leitura_sulco: { sem_historico: 0, desatualizada: 144, na_semana: 0, parcial: 0, invalida: 0 },
+  sem_dimensao_comercial: 144,
+}), /sem dimensão comercial 144/);
+assert.equal(textoLeituraSulco({
+  leitura_sulco: { sem_historico: 0, desatualizada: 144, na_semana: 0, parcial: 0, invalida: 0 },
+  sem_dimensao_comercial: 144,
+}).includes('sem histórico de sulco 144'), false);
 
 console.log('test-saude-desgaste: cálculos ok');
 

@@ -13,6 +13,7 @@ import {
   LIMITACOES_FIXAS,
   aplicarComparacao,
   montarAnalisePneu,
+  leituraSulco,
   montarPrevisaoFilial,
   normalizarMedida,
   resumirFaixas,
@@ -63,20 +64,33 @@ export function alertaCompraIncompleta(montadosSemMedida) {
   return {
     definitivo: false,
     montados_sem_medida: qtd,
-    texto: `${qtd} pneu(s) montado(s) estão sem medida. A recomendação de compra não é definitiva: o saldo ignora esses pneus e só fecha onde a medida foi informada.`,
+    texto: `${qtd} pneu(s) montado(s) estão sem dimensão comercial. A necessidade técnica continua visível. A quantidade de compra não é definitiva: sem a especificação, o estoque compatível não foi conferido.`,
   };
 }
 
 /**
- * Cadastro ou medição que impede uma leitura fechada.
- * Não muda a régua de sulco: só conta o que já foi classificado.
+ * Sulco ilegível. Dimensão comercial ausente, medição antiga e equipamento
+ * sem a régua de caminhão não entram aqui: cada um tem contagem própria.
  */
 export function montadoIncompleto(pneu) {
   if (pneu?.status_pneu !== 'montado') return false;
-  if (!normalizarMedida(pneu.medida)) return true;
-  if (pneu.faixa === 'sem_medicao' || pneu.faixa === 'sem_regua') return true;
-  if (pneu.ciclo_confiavel === false) return true;
-  return false;
+  const leitura = pneu.leitura_sulco || leituraSulco(pneu);
+  return leitura === 'sem_historico' || leitura === 'invalida' || leitura === 'parcial';
+}
+
+export function resumirLeituraSulco(montados, semana) {
+  const acc = {
+    sem_historico: 0,
+    invalida: 0,
+    parcial: 0,
+    desatualizada: 0,
+    na_semana: 0,
+  };
+  for (const pneu of montados || []) {
+    const leitura = pneu.leitura_sulco || leituraSulco(pneu, semana);
+    if (acc[leitura] != null) acc[leitura] += 1;
+  }
+  return acc;
 }
 
 /**
@@ -255,11 +269,15 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   });
 
   const comparacao = aplicarComparacao(analisados);
+  const semana = semanaMedicaoBrasil();
+  for (const pneu of analisados) {
+    pneu.leitura_sulco = leituraSulco(pneu, semana);
+    pneu.dimensao_comercial = Boolean(normalizarMedida(pneu.medida));
+  }
   const montados = analisados.filter((p) => p.status_pneu === 'montado');
   const faixas = resumirFaixas(analisados);
   const compras = montarPrevisaoFilial(analisados);
 
-  const semana = semanaMedicaoBrasil();
   const cadastradosPorFilial = new Map(veiculosAtivos.map((row) => [row.filial_id, Number(row.n) || 0]));
   const porFilial = filiaisExec.map((f) => {
     const lista = montados.filter((p) => p.filial_id === f.id);
@@ -281,6 +299,8 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       candidatos_recap: lista.filter((p) => p.elegibilidade?.candidato_programacao).length,
       avaliacao_urgente: lista.filter((p) => p.elegibilidade?.encaminhamento === 'retirada_avaliacao_urgente').length,
       incompletos: lista.filter((pneu) => montadoIncompleto(pneu)).length,
+      leitura_sulco: resumirLeituraSulco(lista, semana),
+      sem_dimensao_comercial: lista.filter((pneu) => !pneu.dimensao_comercial).length,
       ...semanaFilial,
     };
   });
@@ -393,7 +413,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   for (const linha of compras) {
     const faltam = semMedidaPorFilial.get(linha.filial_id) || 0;
     linha.montados_sem_medida = faltam;
-    linha.recomendacao_definitiva = faltam === 0 && linha.medida_informada;
+    linha.recomendacao_definitiva = linha.medida_informada === true;
   }
 
   return {
@@ -443,7 +463,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       `${descartesTotal} pneu(s) em descarte ficam fora da régua de sulco e aparecem só na lista de descartes.`,
       `${semProjecao} pneu(s) de caminhão sem projeção de 5 mm e 3 mm por histórico insuficiente ou pouco confiável.`,
       `${cicloAberto} pneu(s) montado(s) com ciclo de recapagem não separado. O consumo desses pneus não foi calculado.`,
-      `${semMedida} pneu(s) sem medida informada. Eles não geram saldo de compra.`,
+      `${semMedida} pneu(s) sem dimensão comercial. A necessidade técnica desses pneus continua visível. A quantidade de compra não fecha sem a especificação e o estoque dessa dimensão.`,
       ...(comprasAlerta.texto ? [comprasAlerta.texto] : []),
       comparacao.grupos_insuficientes
         ? `${comparacao.grupos_insuficientes} grupo(s) comparável(is) com menos de 3 pneus. Nesses grupos não há alerta de consumo acima da média.`

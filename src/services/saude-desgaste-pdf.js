@@ -51,10 +51,20 @@ export function textoVeiculosUnidade(unidade) {
   return `${unidade.veiculos_cadastrados} cadastrado(s), ${unidade.veiculos} com pneu montado`;
 }
 
-/** Quantidade só quando a recomendação fecha. Cadastro incompleto não vira compra. */
+/** Quantidade só quando a medida está especificada e o estoque dessa medida foi conferido. */
 export function textoCompraNova(item) {
   if (item?.recomendacao_definitiva === false || Number(item?.montados_sem_medida) > 0) return 'não definitiva';
   return String(item?.comprar_novo);
+}
+
+export function textoLeituraSulco(unidade) {
+  const leitura = unidade?.leitura_sulco || {};
+  const parcial = (Number(leitura.parcial) || 0) + (Number(leitura.invalida) || 0);
+  return `sem histórico de sulco ${Number(leitura.sem_historico) || 0}`
+    + ` · sulco desatualizado ${Number(leitura.desatualizada) || 0}`
+    + ` · sulco nesta semana ${Number(leitura.na_semana) || 0}`
+    + ` · sulco parcial ou inválido ${parcial}`
+    + ` · sem dimensão comercial ${Number(unidade?.sem_dimensao_comercial) || 0}`;
 }
 
 export function gerarPdfSaudeBuffer(relatorio) {
@@ -99,7 +109,7 @@ export function gerarPdfSaudeBuffer(relatorio) {
         `${u.filial}: ${frota}, ${u.pneus_montados} pneu(s) · `
         + `normal ${fx.acompanhamento_normal || 0} · preventivo ${fx.monitoramento_preventivo || 0} · `
         + `programar ${fx.programar_recapagem || 0} · crítico ${fx.critico || 0} · `
-        + `incompletos ${u.incompletos || 0} · semana ${u.situacao_semana || 'sem_medicao'}`,
+        + textoLeituraSulco(u),
       );
     }
 
@@ -146,7 +156,8 @@ export function gerarPdfSaudeBuffer(relatorio) {
       const compra = textoCompraNova(item);
       linha(
         doc,
-        `${item.filial || item.filial_id}: estoque novo ${item.estoque_novo} · estoque recapado ${item.estoque_recapado} · `
+        `${item.filial || item.filial_id}: necessidade técnica ${item.necessidade_pneu_novo || 0} · `
+        + `estoque novo ${item.estoque_novo} · estoque recapado ${item.estoque_recapado} · `
         + `em recapagem ${item.em_recapagem} · comprar novo ${compra} · `
         + `candidatos a recap ${item.candidatos_recap} · avaliação urgente ${item.avaliacao_urgente} · `
         + `projeção 90 dias novo ${item.previsao_novo_90d} / recap ${item.previsao_recap_90d}`,
