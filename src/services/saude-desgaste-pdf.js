@@ -60,11 +60,29 @@ export function textoCompraNova(item) {
 export function textoLeituraSulco(unidade) {
   const leitura = unidade?.leitura_sulco || {};
   const parcial = (Number(leitura.parcial) || 0) + (Number(leitura.invalida) || 0);
-  return `sem histórico de sulco ${Number(leitura.sem_historico) || 0}`
-    + ` · sulco desatualizado ${Number(leitura.desatualizada) || 0}`
-    + ` · sulco nesta semana ${Number(leitura.na_semana) || 0}`
-    + ` · sulco parcial ou inválido ${parcial}`
-    + ` · sem dimensão comercial ${Number(unidade?.sem_dimensao_comercial) || 0}`;
+  return `sem histórico ${Number(leitura.sem_historico) || 0}`
+    + ` · neste mês ${Number(leitura.no_ciclo) || 0}`
+    + ` · mês anterior no prazo ${Number(leitura.ciclo_anterior) || 0}`
+    + ` · medição mensal vencida ${Number(leitura.vencida) || 0}`
+    + ` · parcial ou inválida ${parcial}`
+    + ` · primeira medição ainda não exigível ${Number(leitura.nao_exigivel) || 0}`;
+}
+
+export function textoParecer(parecer) {
+  if (!parecer) return 'Parecer indisponível neste recorte.';
+  const recomendacao = (parecer.recomendacoes || []).join(' · ') || 'Sem recomendação fechada';
+  const quantidade = parecer.quantidade_compra == null
+    ? 'quantidade de compra não fechada'
+    : `quantidade conferida ${parecer.quantidade_compra}`;
+  return [
+    recomendacao,
+    parecer.frota,
+    parecer.atencao_texto,
+    parecer.substituicao,
+    `${parecer.compra} ${quantidade}.`,
+    parecer.recapagem,
+    parecer.prioridade_texto,
+  ].filter(Boolean).join(' ');
 }
 
 export function gerarPdfSaudeBuffer(relatorio) {
@@ -84,10 +102,11 @@ export function gerarPdfSaudeBuffer(relatorio) {
     doc.text(`Gerado em ${dataHoraBr(relatorio.gerado_em)}. Somente leitura: o histórico gravado não é alterado.`);
     doc.moveDown(0.4);
     doc.fontSize(9).fillColor('#333').text(
-      'Régua de recapagem do caminhão, pelo menor sulco entre externo, central e interno: '
+      'Régua de recapagem do caminhão, pelo menor sulco entre as leituras individuais, incluindo a quarta quando existe: '
       + 'acima de 8 mm acompanhamento normal; acima de 5 até 8 mm monitoramento preventivo; '
       + 'acima de 3 até 5 mm programar recapagem; 3 mm ou menos crítico, com retirada e avaliação urgente. '
-      + 'Pneu crítico não é apto automaticamente para recapagem.'
+      + 'Pneu crítico não é apto automaticamente para recapagem. '
+      + 'A medição dos sulcos é mensal. Este relatório só recomenda: não abre compra nem aprova recapagem.'
     );
 
     titulo(doc, 'Consolidado');
@@ -107,10 +126,17 @@ export function gerarPdfSaudeBuffer(relatorio) {
       linha(
         doc,
         `${u.filial}: ${frota}, ${u.pneus_montados} pneu(s) · `
-        + `normal ${fx.acompanhamento_normal || 0} · preventivo ${fx.monitoramento_preventivo || 0} · `
-        + `programar ${fx.programar_recapagem || 0} · crítico ${fx.critico || 0} · `
+        + `bom estado ${fx.acompanhamento_normal || 0} · atenção ${fx.monitoramento_preventivo || 0} · `
+        + `recapagem a avaliar ${fx.programar_recapagem || 0} · crítico ${fx.critico || 0} · `
         + textoLeituraSulco(u),
       );
+    }
+
+    titulo(doc, 'Parecer por filial');
+    const unidadesParecer = relatorio.por_unidade || [];
+    if (!unidadesParecer.length) linha(doc, 'Nenhuma filial neste recorte.');
+    for (const u of unidadesParecer) {
+      linha(doc, `${u.filial}: ${textoParecer(u.parecer)}`, { size: 8.5 });
     }
 
     titulo(doc, 'Veículos em situação mais exigente');
@@ -159,12 +185,11 @@ export function gerarPdfSaudeBuffer(relatorio) {
         `${item.filial || item.filial_id}: necessidade técnica ${item.necessidade_pneu_novo || 0} · `
         + `estoque novo ${item.estoque_novo} · estoque recapado ${item.estoque_recapado} · `
         + `em recapagem ${item.em_recapagem} · comprar novo ${compra} · `
-        + `candidatos a recap ${item.candidatos_recap} · avaliação urgente ${item.avaliacao_urgente} · `
-        + `projeção 90 dias novo ${item.previsao_novo_90d} / recap ${item.previsao_recap_90d}`,
+        + `candidatos a recap ${item.candidatos_recap} · avaliação urgente ${item.avaliacao_urgente}`,
         { size: 8.5 },
       );
     }
-    linha(doc, 'Compra de pneu novo cobre dianteira e equipamento sem recapagem. Crítico de tração não entra como recap aprovada. Medidas com vírgula ou ponto entram na mesma conta.', { size: 8.5 });
+    linha(doc, 'Compra de pneu novo cobre dianteira e equipamento sem recapagem. Crítico de tração não entra como recap aprovada. Candidato à recapagem depende da inspeção da carcaça. Medidas com vírgula ou ponto entram na mesma conta. Não há prazo de substituição neste parecer.', { size: 8.5 });
 
     titulo(doc, 'Consumo acima da média');
     const acima = (relatorio.pneus || []).filter((p) => p.comparacao?.acima);

@@ -7,7 +7,7 @@
  *   > 5 e ≤ 8 mm monitoramento preventivo
  *   > 3 e ≤ 5 mm programar recapagem
  *   ≤ 3 mm crítico — retirada e avaliação urgente, nunca apto automático
- * O menor sulco usa só externo, central e interno.
+ * O menor sulco é o menor valor válido entre as 3 ou 4 leituras. Não é média.
  */
 
 export const LIMIARES_RECAP = { critico: 3, programar: 5, preventivo: 8 };
@@ -31,7 +31,7 @@ export const FAIXAS = {
 };
 
 export const LIMITACOES_FIXAS = [
-  'O menor sulco da régua de recapagem usa apenas externo, central e interno. Sulco auxiliar não entra nessa conta.',
+  'O menor sulco da régua é o menor valor válido entre externo, central, interno e auxiliar, quando essa quarta leitura existe. Não se usa média. Os limites continuam 8, 5 e 3 mm.',
   'Medições de ciclos de recapagem diferentes não são somadas para consumo nem para projeção.',
   'Projeção de 5 mm e 3 mm só aparece com pelo menos duas medições no mesmo ciclo, uso crescente e consumo de borracha. Sem isso, o campo fica vazio.',
   'Data estimada exige janela de pelo menos 14 dias e horizonte de até 18 meses. Fora disso, mostra-se só o uso restante.',
@@ -99,9 +99,11 @@ export function sulcosBanda(row) {
   };
 }
 
-/** Menor sulco válido entre externo, central e interno. Auxiliar fica de fora. */
+/** Menor leitura individual válida. A quarta entra quando foi medida. Não é média. */
 export function menorSulcoBanda(row) {
-  const vals = Object.values(sulcosBanda(row)).filter((v) => v != null);
+  const banda = sulcosBanda(row);
+  const vals = [banda.externo, banda.central, banda.interno, sulcoValido(row?.sulco_auxiliar ?? row?.auxiliar)]
+    .filter((v) => v != null);
   return vals.length ? Math.min(...vals) : null;
 }
 
@@ -461,19 +463,221 @@ export function labelCicloNumero(numero) {
 }
 
 /**
- * Histórico dos sulcos, em milímetros. Não é a dimensão comercial do pneu.
- * Três profundidades de banda fecham a leitura. Uma ou duas são parciais.
+ * Leituras individuais, em milímetros. A 4ª entra na contagem da medição.
+ * A régua de desgaste usa o menor entre as leituras individuais válidas.
  */
-export function leituraSulco(pneu, semana) {
-  const pontos = [pneu?.sulcos?.externo, pneu?.sulcos?.central, pneu?.sulcos?.interno]
-    .filter((valor) => valor != null).length;
-  const data = pneu?.data_medicao || null;
-  if (pontos === 0 && !data) return 'sem_historico';
+export function pontosLeituraSulco(sulcos) {
+  return [sulcos?.externo, sulcos?.central, sulcos?.interno, sulcos?.auxiliar]
+    .filter((valor) => valor != null && Number.isFinite(Number(valor)));
+}
+
+/** Soma meses civis e corta o dia que o mês de destino não tem. */
+export function adicionarMesesCivis(iso, meses) {
+  const data = dataIso(iso);
+  if (!data || !Number.isInteger(meses)) return null;
+  const [ano, mes, dia] = data.split('-').map(Number);
+  const deslocado = mes - 1 + meses;
+  const anoDestino = ano + Math.floor(deslocado / 12);
+  const mesDestino = ((deslocado % 12) + 12) % 12;
+  const ultimoDia = new Date(Date.UTC(anoDestino, mesDestino + 1, 0)).getUTCDate();
+  const diaDestino = Math.min(dia, ultimoDia);
+  const mm = String(mesDestino + 1).padStart(2, '0');
+  const dd = String(diaDestino).padStart(2, '0');
+  return `${anoDestino}-${mm}-${dd}`;
+}
+
+/** Ciclo mensal vigente e o mês anterior. A referência é a data operacional, não a semana. */
+export function cicloMensalDe(hoje) {
+  const dia = dataIso(hoje);
+  if (!dia) return null;
+  const inicio = `${dia.slice(0, 7)}-01`;
+  const proximo = adicionarMesesCivis(inicio, 1);
+  const anterior = adicionarMesesCivis(inicio, -1);
+  return {
+    hoje: dia,
+    inicio,
+    fim: adicionarDias(proximo, -1),
+    anterior_inicio: anterior,
+    anterior_fim: adicionarDias(inicio, -1),
+  };
+}
+
+/**
+ * Histórico dos sulcos, em milímetros. Não é a dimensão comercial do pneu.
+ * Três ou quatro profundidades fecham a leitura. Uma ou duas são parciais.
+ * A periodicidade é mensal: o mês vigente, o mês anterior ainda no prazo
+ * de um mês após a última leitura, ou a medição vencida.
+ * Pneu novo usa a data de entrada e não recebe uma medição inventada.
+ */
+export function leituraSulco(pneu, ciclo) {
+  const pontos = pontosLeituraSulco(pneu?.sulcos).length;
+  const data = dataIso(pneu?.data_medicao);
+  const entrada = dataIso(pneu?.data_entrada);
+  if (pontos === 0 && !data) {
+    if (entrada && ciclo?.hoje && ciclo.hoje <= adicionarMesesCivis(entrada, 1)) return 'nao_exigivel';
+    return 'sem_historico';
+  }
   if (pontos === 0) return 'invalida';
   if (pontos < 3) return 'parcial';
   if (!data) return 'invalida';
-  if (semana?.inicio && data >= semana.inicio && data <= semana.fim) return 'na_semana';
-  return 'desatualizada';
+  if (!ciclo?.hoje || !ciclo?.inicio || !ciclo?.fim) return 'no_ciclo';
+  if (data >= ciclo.inicio && data <= ciclo.fim) return 'no_ciclo';
+  const limite = adicionarMesesCivis(data, 1);
+  if (limite && ciclo.hoje <= limite) return 'ciclo_anterior';
+  return 'vencida';
+}
+
+/**
+ * Evolução observada do menor sulco, mês a mês, no mesmo ciclo.
+ * Sem dois meses válidos não há evolução e não há prazo de substituição.
+ */
+export function evolucaoMensal(medicoes) {
+  const porMes = new Map();
+  for (const medicao of ordenarMedicoes(medicoes)) {
+    const data = dataIso(medicao.data_medicao || medicao.data);
+    const menor = menorSulcoBanda(medicao);
+    if (!data || menor == null) continue;
+    porMes.set(data.slice(0, 7), { mes: data.slice(0, 7), menor });
+  }
+  const meses = [...porMes.values()];
+  if (meses.length < 2) {
+    return {
+      disponivel: false,
+      motivo: 'Histórico mensal insuficiente para descrever a evolução. Não há prazo de substituição.',
+      meses: meses.length,
+      delta_mm: null,
+    };
+  }
+  const primeiro = meses[0];
+  const ultimo = meses[meses.length - 1];
+  const delta = round1(primeiro.menor - ultimo.menor);
+  const movimento = delta > 0
+    ? `o menor sulco caiu ${delta} mm`
+    : delta < 0
+      ? `o menor sulco subiu ${Math.abs(delta)} mm`
+      : 'o menor sulco se manteve';
+  return {
+    disponivel: true,
+    motivo: null,
+    meses: meses.length,
+    delta_mm: delta,
+    de: primeiro.mes,
+    ate: ultimo.mes,
+    texto: `Entre ${primeiro.mes} e ${ultimo.mes}, ${movimento}. Isso descreve medições já feitas. Não é prazo de substituição.`,
+  };
+}
+
+function inteiroPositivo(valor) {
+  const n = Number(valor);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.round(n);
+}
+
+/**
+ * Parecer consultivo da filial. Pode reunir compra, recapagem e reavaliação.
+ * Quantidade de compra só aparece com estoque compatível já conferido.
+ */
+export function montarParecerExecutivo({
+  bom = 0,
+  atencao = 0,
+  criticos = 0,
+  montados = 0,
+  necessidade = 0,
+  estoqueNovo = 0,
+  comprarNovo = 0,
+  estoqueConferido = false,
+  candidatos = 0,
+  vencidas = 0,
+  semHistorico = 0,
+  parciais = 0,
+} = {}) {
+  const condicao = {
+    bom: inteiroPositivo(bom),
+    atencao: inteiroPositivo(atencao),
+    criticos: inteiroPositivo(criticos),
+  };
+  const necessidadeTecnica = inteiroPositivo(necessidade);
+  const estoque = inteiroPositivo(estoqueNovo);
+  const aComprar = inteiroPositivo(comprarNovo);
+  const recap = inteiroPositivo(candidatos);
+  const medicaoVencida = inteiroPositivo(vencidas);
+  const semLeitura = inteiroPositivo(semHistorico);
+  const leituraParcial = inteiroPositivo(parciais);
+  const conferido = estoqueConferido === true;
+  const compraRecomendada = conferido && necessidadeTecnica > 0 && aComprar > 0;
+  const dadosSuficientes = conferido && semLeitura === 0 && leituraParcial === 0;
+  const compraDesnecessaria = dadosSuficientes && aComprar === 0 && !compraRecomendada;
+  const recomendacoes = [];
+  if (compraRecomendada) recomendacoes.push('COMPRA RECOMENDADA');
+  if (compraDesnecessaria) recomendacoes.push('COMPRA NÃO NECESSÁRIA NO MOMENTO');
+  if (recap > 0) recomendacoes.push('AVALIAR RECAPAGEM');
+  if (condicao.criticos > 0 || medicaoVencida > 0) recomendacoes.push('AVALIAÇÃO PRIORITÁRIA');
+
+  let prioridade = 'Acompanhamento';
+  if (condicao.criticos > 0 || medicaoVencida > 0) prioridade = 'Alta';
+  else if (compraRecomendada || recap > 0 || (necessidadeTecnica > 0 && !dadosSuficientes)) prioridade = 'Média';
+
+  const frota = `Como está a frota: ${condicao.bom} em bom estado, ${condicao.atencao} em atenção e ${condicao.criticos} críticos.`;
+  const atencaoTexto = `Precisam de atenção: ${condicao.atencao + condicao.criticos} pneus.`;
+  const unidadeNecessidade = necessidadeTecnica === 1 ? 'pneu' : 'pneus';
+  let substituicao = necessidadeTecnica > 0
+    ? `Há necessidade técnica de substituição em ${necessidadeTecnica} ${unidadeNecessidade}. Ela usa a última medição válida. Não é estimativa.`
+    : 'Não há necessidade técnica de substituição na última medição válida.';
+  if (medicaoVencida > 0 && necessidadeTecnica > 0) {
+    substituicao += ' A medição mensal vencida pede reavaliação e não apaga essa necessidade.';
+  } else if (medicaoVencida > 0) {
+    substituicao += ' A medição mensal vencida pede reavaliação da última leitura.';
+  }
+
+  let compra;
+  if (compraRecomendada) {
+    compra = `Precisa comprar pneus novos. O estoque compatível (${estoque}) não cobre a necessidade. Quantidade conferida: ${aComprar}.`;
+  } else if (compraDesnecessaria) {
+    compra = 'Não precisa comprar pneus novos no momento.';
+  } else if (necessidadeTecnica > 0) {
+    compra = 'Há necessidade técnica, mas a quantidade de compra não está fechada: o estoque compatível ainda não foi conferido.';
+  } else {
+    compra = 'Ainda não dá para fechar a compra: faltam dados para conferir o estoque compatível.';
+  }
+
+  const recapagem = recap > 0
+    ? `Vale encaminhar ${recap} ${recap === 1 ? 'pneu' : 'pneus'} para avaliação de recapagem. A aprovação depende da inspeção técnica da carcaça.`
+    : 'Não há candidato para encaminhar à avaliação de recapagem.';
+
+  let motivoPrioridade = 'O acompanhamento mensal segue sem urgência de compra ou de retirada.';
+  if (condicao.criticos > 0 && medicaoVencida > 0) {
+    motivoPrioridade = 'Há pneus críticos e medição mensal vencida. A operação não pode parar por falta de pneu.';
+  } else if (condicao.criticos > 0) {
+    motivoPrioridade = 'Há pneus críticos. A retirada e a reavaliação vêm antes de fechar quantidade de compra.';
+  } else if (medicaoVencida > 0) {
+    motivoPrioridade = 'A medição mensal venceu. É preciso medir de novo antes de tratar o número como fechado.';
+  } else if (compraRecomendada) {
+    motivoPrioridade = 'A necessidade técnica está comprovada e o estoque compatível não cobre.';
+  } else if (recap > 0) {
+    motivoPrioridade = 'Há carcaças para inspeção de recapagem, sem aprovação automática.';
+  } else if (necessidadeTecnica > 0) {
+    motivoPrioridade = 'A necessidade técnica existe e a quantidade de compra ainda depende do estoque.';
+  }
+
+  return {
+    bom: condicao.bom,
+    atencao: condicao.atencao,
+    criticos: condicao.criticos,
+    precisam_atencao: condicao.atencao + condicao.criticos,
+    montados: inteiroPositivo(montados),
+    necessidade: necessidadeTecnica,
+    estoque_novo: estoque,
+    quantidade_compra: compraRecomendada ? aComprar : null,
+    candidatos: recap,
+    recomendacoes,
+    prioridade,
+    frota,
+    atencao_texto: atencaoTexto,
+    substituicao,
+    compra,
+    recapagem,
+    prioridade_texto: `Prioridade operacional: ${prioridade}. ${motivoPrioridade}`,
+  };
 }
 
 /** Iguala grafias da mesma medida só na conta. O valor gravado permanece. */
@@ -702,9 +906,13 @@ export function montarAnalisePneu(pneu, contexto = {}) {
     unidade,
     regua_recap: reguaRecap,
     papel,
-    sulcos: sulcosBanda(ultima),
+    sulcos: {
+      ...sulcosBanda(ultima),
+      auxiliar: sulcoValido(ultima?.sulco_auxiliar),
+    },
     menor_sulco: menorSulcoBanda(ultima),
     data_medicao: dataIso(ultima?.data_medicao || ultima?.data),
+    evolucao_mensal: evolucaoMensal(medicoesCiclo),
     faixa,
     faixa_label: FAIXAS[faixa] || faixa,
     desgaste,

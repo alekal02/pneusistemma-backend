@@ -3,7 +3,7 @@
  * Somente leitura.
  */
 import { getLimites, limitesDoVeiculo } from '../limites.js';
-import { medidoNestaSemana, semanaMedicaoBrasil } from '../dia-medicao.js';
+import { dataISOBrasil } from '../dia-medicao.js';
 import { especificacaoMedicao, normalizarInspecao } from '../medicao-perfil.js';
 import { papelPosicao } from '../pneus-layouts.js';
 import { resolverTipoEquipamento } from '../equipamento-tipos.js';
@@ -12,7 +12,9 @@ import {
   FAIXAS,
   LIMITACOES_FIXAS,
   aplicarComparacao,
+  cicloMensalDe,
   montarAnalisePneu,
+  montarParecerExecutivo,
   leituraSulco,
   montarPrevisaoFilial,
   normalizarMedida,
@@ -78,39 +80,77 @@ export function montadoIncompleto(pneu) {
   return leitura === 'sem_historico' || leitura === 'invalida' || leitura === 'parcial';
 }
 
-export function resumirLeituraSulco(montados, semana) {
+export function resumirLeituraSulco(montados, ciclo) {
   const acc = {
     sem_historico: 0,
     invalida: 0,
     parcial: 0,
-    desatualizada: 0,
-    na_semana: 0,
+    vencida: 0,
+    ciclo_anterior: 0,
+    no_ciclo: 0,
+    nao_exigivel: 0,
   };
   for (const pneu of montados || []) {
-    const leitura = pneu.leitura_sulco || leituraSulco(pneu, semana);
+    const leitura = pneu.leitura_sulco || leituraSulco(pneu, ciclo);
     if (acc[leitura] != null) acc[leitura] += 1;
   }
   return acc;
 }
 
+function diaIso(valor) {
+  if (!valor) return null;
+  const s = String(valor).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+/** Entrada em operação: última montagem, ou a data de instalação. Não cria medição. */
+export function dataEntradaOperacao(pneu, movimentacoes = []) {
+  const montagens = (movimentacoes || [])
+    .filter((movimento) => movimento?.tipo === 'montagem')
+    .map((movimento) => diaIso(movimento.data_evento))
+    .filter(Boolean)
+    .sort();
+  if (montagens.length) return montagens[montagens.length - 1];
+  return diaIso(pneu?.data_instalacao);
+}
+
+export function contagemCondicao(faixas) {
+  const item = faixas || {};
+  return {
+    bom: (Number(item.acompanhamento_normal) || 0) + (Number(item.acompanhamento_equipamento) || 0),
+    atencao: (Number(item.monitoramento_preventivo) || 0)
+      + (Number(item.monitoramento_equipamento) || 0)
+      + (Number(item.programar_recapagem) || 0),
+    criticos: (Number(item.critico) || 0) + (Number(item.critico_equipamento) || 0),
+  };
+}
+
 /**
- * Semana corrente da medição. Ausência de data não vira "atualizada".
+ * Ciclo mensal da medição. Ausência de data não vira medição do mês.
+ * Medição do mês anterior ainda no prazo não é atraso.
  */
-export function situacaoAtualizacaoSemanal(montados, semana) {
+export function situacaoAtualizacaoMensal(montados, ciclo) {
   const lista = montados || [];
+  const leitura = resumirLeituraSulco(lista, ciclo);
   const datas = lista.map((pneu) => pneu.data_medicao).filter(Boolean).sort();
   const ultima = datas.length ? datas[datas.length - 1] : null;
-  const medidosNaSemana = lista.filter((pneu) => medidoNestaSemana(pneu.data_medicao, semana)).length;
   let situacao = 'sem_medicao';
   if (!lista.length) situacao = 'sem_pneu';
-  else if (!ultima) situacao = 'sem_medicao';
-  else if (medidosNaSemana === lista.length) situacao = 'atualizada';
-  else if (medidosNaSemana === 0) situacao = 'atrasada';
-  else situacao = 'parcial';
+  else if (leitura.vencida > 0) situacao = 'vencida';
+  else if (
+    leitura.sem_historico > 0
+    && leitura.no_ciclo + leitura.ciclo_anterior + leitura.nao_exigivel === 0
+    && leitura.parcial + leitura.invalida === 0
+  ) situacao = 'sem_medicao';
+  else if (leitura.sem_historico > 0 || leitura.parcial > 0 || leitura.invalida > 0) situacao = 'parcial';
+  else if (leitura.ciclo_anterior > 0) situacao = 'ciclo_anterior';
+  else if (leitura.no_ciclo > 0) situacao = 'no_ciclo';
+  else if (leitura.nao_exigivel === lista.length) situacao = 'nao_exigivel';
   return {
     ultima_medicao: ultima,
-    situacao_semana: situacao,
-    medidos_na_semana: medidosNaSemana,
+    situacao_mes: situacao,
+    medidos_no_ciclo: leitura.no_ciclo,
+    leitura_sulco: leitura,
   };
 }
 
@@ -145,6 +185,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       SELECT
         p.id, p.filial_id, p.veiculo_id, p.posicao, p.marca, p.modelo, p.medida,
         p.numero_fogo, p.tipo_pneu, p.condicao, p.vida_recap, p.status_pneu,
+        p.data_instalacao,
         v.placa, v.apelido, v.tipo, v.tipo_codigo, v.layout_pneus,
         f.nome AS filial_nome, f.codigo AS filial_codigo
       FROM pneus p
@@ -253,6 +294,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       condicao: row.condicao || null,
       vida_recap: row.vida_recap || 0,
       status_pneu: row.status_pneu,
+      data_entrada: dataEntradaOperacao(row, movs),
     }, {
       medicoes: meds,
       separacao: separarPorCiclo({ movimentacoes: movs, medicoes: meds }),
@@ -269,9 +311,10 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   });
 
   const comparacao = aplicarComparacao(analisados);
-  const semana = semanaMedicaoBrasil();
+  const ciclo = cicloMensalDe(dataISOBrasil());
   for (const pneu of analisados) {
-    pneu.leitura_sulco = leituraSulco(pneu, semana);
+    pneu.leitura_sulco = leituraSulco(pneu, ciclo);
+    pneu.reavaliar = pneu.leitura_sulco === 'vencida';
     pneu.dimensao_comercial = Boolean(normalizarMedida(pneu.medida));
   }
   const montados = analisados.filter((p) => p.status_pneu === 'montado');
@@ -282,7 +325,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   const porFilial = filiaisExec.map((f) => {
     const lista = montados.filter((p) => p.filial_id === f.id);
     const faixasFilial = resumirFaixas(lista);
-    const semanaFilial = situacaoAtualizacaoSemanal(lista, semana);
+    const mesFilial = situacaoAtualizacaoMensal(lista, ciclo);
     return {
       filial_id: f.id,
       filial: f.nome,
@@ -299,9 +342,12 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       candidatos_recap: lista.filter((p) => p.elegibilidade?.candidato_programacao).length,
       avaliacao_urgente: lista.filter((p) => p.elegibilidade?.encaminhamento === 'retirada_avaliacao_urgente').length,
       incompletos: lista.filter((pneu) => montadoIncompleto(pneu)).length,
-      leitura_sulco: resumirLeituraSulco(lista, semana),
       sem_dimensao_comercial: lista.filter((pneu) => !pneu.dimensao_comercial).length,
-      ...semanaFilial,
+      evolucao_mensal: {
+        com_historico: lista.filter((pneu) => pneu.evolucao_mensal?.disponivel).length,
+        insuficientes: lista.filter((pneu) => pneu.evolucao_mensal && !pneu.evolucao_mensal.disponivel).length,
+      },
+      ...mesFilial,
     };
   });
 
@@ -416,18 +462,39 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
     linha.recomendacao_definitiva = linha.medida_informada === true;
   }
 
+  for (const unidade of porFilial) {
+    const compra = comprasPorFilial.get(unidade.filial_id);
+    const condicao = contagemCondicao(unidade.faixas);
+    const conferido = compra
+      ? compra.recomendacao_definitiva === true
+      : unidade.sem_dimensao_comercial === 0;
+    unidade.parecer = montarParecerExecutivo({
+      ...condicao,
+      montados: unidade.pneus_montados,
+      necessidade: compra?.necessidade_pneu_novo || 0,
+      estoqueNovo: compra?.estoque_novo || 0,
+      comprarNovo: conferido ? (compra?.comprar_novo || 0) : 0,
+      estoqueConferido: conferido,
+      candidatos: unidade.candidatos_recap || 0,
+      vencidas: unidade.leitura_sulco?.vencida || 0,
+      semHistorico: unidade.leitura_sulco?.sem_historico || 0,
+      parciais: (unidade.leitura_sulco?.parcial || 0) + (unidade.leitura_sulco?.invalida || 0),
+    });
+  }
+
   return {
     titulo: 'Saúde e desgaste dos pneus',
     perfil: 'presidente',
     gerado_em: new Date().toISOString(),
     somente_leitura: true,
-    semana,
+    consultivo: true,
+    ciclo,
     regras: {
       acima_de_8: 'Acompanhamento normal',
       acima_de_5_ate_8: 'Monitoramento preventivo',
       acima_de_3_ate_5: 'Programar recapagem',
       ate_3: 'Crítico — retirada e avaliação urgente de recapagem, sem aptidão automática',
-      menor_sulco: 'Menor valor válido entre externo, central e interno',
+      menor_sulco: 'Menor valor válido entre externo, central, interno e auxiliar',
     },
     consolidado: {
       filiais: filiaisExec.length,
@@ -464,6 +531,8 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       `${semProjecao} pneu(s) de caminhão sem projeção de 5 mm e 3 mm por histórico insuficiente ou pouco confiável.`,
       `${cicloAberto} pneu(s) montado(s) com ciclo de recapagem não separado. O consumo desses pneus não foi calculado.`,
       `${semMedida} pneu(s) sem dimensão comercial. A necessidade técnica desses pneus continua visível. A quantidade de compra não fecha sem a especificação e o estoque dessa dimensão.`,
+      'A medição dos sulcos é mensal. Medição do mês anterior ainda dentro de um mês da última leitura não é atraso. Medição vencida não apaga a necessidade técnica e pede reavaliação.',
+      'A evolução usa o menor sulco mês a mês quando há pelo menos dois meses no mesmo ciclo. Sem isso, não há prazo de substituição.',
       ...(comprasAlerta.texto ? [comprasAlerta.texto] : []),
       comparacao.grupos_insuficientes
         ? `${comparacao.grupos_insuficientes} grupo(s) comparável(is) com menos de 3 pneus. Nesses grupos não há alerta de consumo acima da média.`

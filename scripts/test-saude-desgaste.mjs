@@ -10,20 +10,25 @@ import {
   textoCompraNova,
   textoConsolidadoFrota,
   textoLeituraSulco,
+  textoParecer,
   textoVeiculosUnidade,
 } from '../src/services/saude-desgaste-pdf.js';
 import {
   aplicarComparacao,
   avaliarElegibilidadeRecap,
   calcularConsumoEProjecao,
+  cicloMensalDe,
   classificarDesgasteBanda,
+  evolucaoMensal,
   faixaRecapagemCaminhao,
+  leituraSulco,
   menorSulcoBanda,
   montarAnalisePneu,
-  leituraSulco,
+  montarParecerExecutivo,
   montarPrevisaoFilial,
   necessidadeCompra,
   normalizarMedida,
+  pontosLeituraSulco,
 } from '../src/services/saude-desgaste.js';
 import {
   alertaCompraIncompleta,
@@ -31,6 +36,7 @@ import {
   filialForaDoIndicadorExecutivo,
   montadoIncompleto,
   resumirLeituraSulco,
+  situacaoAtualizacaoMensal,
 } from '../src/services/saude-desgaste-relatorio.js';
 
 function med(parcial) {
@@ -56,9 +62,13 @@ assert.equal(faixaRecapagemCaminhao(3), 'critico');
 assert.equal(faixaRecapagemCaminhao(1.6), 'critico');
 assert.equal(faixaRecapagemCaminhao(null), 'sem_medicao');
 
-assert.equal(menorSulcoBanda({ sulco_externo: 10, sulco_central: 9, sulco_interno: 11, sulco_auxiliar: 1 }), 9);
-assert.equal(menorSulcoBanda({ sulco_externo: null, sulco_central: 4, sulco_interno: 9, sulco_auxiliar: 1 }), 4);
-assert.equal(menorSulcoBanda({ sulco_auxiliar: 2, sulco_mm: 2 }), null);
+assert.equal(menorSulcoBanda({ sulco_externo: 10, sulco_central: 9, sulco_interno: 11, sulco_auxiliar: 1 }), 1);
+assert.equal(menorSulcoBanda({ sulco_externo: null, sulco_central: 4, sulco_interno: 9, sulco_auxiliar: 1 }), 1);
+assert.equal(menorSulcoBanda({ sulco_auxiliar: 2, sulco_mm: 2 }), 2);
+assert.equal(menorSulcoBanda({ sulco_mm: 2 }), null);
+assert.equal(faixaRecapagemCaminhao(menorSulcoBanda({
+  sulco_externo: 10, sulco_central: 9, sulco_interno: 11, sulco_auxiliar: 1,
+})), 'critico');
 
 const critico = avaliarElegibilidadeRecap({
   faixa: 'critico',
@@ -356,26 +366,46 @@ assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veicul
 assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Com pneu montado: 2/);
 assert.equal(textoVeiculosUnidade({ veiculos_cadastrados: 5, veiculos: 2 }), '5 cadastrado(s), 2 com pneu montado');
 
-const semanaTeste = { inicio: '2026-10-19', fim: '2026-10-25' };
+const cicloTeste = cicloMensalDe('2026-10-20');
+assert.equal(cicloTeste.inicio, '2026-10-01');
+assert.equal(cicloTeste.fim, '2026-10-31');
 const sulcoCompleto = { externo: 2.5, central: 3, interno: 2.8 };
-assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-10-17' }, semanaTeste), 'desatualizada');
-assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-10-20' }, semanaTeste), 'na_semana');
-assert.equal(leituraSulco({ sulcos: { externo: null, central: null, interno: null }, data_medicao: null }, semanaTeste), 'sem_historico');
-assert.equal(leituraSulco({ sulcos: { externo: null, central: null, interno: null }, data_medicao: '2026-10-17' }, semanaTeste), 'invalida');
-assert.equal(leituraSulco({ sulcos: { externo: 4, central: null, interno: null }, data_medicao: '2026-10-20' }, semanaTeste), 'parcial');
+const sulcoQuatro = { externo: 10, central: 4, interno: 10, auxiliar: 1 };
+assert.equal(pontosLeituraSulco(sulcoCompleto).length, 3);
+assert.equal(pontosLeituraSulco(sulcoQuatro).length, 4);
+assert.equal(menorSulcoBanda({ sulco_externo: 10, sulco_central: 4, sulco_interno: 10, sulco_auxiliar: 1 }), 1);
+assert.notEqual(menorSulcoBanda({ sulco_externo: 10, sulco_central: 4, sulco_interno: 10, sulco_auxiliar: 1 }), 6.25);
+assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-10-13' }, cicloTeste), 'no_ciclo');
+assert.equal(leituraSulco({ sulcos: sulcoQuatro, data_medicao: '2026-10-13' }, cicloTeste), 'no_ciclo');
+assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-09-25' }, cicloTeste), 'ciclo_anterior');
+assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-09-10' }, cicloTeste), 'vencida');
+assert.equal(leituraSulco({ sulcos: sulcoCompleto, data_medicao: '2026-08-20' }, cicloTeste), 'vencida');
+assert.equal(leituraSulco({ sulcos: { externo: null, central: null, interno: null, auxiliar: null }, data_medicao: null }, cicloTeste), 'sem_historico');
+assert.equal(leituraSulco({
+  sulcos: { externo: null, central: null, interno: null },
+  data_medicao: null,
+  data_entrada: '2026-10-05',
+}, cicloTeste), 'nao_exigivel');
+assert.equal(leituraSulco({
+  sulcos: { externo: null, central: null, interno: null },
+  data_medicao: null,
+  data_entrada: '2026-08-01',
+}, cicloTeste), 'sem_historico');
+assert.equal(leituraSulco({ sulcos: { externo: null, central: null, interno: null }, data_medicao: '2026-10-17' }, cicloTeste), 'invalida');
+assert.equal(leituraSulco({ sulcos: { externo: 4, central: null, interno: null }, data_medicao: '2026-10-20' }, cicloTeste), 'parcial');
 assert.equal(leituraSulco({
   sulcos: sulcoCompleto,
-  data_medicao: '2026-10-17',
+  data_medicao: '2026-09-10',
   medida: null,
   faixa: 'critico',
-}, semanaTeste), 'desatualizada');
+}, cicloTeste), 'vencida');
 const antigoSemDimensao = {
   status_pneu: 'montado',
   sulcos: sulcoCompleto,
-  data_medicao: '2026-10-17',
+  data_medicao: '2026-09-10',
   medida: '',
   faixa: 'critico',
-  leitura_sulco: 'desatualizada',
+  leitura_sulco: 'vencida',
   dimensao_comercial: false,
 };
 assert.equal(montadoIncompleto(antigoSemDimensao), false);
@@ -383,30 +413,91 @@ assert.equal(montadoIncompleto({
   status_pneu: 'montado',
   leitura_sulco: 'sem_historico',
 }), true);
+assert.equal(situacaoAtualizacaoMensal([
+  { leitura_sulco: 'no_ciclo', data_medicao: '2026-10-13' },
+], cicloTeste).situacao_mes, 'no_ciclo');
+assert.equal(situacaoAtualizacaoMensal([
+  { leitura_sulco: 'ciclo_anterior', data_medicao: '2026-09-25' },
+], cicloTeste).situacao_mes, 'ciclo_anterior');
+assert.equal(situacaoAtualizacaoMensal([
+  { leitura_sulco: 'vencida', data_medicao: '2026-08-20' },
+], cicloTeste).situacao_mes, 'vencida');
+assert.equal(situacaoAtualizacaoMensal([
+  { leitura_sulco: 'sem_historico', data_medicao: null },
+], cicloTeste).situacao_mes, 'sem_medicao');
 assert.deepEqual(resumirLeituraSulco([
-  { leitura_sulco: 'desatualizada' },
-  { leitura_sulco: 'desatualizada' },
-  { leitura_sulco: 'na_semana' },
+  { leitura_sulco: 'vencida' },
+  { leitura_sulco: 'ciclo_anterior' },
+  { leitura_sulco: 'no_ciclo' },
   { leitura_sulco: 'sem_historico' },
-], semanaTeste), {
+], cicloTeste), {
   sem_historico: 1,
   invalida: 0,
   parcial: 0,
-  desatualizada: 2,
-  na_semana: 1,
+  vencida: 1,
+  ciclo_anterior: 1,
+  no_ciclo: 1,
+  nao_exigivel: 0,
 });
+const compraSemEstoque = montarParecerExecutivo({
+  bom: 2, atencao: 0, criticos: 1, necessidade: 2, estoqueNovo: 0, comprarNovo: 2,
+  estoqueConferido: true, candidatos: 1, vencidas: 1,
+});
+assert.equal(compraSemEstoque.quantidade_compra, 2);
+assert.equal(compraSemEstoque.recomendacoes.includes('COMPRA RECOMENDADA'), true);
+assert.equal(compraSemEstoque.recomendacoes.includes('AVALIAR RECAPAGEM'), true);
+assert.equal(compraSemEstoque.recomendacoes.includes('AVALIAÇÃO PRIORITÁRIA'), true);
+assert.match(compraSemEstoque.substituicao, /não apaga essa necessidade/);
+assert.match(compraSemEstoque.recapagem, /inspeção técnica da carcaça/);
+const estoqueCobre = montarParecerExecutivo({
+  bom: 4, atencao: 0, criticos: 0, necessidade: 2, estoqueNovo: 5, comprarNovo: 0,
+  estoqueConferido: true,
+});
+assert.equal(estoqueCobre.quantidade_compra, null);
+assert.deepEqual(estoqueCobre.recomendacoes, ['COMPRA NÃO NECESSÁRIA NO MOMENTO']);
+const semConferencia = montarParecerExecutivo({
+  bom: 0, atencao: 0, criticos: 2, necessidade: 2, estoqueNovo: 0, comprarNovo: 2,
+  estoqueConferido: false,
+});
+assert.equal(semConferencia.quantidade_compra, null);
+assert.equal(semConferencia.recomendacoes.includes('COMPRA RECOMENDADA'), false);
+assert.match(semConferencia.compra, /não está fechada/);
+const historicoCurto = evolucaoMensal([med({ id: 1, data: '2026-10-13', ext: 8, cent: 8, int: 8 })]);
+assert.equal(historicoCurto.disponivel, false);
+assert.equal(historicoCurto.delta_mm, null);
+assert.match(historicoCurto.motivo, /insuficiente/);
+assert.equal('prazo' in historicoCurto, false);
+const historicoMensal = evolucaoMensal([
+  med({ id: 1, data: '2026-09-15', ext: 8, cent: 8, int: 8 }),
+  med({ id: 2, data: '2026-10-15', ext: 6, cent: 7, int: 6.5 }),
+]);
+assert.equal(historicoMensal.disponivel, true);
+assert.equal(historicoMensal.delta_mm, 2);
+assert.match(historicoMensal.texto, /Não é prazo de substituição/);
+const novoSemMedicao = montarAnalisePneu({
+  id: 9,
+  status_pneu: 'montado',
+  data_entrada: '2026-10-05',
+  vida_recap: 0,
+}, { medicoes: [], perfil: 'caminhao', permiteRecap: true, papel: 'tracao' });
+assert.equal(novoSemMedicao.menor_sulco, null);
+assert.equal(novoSemMedicao.evolucao_mensal.disponivel, false);
 assert.match(textoLeituraSulco({
-  leitura_sulco: { sem_historico: 0, desatualizada: 144, na_semana: 0, parcial: 0, invalida: 0 },
-  sem_dimensao_comercial: 144,
-}), /sulco desatualizado 144/);
+  leitura_sulco: { sem_historico: 0, vencida: 3, ciclo_anterior: 1, no_ciclo: 4, parcial: 0, invalida: 0, nao_exigivel: 0 },
+}), /medição mensal vencida 3/);
 assert.match(textoLeituraSulco({
-  leitura_sulco: { sem_historico: 0, desatualizada: 144, na_semana: 0, parcial: 0, invalida: 0 },
-  sem_dimensao_comercial: 144,
-}), /sem dimensão comercial 144/);
+  leitura_sulco: { sem_historico: 0, vencida: 3, no_ciclo: 4, parcial: 0, invalida: 0 },
+}), /neste mês 4/);
 assert.equal(textoLeituraSulco({
-  leitura_sulco: { sem_historico: 0, desatualizada: 144, na_semana: 0, parcial: 0, invalida: 0 },
+  leitura_sulco: { sem_historico: 0, vencida: 144, no_ciclo: 0, parcial: 0, invalida: 0 },
   sem_dimensao_comercial: 144,
-}).includes('sem histórico de sulco 144'), false);
+}).includes('nesta semana'), false);
+assert.equal(textoLeituraSulco({
+  leitura_sulco: { sem_historico: 0, vencida: 144, no_ciclo: 0 },
+}).includes('sem dimensão comercial'), false);
+assert.match(textoParecer(compraSemEstoque), /COMPRA RECOMENDADA/);
+assert.match(textoParecer(compraSemEstoque), /AVALIAR RECAPAGEM/);
+assert.match(textoParecer(estoqueCobre), /COMPRA NÃO NECESSÁRIA NO MOMENTO/);
 
 console.log('test-saude-desgaste: cálculos ok');
 
