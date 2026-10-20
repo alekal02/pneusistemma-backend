@@ -493,6 +493,30 @@ const estoqueCobre = montarParecerExecutivo({
 });
 assert.equal(estoqueCobre.quantidade_compra, null);
 assert.deepEqual(estoqueCobre.recomendacoes, ['COMPRA NÃO NECESSÁRIA NO MOMENTO']);
+const semFrota = montarParecerExecutivo({
+  bom: 0, atencao: 0, criticos: 0, montados: 0, estoqueConferido: true, veiculosSemCobertura: 1,
+});
+assert.equal(semFrota.recomendacoes.includes('DADOS INSUFICIENTES PARA DECISÃO'), true);
+assert.equal(semFrota.recomendacoes.includes('COMPRA NÃO NECESSÁRIA NO MOMENTO'), false);
+assert.equal(/Não precisa comprar pneus novos/.test(semFrota.compra), false);
+assert.match(semFrota.compra, /DADOS INSUFICIENTES PARA DECISÃO/);
+assert.match(semFrota.prioridade_texto, /permanece aberta/);
+const frotaParcial = montarParecerExecutivo({
+  bom: 1, atencao: 0, criticos: 0, montados: 2, estoqueConferido: false, veiculosSemCobertura: 9,
+});
+assert.equal(frotaParcial.prioridade, 'Média');
+assert.equal(frotaParcial.recomendacoes.includes('DADOS INSUFICIENTES PARA DECISÃO'), true);
+assert.match(frotaParcial.frota, /1 em bom estado/);
+assert.equal(frotaParcial.prioridade_texto.includes('sem urgência de compra'), false);
+const recapPreservada = montarParecerExecutivo({
+  bom: 19, atencao: 20, criticos: 1, necessidade: 0, candidatos: 4, vencidas: 18,
+  estoqueConferido: false, veiculosSemCobertura: 1,
+});
+assert.equal(recapPreservada.prioridade, 'Alta');
+assert.equal(recapPreservada.recomendacoes.includes('AVALIAR RECAPAGEM'), true);
+assert.equal(recapPreservada.recomendacoes.includes('AVALIAÇÃO PRIORITÁRIA'), true);
+assert.match(recapPreservada.recapagem, /inspeção técnica da carcaça/);
+assert.equal(recapPreservada.compra.includes('Não precisa comprar pneus novos'), false);
 const semConferencia = montarParecerExecutivo({
   bom: 0, atencao: 0, criticos: 2, necessidade: 2, estoqueNovo: 0, comprarNovo: 2,
   estoqueConferido: false,

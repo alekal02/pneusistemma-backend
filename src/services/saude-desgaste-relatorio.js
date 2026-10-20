@@ -476,6 +476,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       comprarNovo: conferido ? (compra?.comprar_novo || 0) : 0,
       estoqueConferido: conferido,
       candidatos: unidade.candidatos_recap || 0,
+      veiculosSemCobertura: Math.max(0, (unidade.veiculos_cadastrados || 0) - (unidade.veiculos || 0)),
       vencidas: unidade.leitura_sulco?.vencida || 0,
       semHistorico: unidade.leitura_sulco?.sem_historico || 0,
       parciais: (unidade.leitura_sulco?.parcial || 0) + (unidade.leitura_sulco?.invalida || 0),
