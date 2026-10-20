@@ -9,9 +9,18 @@ import {
   LABELS_PAPEL,
   PAPEIS,
   filiaisEscopoIds,
+  papelSemFilial,
+  ehPresidenteReservado,
 } from '../auth.js';
 
 const router = Router();
+
+function cargoPadrao(papel) {
+  if (papel === 'admin') return 'admin';
+  if (papel === 'presidente') return 'presidente';
+  if (papel === 'gerente') return 'gerente_filial';
+  return 'funcionario';
+}
 
 router.use(requireAuth);
 
@@ -58,13 +67,15 @@ router.get('/', requireGerenteOuAdmin, async (req, res, next) => {
     }
 
     sql += ` ORDER BY
-    CASE u.papel WHEN 'admin' THEN 0 WHEN 'gerente' THEN 1 ELSE 2 END,
+    CASE u.papel WHEN 'presidente' THEN 0 WHEN 'admin' THEN 1 WHEN 'gerente' THEN 2 ELSE 3 END,
     f.nome, u.login`;
 
     const rows = await db.prepare(sql).all(...params);
     res.json({
       usuarios: rows.map(mapUsuario),
-      papeis: PAPEIS.map((p) => ({ codigo: p, label: LABELS_PAPEL[p] })),
+      papeis: PAPEIS
+        .filter((p) => p !== 'presidente')
+        .map((p) => ({ codigo: p, label: LABELS_PAPEL[p] })),
     });
   } catch (err) {
     next(err);
@@ -78,14 +89,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
     return res.status(400).json({ erro: 'Login e senha (mín. 4 caracteres) são obrigatórios' });
   }
   const papelFinal = papel || 'filial';
+  if (papelFinal === 'presidente') {
+    return res.status(403).json({ erro: 'Não é permitido criar usuário com o papel presidente' });
+  }
   if (!PAPEIS.includes(papelFinal)) {
-    return res.status(400).json({ erro: `Papel inválido. Use: ${PAPEIS.join(', ')}` });
+    return res.status(400).json({ erro: `Papel inválido. Use: ${PAPEIS.filter((p) => p !== 'presidente').join(', ')}` });
   }
   if (papelFinal === 'filial' && !filial_id) {
     return res.status(400).json({ erro: 'Operador de filial precisa de filial_id' });
   }
-  if (papelFinal === 'admin' && filial_id) {
-    return res.status(400).json({ erro: 'Admin total não fica vinculado a filial' });
+  if (papelSemFilial(papelFinal) && filial_id) {
+    return res.status(400).json({ erro: 'Admin total e presidente não ficam vinculados a uma filial' });
   }
 
   const db = getDb();
@@ -97,8 +111,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       login.trim().toLowerCase(),
       hashSenha(senha),
       papelFinal,
-      cargo?.trim() || (papelFinal === 'admin' ? 'admin' : papelFinal === 'gerente' ? 'gerente_filial' : 'funcionario'),
-      papelFinal === 'admin' ? null : (filial_id || null),
+      cargo?.trim() || cargoPadrao(papelFinal),
+      papelSemFilial(papelFinal) ? null : (filial_id || null),
       whatsapp?.replace(/\D/g, '') || null
     );
     const row = await db.prepare(`
@@ -135,8 +149,8 @@ router.post('/:id/reset-senha', requireGerenteOuAdmin, async (req, res, next) =>
     if (!alvo) return res.status(404).json({ erro: 'Usuário não encontrado' });
 
     if (req.user.papel === 'gerente') {
-      if (alvo.papel === 'admin') {
-        return res.status(403).json({ erro: 'Gerente não pode alterar senha do admin total' });
+      if (alvo.papel === 'admin' || alvo.papel === 'presidente') {
+        return res.status(403).json({ erro: 'Gerente não pode alterar senha do admin total nem do presidente' });
       }
       const escopo = filiaisEscopoIds(req);
       if (escopo?.length && !escopo.includes(alvo.filial_id)) {
@@ -176,12 +190,19 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
     if (!PAPEIS.includes(papelFinal)) {
       return res.status(400).json({ erro: 'Papel inválido' });
     }
+    if (papel != null && papelFinal !== alvo.papel) {
+      if (papelFinal === 'presidente' || (ehPresidenteReservado(alvo) && alvo.papel === 'presidente')) {
+        return res.status(403).json({
+          erro: 'O papel presidente é exclusivo do usuário presidente e não pode ser atribuído nem alterado por aqui',
+        });
+      }
+    }
 
     let filialFinal = alvo.filial_id;
     if (filial_id !== undefined) {
       filialFinal = filial_id === null || filial_id === '' ? null : Number(filial_id);
     }
-    if (papelFinal === 'admin') {
+    if (papelSemFilial(papelFinal)) {
       filialFinal = null;
     }
     if (papelFinal === 'filial' && !filialFinal) {
@@ -190,9 +211,7 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
 
     const cargoFinal = cargo != null
       ? (String(cargo).trim() || null)
-      : (papel != null
-        ? (papelFinal === 'admin' ? 'admin' : papelFinal === 'gerente' ? 'gerente_filial' : 'funcionario')
-        : alvo.cargo);
+      : (papel != null ? cargoPadrao(papelFinal) : alvo.cargo);
 
     await db.prepare(`
       UPDATE usuarios SET

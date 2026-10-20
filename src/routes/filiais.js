@@ -1207,7 +1207,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     const db = getDb();
     const admin = await db.prepare(`
       SELECT id, senha_hash FROM usuarios
-      WHERE id = ? AND papel = 'admin' AND ativo = 1
+      WHERE id = ? AND papel IN ('admin', 'presidente') AND ativo = 1
     `).get(req.user.id);
     if (!admin || !verificarSenha(senhaAdmin, admin.senha_hash)) {
       return res.status(403).json({ erro: 'Senha de administrador incorreta' });

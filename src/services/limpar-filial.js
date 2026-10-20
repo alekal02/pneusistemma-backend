@@ -322,7 +322,7 @@ export async function excluirFilialCompleta(db, filialId) {
   const antes = await contarFrotaFilial(db, id);
   const usuarios = await nSafe(
     db,
-    `SELECT COUNT(*) as c FROM usuarios WHERE filial_id = ? AND papel <> 'admin'`,
+    `SELECT COUNT(*) as c FROM usuarios WHERE filial_id = ? AND papel NOT IN ('admin', 'presidente')`,
     id
   );
 
@@ -335,7 +335,7 @@ export async function excluirFilialCompleta(db, filialId) {
       DELETE FROM alerta_destinatarios WHERE filial_id = ?
     `, id);
     await delSafe(db, `
-      DELETE FROM usuarios WHERE filial_id = ? AND papel <> 'admin'
+      DELETE FROM usuarios WHERE filial_id = ? AND papel NOT IN ('admin', 'presidente')
     `, id);
     const result = await db.prepare(`DELETE FROM filiais WHERE id = ?`).run(id);
     if (!result.changes) {

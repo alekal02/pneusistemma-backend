@@ -1235,7 +1235,7 @@ router.get('/filial/:id/alerta-opcoes', requireChatbotAcesso, async (req, res) =
         AND whatsapp IS NOT NULL AND TRIM(whatsapp) != ''
         AND (
           filial_id = ?
-          OR papel = 'admin'
+          OR papel IN ('admin', 'presidente')
           OR cargo IN ('gerente_compras', 'gerente_filial')
           OR (papel = 'gerente' AND (filial_id IS NULL OR filial_id = ?))
         )

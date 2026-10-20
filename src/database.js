@@ -26,11 +26,13 @@ CREATE TABLE IF NOT EXISTS filiais (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Bancos já existentes mantêm a constraint antiga até scripts/migrar-papel-presidente.mjs.
+-- Este CREATE não altera a constraint de uma tabela que já existe. O init não promove o login.
 CREATE TABLE IF NOT EXISTS usuarios (
   id BIGSERIAL PRIMARY KEY,
   login TEXT NOT NULL UNIQUE,
   senha_hash TEXT NOT NULL,
-  papel TEXT NOT NULL CHECK (papel IN ('admin', 'gerente', 'filial')),
+  papel TEXT NOT NULL CHECK (papel IN ('admin', 'gerente', 'filial', 'presidente')),
   filial_id BIGINT REFERENCES filiais(id) ON DELETE SET NULL,
   ativo INTEGER DEFAULT 1,
   whatsapp TEXT,

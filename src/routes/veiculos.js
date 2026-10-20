@@ -5,7 +5,7 @@ import { TIPOS_VEICULO } from '../config.js';
 import { camposTipoVeiculo, metaTiposEquipamento } from '../equipamento-tipos.js';
 import { especificacaoMedicao, INSPECOES_DANO } from '../medicao-perfil.js';
 import { limitesDoVeiculo } from '../limites.js';
-import { requireAuth, requireFilial, requireGerenteOuAdmin, filialScopeId, filiaisEscopoIds, assertVeiculoDaFilial } from '../auth.js';
+import { requireAuth, requireFilial, requireGerenteOuAdmin, filialScopeId, filiaisEscopoIds, assertVeiculoDaFilial, temPrivilegioAdmin } from '../auth.js';
 import {
   POSICOES_PNEU,
   LAYOUTS_PNEU,
@@ -287,7 +287,7 @@ router.delete('/:id', async (req, res, next) => {
   try {
     const db = getDb();
     const papel = req.user?.papel;
-    if (papel === 'admin' || papel === 'gerente') {
+    if (temPrivilegioAdmin(req.user) || papel === 'gerente') {
       const veiculo = await db.prepare('SELECT id, filial_id FROM veiculos WHERE id = ?').get(req.params.id);
       if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
       const escopo = filiaisEscopoIds(req);

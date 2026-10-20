@@ -4,6 +4,7 @@ import {
   requireAuth,
   requireAdmin,
   requireGerenteOuAdmin,
+  requirePresidente,
   filiaisEscopoIds,
 } from '../auth.js';
 import { getLimites, limitesDoVeiculo } from '../limites.js';
@@ -353,11 +354,11 @@ router.get('/diagnostico-frota.pdf', requireGerenteOuAdmin, async (req, res, nex
 });
 
 /**
- * Saúde e desgaste — visão do presidente (admin total já existente). Somente leitura.
+ * Saúde e desgaste — somente o perfil presidente. Somente leitura.
  * GET /api/relatorios/saude-desgaste
  * GET /api/relatorios/saude-desgaste.pdf
  */
-router.get('/saude-desgaste', requireAdmin, async (req, res, next) => {
+router.get('/saude-desgaste', requirePresidente, async (req, res, next) => {
   try {
     const filialId = req.query.filial_id != null && req.query.filial_id !== ''
       ? Number(req.query.filial_id)
@@ -368,7 +369,7 @@ router.get('/saude-desgaste', requireAdmin, async (req, res, next) => {
   }
 });
 
-router.get('/saude-desgaste.pdf', requireAdmin, async (req, res, next) => {
+router.get('/saude-desgaste.pdf', requirePresidente, async (req, res, next) => {
   try {
     const filialId = req.query.filial_id != null && req.query.filial_id !== ''
       ? Number(req.query.filial_id)

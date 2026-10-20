@@ -13,7 +13,8 @@
     "smoke:filial": "node scripts/smoke-filial-login.mjs",
     "test:diagnostico": "node scripts/test-diagnostico-fotos.mjs",
     "test:diagnostico-frota": "node scripts/test-diagnostico-frota.mjs",
-    "test:saude": "node scripts/test-saude-desgaste.mjs"
+    "test:saude": "node scripts/test-saude-desgaste.mjs",
+    "test:auth-presidente": "node scripts/test-auth-presidente.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
