@@ -337,7 +337,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       faixas: faixasFilial,
       irregulares: lista.filter((p) => p.desgaste?.padrao === 'irregular').length,
       acima_da_media: lista.filter((p) => p.comparacao?.acima).length,
-      criticos: faixasFilial.critico || 0,
+      criticos: (faixasFilial.critico || 0) + (faixasFilial.critico_equipamento || 0),
       programar_recapagem: faixasFilial.programar_recapagem || 0,
       candidatos_recap: lista.filter((p) => p.elegibilidade?.candidato_programacao).length,
       avaliacao_urgente: lista.filter((p) => p.elegibilidade?.encaminhamento === 'retirada_avaliacao_urgente').length,

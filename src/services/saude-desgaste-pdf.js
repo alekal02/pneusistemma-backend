@@ -68,6 +68,21 @@ export function textoLeituraSulco(unidade) {
     + ` · primeira medição ainda não exigível ${Number(leitura.nao_exigivel) || 0}`;
 }
 
+/**
+ * Mesma conta do parecer: bom, atenção e críticos.
+ * A faixa de programar recapagem já está dentro de atenção.
+ */
+export function textoCondicaoUnidade(unidade) {
+  const fx = unidade?.faixas || {};
+  const programar = Number(fx.programar_recapagem) || 0;
+  const bom = (Number(fx.acompanhamento_normal) || 0) + (Number(fx.acompanhamento_equipamento) || 0);
+  const atencao = (Number(fx.monitoramento_preventivo) || 0)
+    + (Number(fx.monitoramento_equipamento) || 0)
+    + programar;
+  const criticos = (Number(fx.critico) || 0) + (Number(fx.critico_equipamento) || 0);
+  return `bom estado ${bom} · atenção ${atencao} · críticos ${criticos} · faixa de programar recapagem ${programar}`;
+}
+
 export function textoParecer(parecer) {
   if (!parecer) return 'Parecer indisponível neste recorte.';
   const recomendacao = (parecer.recomendacoes || []).join(' · ') || 'Sem recomendação fechada';
@@ -112,7 +127,8 @@ export function gerarPdfSaudeBuffer(relatorio) {
     titulo(doc, 'Consolidado');
     linha(doc, textoConsolidadoFrota(c));
     linha(doc, `Acompanhamento normal: ${n(f.acompanhamento_normal)} · Monitoramento preventivo: ${n(f.monitoramento_preventivo)}`);
-    linha(doc, `Programar recapagem: ${n(f.programar_recapagem)} · Crítico: ${n(f.critico)}`);
+    linha(doc, `Programar recapagem: ${n(f.programar_recapagem)} · Crítico: ${n(f.critico)} · Crítico do equipamento: ${n(f.critico_equipamento)}`);
+    linha(doc, `Acompanhamento do equipamento: ${n(f.acompanhamento_equipamento)} · Monitoramento do equipamento: ${n(f.monitoramento_equipamento)}`);
     linha(doc, `Desgaste uniforme: ${n(c.uniformes)} · Irregular (hipótese, não diagnóstico): ${n(c.irregulares)}`);
     linha(doc, `Candidatos a programar recapagem, ainda sem envio automático: ${n(c.candidatos_recap)}`);
     linha(doc, `Críticos encaminhados só para avaliação urgente: ${n(c.avaliacao_urgente)}`);
@@ -121,13 +137,11 @@ export function gerarPdfSaudeBuffer(relatorio) {
 
     titulo(doc, 'Por unidade');
     for (const u of relatorio.por_unidade || []) {
-      const fx = u.faixas || {};
       const frota = textoVeiculosUnidade(u);
       linha(
         doc,
         `${u.filial}: ${frota}, ${u.pneus_montados} pneu(s) · `
-        + `bom estado ${fx.acompanhamento_normal || 0} · atenção ${fx.monitoramento_preventivo || 0} · `
-        + `recapagem a avaliar ${fx.programar_recapagem || 0} · crítico ${fx.critico || 0} · `
+        + `${textoCondicaoUnidade(u)} · `
         + textoLeituraSulco(u),
       );
     }

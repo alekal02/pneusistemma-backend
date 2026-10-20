@@ -8,6 +8,7 @@ import { separarPorCiclo } from '../src/services/pneu-ciclo.js';
 import {
   gerarPdfSaudeBuffer,
   textoCompraNova,
+  textoCondicaoUnidade,
   textoConsolidadoFrota,
   textoLeituraSulco,
   textoParecer,
@@ -32,6 +33,7 @@ import {
 } from '../src/services/saude-desgaste.js';
 import {
   alertaCompraIncompleta,
+  contagemCondicao,
   contextoEquipamento,
   filialForaDoIndicadorExecutivo,
   montadoIncompleto,
@@ -365,6 +367,23 @@ assert.equal(textoCompraNova({ recomendacao_definitiva: true, montados_sem_medid
 assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Veículos cadastrados: 5/);
 assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Com pneu montado: 2/);
 assert.equal(textoVeiculosUnidade({ veiculos_cadastrados: 5, veiculos: 2 }), '5 cadastrado(s), 2 com pneu montado');
+const faixasMistas = {
+  acompanhamento_normal: 2,
+  acompanhamento_equipamento: 1,
+  monitoramento_preventivo: 1,
+  monitoramento_equipamento: 1,
+  programar_recapagem: 3,
+  critico: 2,
+  critico_equipamento: 1,
+};
+const condicaoMista = contagemCondicao(faixasMistas);
+const textoCondicao = textoCondicaoUnidade({ faixas: faixasMistas });
+assert.match(textoCondicao, new RegExp(`bom estado ${condicaoMista.bom}`));
+assert.match(textoCondicao, new RegExp(`atenção ${condicaoMista.atencao}`));
+assert.match(textoCondicao, new RegExp(`críticos ${condicaoMista.criticos}`));
+assert.match(textoCondicao, /faixa de programar recapagem 3/);
+assert.equal(condicaoMista.atencao, 5);
+assert.equal(condicaoMista.criticos, 3);
 
 const cicloTeste = cicloMensalDe('2026-10-20');
 assert.equal(cicloTeste.inicio, '2026-10-01');
