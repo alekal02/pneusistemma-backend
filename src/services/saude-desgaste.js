@@ -800,7 +800,9 @@ export function montarPrevisaoFilial(pneus) {
     if (pneu.status_pneu === 'recapagem') linha.em_recapagem += 1;
     if (necessidadeCompra(pneu)) linha.necessidade_pneu_novo += 1;
     if (pneu.elegibilidade?.candidato_programacao) linha.candidatos_recap += 1;
-    if (pneu.elegibilidade?.encaminhamento === 'retirada_avaliacao_urgente') linha.avaliacao_urgente += 1;
+    if (pneu.status_pneu === 'montado' && pneu.elegibilidade?.encaminhamento === 'retirada_avaliacao_urgente') {
+      linha.avaliacao_urgente += 1;
+    }
 
     const jaNaFaixa = pneu.faixa === 'critico' || pneu.faixa === 'programar_recapagem' || pneu.faixa === 'critico_equipamento';
     if (jaNaFaixa || pneu.status_pneu !== 'montado') continue;

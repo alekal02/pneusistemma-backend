@@ -277,6 +277,25 @@ assert.equal(previsao[0].necessidade_pneu_novo, 1);
 assert.equal(previsao[0].estoque_novo, 1);
 assert.equal(previsao[0].comprar_novo, 0);
 assert.equal(previsao[0].candidatos_recap, 0);
+const urgenteForaDaFrota = montarPrevisaoFilial([
+  {
+    ...direcional,
+    id: 1,
+    papel: 'tracao',
+    faixa: 'critico',
+    elegibilidade: { candidato_programacao: false, encaminhamento: 'retirada_avaliacao_urgente', bloqueios: [] },
+  },
+  {
+    ...direcional,
+    id: 2,
+    status_pneu: 'estoque',
+    papel: 'tracao',
+    faixa: 'critico',
+    condicao: 'recapado',
+    elegibilidade: { candidato_programacao: false, encaminhamento: 'retirada_avaliacao_urgente', bloqueios: [] },
+  },
+]);
+assert.equal(urgenteForaDaFrota[0].avaliacao_urgente, 1);
 
 assert.equal(normalizarMedida('275/80/22,5'), normalizarMedida('275/80/22.5'));
 const grafia = montarPrevisaoFilial([
