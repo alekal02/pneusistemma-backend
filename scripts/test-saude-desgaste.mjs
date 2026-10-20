@@ -5,7 +5,12 @@
 import assert from 'node:assert/strict';
 import { config } from '../src/config.js';
 import { separarPorCiclo } from '../src/services/pneu-ciclo.js';
-import { gerarPdfSaudeBuffer } from '../src/services/saude-desgaste-pdf.js';
+import {
+  gerarPdfSaudeBuffer,
+  textoCompraNova,
+  textoConsolidadoFrota,
+  textoVeiculosUnidade,
+} from '../src/services/saude-desgaste-pdf.js';
 import {
   aplicarComparacao,
   avaliarElegibilidadeRecap,
@@ -264,7 +269,12 @@ const grafia = montarPrevisaoFilial([
   { ...direcional, id: 9, status_pneu: 'estoque', faixa: 'sem_medicao', papel: null, medida: '275/80/22.5', condicao: 'novo' },
 ]);
 assert.equal(grafia.length, 1);
-assert.equal(grafia[0].medida, '275/80/22.5');
+assert.equal(grafia[0].medida, '275/80r22.5');
+assert.equal(normalizarMedida('275/80/22.5'), normalizarMedida('275/80R22.5'));
+assert.equal(normalizarMedida('12-16-5'), normalizarMedida('12-16.5'));
+assert.notEqual(normalizarMedida('275/80'), normalizarMedida('275/80R22.5'));
+assert.notEqual(normalizarMedida('275/80R22'), normalizarMedida('275/80R22.5'));
+assert.notEqual(normalizarMedida('275/80R22.6'), normalizarMedida('275/80R22.5'));
 assert.equal(grafia[0].necessidade_pneu_novo, 7);
 assert.equal(grafia[0].estoque_novo, 1);
 assert.equal(grafia[0].comprar_novo, 6);
@@ -333,6 +343,12 @@ const pdf = await gerarPdfSaudeBuffer({
   limitacoes: ['Teste local'],
 });
 assert.equal(pdf.subarray(0, 4).toString(), '%PDF');
+assert.equal(textoCompraNova({ recomendacao_definitiva: true, montados_sem_medida: 0, comprar_novo: 2 }), '2');
+assert.equal(textoCompraNova({ recomendacao_definitiva: false, montados_sem_medida: 0, comprar_novo: 2 }), 'não definitiva');
+assert.equal(textoCompraNova({ recomendacao_definitiva: true, montados_sem_medida: 4, comprar_novo: 2 }), 'não definitiva');
+assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Veículos cadastrados: 5/);
+assert.match(textoConsolidadoFrota({ filiais: 1, veiculos_cadastrados: 5, veiculos: 2, pneus_montados: 4 }), /Com pneu montado: 2/);
+assert.equal(textoVeiculosUnidade({ veiculos_cadastrados: 5, veiculos: 2 }), '5 cadastrado(s), 2 com pneu montado');
 
 console.log('test-saude-desgaste: cálculos ok');
 
@@ -345,7 +361,8 @@ function hostLocal(url) {
   }
 }
 
-if (!hostLocal(config.databaseUrl || '')) {
+const urlLeitura = String(process.env.DATABASE_URL || '').trim();
+if (!hostLocal(urlLeitura)) {
   console.log('leitura do banco ignorada: DATABASE_URL não é localhost');
   process.exit(0);
 }

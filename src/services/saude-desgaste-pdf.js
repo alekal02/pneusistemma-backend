@@ -38,6 +38,25 @@ function linha(doc, texto, { bold = false, size = 9 } = {}) {
   doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).fillColor('#111').text(texto);
 }
 
+export function textoConsolidadoFrota(consolidado) {
+  const c = consolidado || {};
+  if (c.veiculos_cadastrados == null) {
+    return `Unidades: ${n(c.filiais)} · Veículos com pneu montado: ${n(c.veiculos)} · Pneus montados: ${n(c.pneus_montados)}`;
+  }
+  return `Unidades: ${n(c.filiais)} · Veículos cadastrados: ${n(c.veiculos_cadastrados)} · Com pneu montado: ${n(c.veiculos)} · Pneus montados: ${n(c.pneus_montados)}`;
+}
+
+export function textoVeiculosUnidade(unidade) {
+  if (unidade?.veiculos_cadastrados == null) return `${unidade?.veiculos} com pneu montado`;
+  return `${unidade.veiculos_cadastrados} cadastrado(s), ${unidade.veiculos} com pneu montado`;
+}
+
+/** Quantidade só quando a recomendação fecha. Cadastro incompleto não vira compra. */
+export function textoCompraNova(item) {
+  if (item?.recomendacao_definitiva === false || Number(item?.montados_sem_medida) > 0) return 'não definitiva';
+  return String(item?.comprar_novo);
+}
+
 export function gerarPdfSaudeBuffer(relatorio) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 42, bufferPages: true });
@@ -62,7 +81,7 @@ export function gerarPdfSaudeBuffer(relatorio) {
     );
 
     titulo(doc, 'Consolidado');
-    linha(doc, `Unidades: ${n(c.filiais)} · Veículos: ${n(c.veiculos)} · Pneus montados: ${n(c.pneus_montados)}`);
+    linha(doc, textoConsolidadoFrota(c));
     linha(doc, `Acompanhamento normal: ${n(f.acompanhamento_normal)} · Monitoramento preventivo: ${n(f.monitoramento_preventivo)}`);
     linha(doc, `Programar recapagem: ${n(f.programar_recapagem)} · Crítico: ${n(f.critico)}`);
     linha(doc, `Desgaste uniforme: ${n(c.uniformes)} · Irregular (hipótese, não diagnóstico): ${n(c.irregulares)}`);
@@ -74,12 +93,13 @@ export function gerarPdfSaudeBuffer(relatorio) {
     titulo(doc, 'Por unidade');
     for (const u of relatorio.por_unidade || []) {
       const fx = u.faixas || {};
+      const frota = textoVeiculosUnidade(u);
       linha(
         doc,
-        `${u.filial}: ${u.veiculos} veículo(s), ${u.pneus_montados} pneu(s) · `
+        `${u.filial}: ${frota}, ${u.pneus_montados} pneu(s) · `
         + `normal ${fx.acompanhamento_normal || 0} · preventivo ${fx.monitoramento_preventivo || 0} · `
         + `programar ${fx.programar_recapagem || 0} · crítico ${fx.critico || 0} · `
-        + `irregular ${u.irregulares || 0} · acima da média ${u.acima_da_media || 0}`,
+        + `incompletos ${u.incompletos || 0} · semana ${u.situacao_semana || 'sem_medicao'}`,
       );
     }
 
@@ -123,9 +143,7 @@ export function gerarPdfSaudeBuffer(relatorio) {
     const compras = relatorio.compras_por_filial || [];
     if (!compras.length) linha(doc, 'Sem movimento de estoque ou demanda no recorte.');
     for (const item of compras) {
-      const compra = item.recomendacao_definitiva === false
-        ? `${item.comprar_novo} (não definitivo)`
-        : String(item.comprar_novo);
+      const compra = textoCompraNova(item);
       linha(
         doc,
         `${item.filial || item.filial_id}: estoque novo ${item.estoque_novo} · estoque recapado ${item.estoque_recapado} · `

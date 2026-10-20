@@ -20,14 +20,14 @@ export const LABELS_PAPEL = {
   presidente: 'Presidente',
 };
 
-/** Admin total e presidente enxergam todas as unidades e não ficam vinculados a uma filial. */
+/** Admin total e presidente não ficam vinculados a uma filial. Isso não concede administração. */
 export function papelSemFilial(papel) {
   return papel === 'admin' || papel === 'presidente';
 }
 
-/** Presidente conserva as permissões do admin total. */
+/** Somente o admin total. O presidente não herda operação administrativa. */
 export function temPrivilegioAdmin(user) {
-  return user?.papel === 'admin' || user?.papel === 'presidente';
+  return user?.papel === 'admin';
 }
 
 export function hashSenha(senha) {
@@ -103,13 +103,19 @@ export async function requireAuth(req, res, next) {
     const user = await carregarUsuario(payload.sub);
     if (!user) return res.status(401).json({ erro: 'Usuário inválido ou inativo' });
     req.user = user;
+    if (user.papel === 'presidente' && req.method !== 'GET' && req.method !== 'HEAD') {
+      return res.status(403).json({
+        erro: 'O painel do presidente é somente consulta. Nenhuma alteração foi gravada.',
+        somente_leitura: true,
+      });
+    }
     next();
   } catch (err) {
     next(err);
   }
 }
 
-/** Admin total e presidente — diretoria / TI */
+/** Admin total — diretoria / TI. O presidente não passa por aqui. */
 export function requireAdmin(req, res, next) {
   if (!temPrivilegioAdmin(req.user)) {
     return res.status(403).json({ erro: 'Acesso restrito ao administrador total' });
@@ -128,7 +134,20 @@ export function requirePresidente(req, res, next) {
   next();
 }
 
-/** Gerente de unidade, admin ou presidente — visão de filiais / compras */
+/**
+ * Classificação de compras. Só o usuário reservado, ativo e sem filial.
+ * Admin não passa por aqui, mesmo com privilégio administrativo.
+ */
+export function requirePresidenteReservado(req, res, next) {
+  const user = req.user;
+  const semFilial = user?.filial_id == null;
+  if (user?.papel !== 'presidente' || !ehPresidenteReservado(user) || !semFilial || Number(user?.ativo) !== 1) {
+    return res.status(403).json({ erro: 'Acesso restrito ao perfil presidente' });
+  }
+  next();
+}
+
+/** Gerente de unidade ou admin. O presidente não herda este acesso. */
 export function requireGerenteOuAdmin(req, res, next) {
   if (!req.user || !(temPrivilegioAdmin(req.user) || req.user.papel === 'gerente')) {
     return res.status(403).json({ erro: 'Acesso restrito a gerentes ou administrador' });
@@ -136,7 +155,7 @@ export function requireGerenteOuAdmin(req, res, next) {
   next();
 }
 
-/** Operador não configura chatbot. Admin e presidente configuram. */
+/** Operador não configura chatbot. Só o admin total configura. */
 export function requireChatbotAcesso(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ erro: 'Não autenticado' });
@@ -171,6 +190,7 @@ export function isGerente(user) {
  * - admin: todas
  * - gerente com filial_id: só a dele
  * - gerente sem filial (ex. compras): todas
+ * - presidente: nenhum escopo operacional; o relatório executivo não usa esta função
  */
 export function filiaisEscopoIds(req) {
   if (temPrivilegioAdmin(req.user)) return null; // todas

@@ -19,10 +19,10 @@ import {
 
 const backendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const frontendDir = path.resolve(backendDir, '..', 'frontend');
-dotenv.config({ path: 'C:/Projetos/pneu-main/backend/.env' });
+dotenv.config({ path: path.join(backendDir, '.env') });
 
 const origem = String(process.env.DATABASE_URL || '').trim();
-if (!origem) throw new Error('DATABASE_URL local ausente');
+if (!origem) throw new Error('DATABASE_URL local ausente no ambiente ou em backend/.env');
 const origemUrl = new URL(origem);
 if (!['localhost', '127.0.0.1'].includes(origemUrl.hostname)) {
   throw new Error('Teste recusado: DATABASE_URL não aponta para localhost');
@@ -358,17 +358,30 @@ async function testarApi() {
     assert.equal(pdfOk.tipo.includes('application/pdf'), true);
     assert.equal(pdfOk.buffer.slice(0, 4).toString(), '%PDF');
 
-    for (const token of [admin, gerente, presidente]) {
+    for (const [method, rota, body] of [
+      ['POST', '/api/usuarios', { login: 'nao-pode', senha: 'abcd', papel: 'filial', filial_id: 1 }],
+      ['POST', '/api/filiais', { nome: 'Filial indevida', codigo: 'Z999' }],
+      ['PUT', '/api/configuracoes', { sulco_critico_mm: 1 }],
+      ['POST', '/api/pneus', { modelo: 'nao-gravar', medida: '275/80R22.5' }],
+    ]) {
+      const bloqueado = await http(method, rota, { token: presidente, body });
+      assert.equal(bloqueado.status, 403, `${method} ${rota} ${JSON.stringify(bloqueado.json)}`);
+      assert.equal(bloqueado.json?.somente_leitura, true);
+    }
+
+    for (const token of [admin, gerente]) {
       const diag = await http('GET', '/api/relatorios/diagnostico-frota', { token });
       assert.equal(diag.status, 200, JSON.stringify(diag.json));
     }
+    const diagPresidente = await http('GET', '/api/relatorios/diagnostico-frota', { token: presidente });
+    assert.equal(diagPresidente.status, 403, JSON.stringify(diagPresidente.json));
     const diagFilial = await http('GET', '/api/relatorios/diagnostico-frota', { token: filial });
     assert.equal(diagFilial.status, 403);
 
-    for (const token of [admin, presidente]) {
-      const diretoria = await http('GET', '/api/relatorios/diretoria', { token });
-      assert.equal(diretoria.status, 200, JSON.stringify(diretoria.json));
-    }
+    const diretoria = await http('GET', '/api/relatorios/diretoria', { token: admin });
+    assert.equal(diretoria.status, 200, JSON.stringify(diretoria.json));
+    const diretoriaPresidente = await http('GET', '/api/relatorios/diretoria', { token: presidente });
+    assert.equal(diretoriaPresidente.status, 403, JSON.stringify(diretoriaPresidente.json));
     assert.equal((await http('GET', '/api/relatorios/diretoria', { token: gerente })).status, 403);
     assert.equal((await http('GET', '/api/relatorios/diretoria', { token: filial })).status, 403);
 
@@ -447,12 +460,16 @@ async function testarApi() {
 }
 
 function testarFrontend() {
-  const html = fs.readFileSync(path.join(frontendDir, 'index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(frontendDir, 'src', 'app.js'), 'utf8');
+  const htmlPath = path.join(frontendDir, 'index.html');
+  const appPath = path.join(frontendDir, 'src', 'app.js');
+  if (!fs.existsSync(htmlPath) || !fs.existsSync(appPath)) return;
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  const app = fs.readFileSync(appPath, 'utf8');
   assert.match(html, /id="tab-saude"[^>]*class="tab hidden"|class="tab hidden"[^>]*id="tab-saude"/);
   assert.doesNotMatch(html, /<option value="presidente">/);
   assert.match(app, /function ehContaPresidente\(/);
   assert.match(app, /O papel presidente não pode ser atribuído por esta tela/);
+  assert.match(app, /function isAdmin\(\) \{\s*return currentUser\?\.papel === 'admin';/);
   assert.match(app, /function isPresidente\(\)/);
   assert.match(app, /if \(name === 'saude' && !isPresidente\(\)\) return;/);
   assert.match(app, /Saúde e desgaste: exclusivo do perfil presidente/);

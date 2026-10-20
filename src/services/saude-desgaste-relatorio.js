@@ -3,6 +3,7 @@
  * Somente leitura.
  */
 import { getLimites, limitesDoVeiculo } from '../limites.js';
+import { medidoNestaSemana, semanaMedicaoBrasil } from '../dia-medicao.js';
 import { especificacaoMedicao, normalizarInspecao } from '../medicao-perfil.js';
 import { papelPosicao } from '../pneus-layouts.js';
 import { resolverTipoEquipamento } from '../equipamento-tipos.js';
@@ -66,6 +67,39 @@ export function alertaCompraIncompleta(montadosSemMedida) {
   };
 }
 
+/**
+ * Cadastro ou medição que impede uma leitura fechada.
+ * Não muda a régua de sulco: só conta o que já foi classificado.
+ */
+export function montadoIncompleto(pneu) {
+  if (pneu?.status_pneu !== 'montado') return false;
+  if (!normalizarMedida(pneu.medida)) return true;
+  if (pneu.faixa === 'sem_medicao' || pneu.faixa === 'sem_regua') return true;
+  if (pneu.ciclo_confiavel === false) return true;
+  return false;
+}
+
+/**
+ * Semana corrente da medição. Ausência de data não vira "atualizada".
+ */
+export function situacaoAtualizacaoSemanal(montados, semana) {
+  const lista = montados || [];
+  const datas = lista.map((pneu) => pneu.data_medicao).filter(Boolean).sort();
+  const ultima = datas.length ? datas[datas.length - 1] : null;
+  const medidosNaSemana = lista.filter((pneu) => medidoNestaSemana(pneu.data_medicao, semana)).length;
+  let situacao = 'sem_medicao';
+  if (!lista.length) situacao = 'sem_pneu';
+  else if (!ultima) situacao = 'sem_medicao';
+  else if (medidosNaSemana === lista.length) situacao = 'atualizada';
+  else if (medidosNaSemana === 0) situacao = 'atrasada';
+  else situacao = 'parcial';
+  return {
+    ultima_medicao: ultima,
+    situacao_semana: situacao,
+    medidos_na_semana: medidosNaSemana,
+  };
+}
+
 /** Tipo real (tipo_codigo) define perfil, recapagem e se o uso é km ou horas. */
 export function contextoEquipamento(pneu) {
   const tipoReal = pneu.tipo_codigo || pneu.tipo;
@@ -86,7 +120,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   const whereFilial = filtroFilial ? ' AND p.filial_id = ?' : '';
   const args = filtroFilial ? [filtroFilial] : [];
 
-  const [filiais, pneusRows, medicoes, movimentacoes] = await Promise.all([
+  const [filiais, pneusRows, medicoes, movimentacoes, descartesRows, movimentosDescarte, veiculosAtivos] = await Promise.all([
     db.prepare(`
       SELECT id, nome, codigo, ativo
       FROM filiais
@@ -128,6 +162,31 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
         AND p.status_pneu IS DISTINCT FROM 'descarte'
         ${whereFilial}
     `).all(...args),
+    db.prepare(`
+      SELECT
+        p.id, p.filial_id, p.numero_fogo, p.medida,
+        p.tratamento_descarte_obs, p.tratamento_descarte_em,
+        f.nome AS filial_nome, f.codigo AS filial_codigo
+      FROM pneus p
+      JOIN filiais f ON f.id = p.filial_id
+      WHERE p.status_pneu = 'descarte'
+        ${whereFilial}
+    `).all(...args),
+    db.prepare(`
+      SELECT mv.pneu_id, mv.data_evento, mv.motivo, mv.detalhes
+      FROM movimentacoes mv
+      JOIN pneus p ON p.id = mv.pneu_id
+      WHERE mv.tipo = 'descarte'
+        ${whereFilial}
+      ORDER BY mv.data_evento DESC, mv.id DESC
+    `).all(...args),
+    db.prepare(`
+      SELECT filial_id, COUNT(*)::int AS n
+      FROM veiculos
+      WHERE ativo = 1
+      ${filtroFilial ? 'AND filial_id = ?' : ''}
+      GROUP BY filial_id
+    `).all(...(filtroFilial ? [filtroFilial] : [])),
   ]);
 
   const excluidas = filiais.filter(filialForaDoIndicadorExecutivo);
@@ -200,14 +259,18 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   const faixas = resumirFaixas(analisados);
   const compras = montarPrevisaoFilial(analisados);
 
+  const semana = semanaMedicaoBrasil();
+  const cadastradosPorFilial = new Map(veiculosAtivos.map((row) => [row.filial_id, Number(row.n) || 0]));
   const porFilial = filiaisExec.map((f) => {
     const lista = montados.filter((p) => p.filial_id === f.id);
     const faixasFilial = resumirFaixas(lista);
+    const semanaFilial = situacaoAtualizacaoSemanal(lista, semana);
     return {
       filial_id: f.id,
       filial: f.nome,
       codigo: f.codigo,
       ativo: !!f.ativo,
+      veiculos_cadastrados: cadastradosPorFilial.get(f.id) || 0,
       veiculos: new Set(lista.map((p) => p.veiculo_id).filter(Boolean)).size,
       pneus_montados: lista.length,
       faixas: faixasFilial,
@@ -217,6 +280,8 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
       programar_recapagem: faixasFilial.programar_recapagem || 0,
       candidatos_recap: lista.filter((p) => p.elegibilidade?.candidato_programacao).length,
       avaliacao_urgente: lista.filter((p) => p.elegibilidade?.encaminhamento === 'retirada_avaliacao_urgente').length,
+      incompletos: lista.filter((pneu) => montadoIncompleto(pneu)).length,
+      ...semanaFilial,
     };
   });
 
@@ -265,6 +330,36 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
   const montadosSemMedida = [...semMedidaPorFilial.values()].reduce((s, n) => s + n, 0);
   const comprasAlerta = alertaCompraIncompleta(montadosSemMedida);
 
+  const idsExec = new Set(filiaisExec.map((f) => f.id));
+  const movimentoPorPneu = new Map();
+  for (const movimento of movimentosDescarte) {
+    if (movimentoPorPneu.has(movimento.pneu_id)) continue;
+    movimentoPorPneu.set(movimento.pneu_id, movimento);
+  }
+  const descartesPorFilial = new Map();
+  for (const row of descartesRows) {
+    if (!idsExec.has(row.filial_id)) continue;
+    if (!descartesPorFilial.has(row.filial_id)) {
+      descartesPorFilial.set(row.filial_id, []);
+    }
+    const movimento = movimentoPorPneu.get(row.id);
+    descartesPorFilial.get(row.filial_id).push({
+      numero_fogo: row.numero_fogo || null,
+      medida: row.medida || null,
+      data: movimento?.data_evento || row.tratamento_descarte_em || null,
+      motivo: movimento?.motivo || row.tratamento_descarte_obs || null,
+    });
+  }
+  const descartes = [...descartesPorFilial.entries()].map(([filialId, itens]) => {
+    const ordenados = [...itens].sort((a, b) => String(b.data || '').localeCompare(String(a.data || '')));
+    return {
+      filial_id: filialId,
+      quantidade: ordenados.length,
+      itens: ordenados.slice(0, 12),
+    };
+  });
+  const descartesTotal = descartes.reduce((soma, item) => soma + item.quantidade, 0);
+
   const comprasPorFilial = new Map();
   for (const linha of compras) {
     if (!comprasPorFilial.has(linha.filial_id)) {
@@ -306,6 +401,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
     perfil: 'presidente',
     gerado_em: new Date().toISOString(),
     somente_leitura: true,
+    semana,
     regras: {
       acima_de_8: 'Acompanhamento normal',
       acima_de_5_ate_8: 'Monitoramento preventivo',
@@ -315,6 +411,7 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
     },
     consolidado: {
       filiais: filiaisExec.length,
+      veiculos_cadastrados: filiaisExec.reduce((soma, filial) => soma + (cadastradosPorFilial.get(filial.id) || 0), 0),
       veiculos: porVeiculo.length,
       pneus_montados: montados.length,
       faixas,
@@ -340,8 +437,10 @@ export async function carregarRelatorioSaude(db, { filialId = null } = {}) {
     compras_por_filial: [...comprasPorFilial.values()],
     compras_por_medida: compras,
     pneus: analisados,
+    descartes,
     limitacoes: [
       ...LIMITACOES_FIXAS,
+      `${descartesTotal} pneu(s) em descarte ficam fora da régua de sulco e aparecem só na lista de descartes.`,
       `${semProjecao} pneu(s) de caminhão sem projeção de 5 mm e 3 mm por histórico insuficiente ou pouco confiável.`,
       `${cicloAberto} pneu(s) montado(s) com ciclo de recapagem não separado. O consumo desses pneus não foi calculado.`,
       `${semMedida} pneu(s) sem medida informada. Eles não geram saldo de compra.`,
