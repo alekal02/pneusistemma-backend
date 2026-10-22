@@ -414,3 +414,130 @@ export async function excluirVeiculoCompleto(db, filialId, veiculoId) {
     pneus_desvinculados: nPneus,
   };
 }
+
+const STATUS_PNEU_EXCLUIVEL = new Set(['estoque', 'descarte']);
+const NOME_SQL = /^[a-z_][a-z0-9_]*$/;
+/** Filhos cujo histórico pertence ao registro apagado. O restante anulável só perde o vínculo. */
+const FILHOS_APAGADOS = {
+  pneus: new Set(['medicoes', 'movimentacoes', 'tokens_acesso_rapido']),
+  medicoes: new Set(['notificacoes_whatsapp']),
+};
+
+function erroExclusao(mensagem, status = 409) {
+  const err = new Error(mensagem);
+  err.status = status;
+  return err;
+}
+
+function nomeSql(valor, rotulo) {
+  const nome = String(valor || '');
+  if (!NOME_SQL.test(nome)) {
+    throw erroExclusao(`Nome de ${rotulo} inesperado no catálogo do banco. Exclusão interrompida.`);
+  }
+  return nome;
+}
+
+async function fksPara(db, tabela) {
+  return db.prepare(`
+    SELECT t.relname AS tabela,
+           a.attname AS coluna,
+           c.confdeltype::text AS ao_apagar,
+           (NOT a.attnotnull) AS anulavel,
+           cardinality(c.conkey) AS ncolunas
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace nt ON nt.oid = t.relnamespace
+    JOIN pg_class f ON f.oid = c.confrelid
+    JOIN pg_namespace nf ON nf.oid = f.relnamespace
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = c.conkey[1]
+    WHERE c.contype = 'f'
+      AND nf.nspname = 'public'
+      AND nt.nspname = 'public'
+      AND f.relname = ?
+  `).all(tabela);
+}
+
+/**
+ * Monta a ordem de limpeza a partir do catálogo do Postgres.
+ * Tabela desconhecida que impeça o DELETE interrompe antes de apagar o pneu.
+ */
+async function planoLimpeza(db, tabelaPai, wherePai, caminho) {
+  if (caminho.includes(tabelaPai)) return [];
+  const fks = await fksPara(db, tabelaPai);
+  const passos = [];
+  for (const fk of fks) {
+    const tabela = nomeSql(fk.tabela, 'tabela');
+    const coluna = nomeSql(fk.coluna, 'coluna');
+    if (Number(fk.ncolunas) !== 1) {
+      throw erroExclusao(
+        `A tabela ${tabela} referencia ${tabelaPai} com mais de uma coluna. Exclusão interrompida para proteger o banco.`
+      );
+    }
+    const whereFilho = `${coluna} IN (SELECT id FROM ${nomeSql(tabelaPai, 'tabela')} WHERE ${wherePai})`;
+    const apagar = FILHOS_APAGADOS[tabelaPai]?.has(tabela) || fk.ao_apagar === 'c';
+    if (apagar) {
+      passos.push(...await planoLimpeza(db, tabela, whereFilho, [...caminho, tabelaPai]));
+      passos.push(`DELETE FROM ${tabela} WHERE ${whereFilho}`);
+      continue;
+    }
+    if (fk.anulavel || fk.ao_apagar === 'n') {
+      passos.push(`UPDATE ${tabela} SET ${coluna} = NULL WHERE ${whereFilho}`);
+      continue;
+    }
+    throw erroExclusao(
+      `A tabela ${tabela}.${coluna} impede excluir ${tabelaPai}. Nada foi apagado.`
+    );
+  }
+  return passos;
+}
+
+/** Admin: apaga pneu somente se estiver em estoque ou descarte, sem veículo. */
+export async function excluirPneuEstoqueOuDescarte(db, filialId, pneuId) {
+  const fid = Number(filialId);
+  const pid = Number(pneuId);
+  if (!fid || !pid) {
+    const err = new Error('Filial e pneu são obrigatórios');
+    err.status = 400;
+    throw err;
+  }
+
+  const pneu = await db.prepare(`
+    SELECT id, numero_fogo, status_pneu, filial_id, veiculo_id
+    FROM pneus
+    WHERE id = ? AND filial_id = ?
+  `).get(pid, fid);
+  if (!pneu) {
+    const err = new Error('Pneu não encontrado nesta unidade');
+    err.status = 404;
+    throw err;
+  }
+  if (pneu.veiculo_id || !STATUS_PNEU_EXCLUIVEL.has(pneu.status_pneu)) {
+    const err = new Error('Só é possível excluir pneu em estoque ou descarte');
+    err.status = 409;
+    throw err;
+  }
+
+  await db.transaction(async () => {
+    const passos = await planoLimpeza(db, 'pneus', 'id = ?', []);
+    for (const sql of passos) {
+      await db.prepare(sql).run(pid);
+    }
+    await delSafe(db, `DELETE FROM tokens_acesso_rapido WHERE pneu_id = ?`, pid);
+    const result = await db.prepare(`
+      DELETE FROM pneus
+      WHERE id = ? AND filial_id = ?
+        AND veiculo_id IS NULL
+        AND status_pneu IN ('estoque', 'descarte')
+    `).run(pid, fid);
+    if (!result.changes) {
+      const err = new Error('Não foi possível excluir o pneu');
+      err.status = 409;
+      throw err;
+    }
+  });
+
+  return {
+    numero_fogo: pneu.numero_fogo,
+    status_pneu: pneu.status_pneu,
+  };
+}

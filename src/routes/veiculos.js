@@ -282,12 +282,12 @@ router.put('/:id/layout', requireGerenteOuAdmin, async (req, res, next) => {
   }
 });
 
-/** Gerente/admin: exclui caminhão + pneus. Filial: só desativa. */
+/** Admin: exclui caminhão (pneus montados voltam ao estoque). Filial: só desativa. */
 router.delete('/:id', async (req, res, next) => {
   try {
     const db = getDb();
     const papel = req.user?.papel;
-    if (temPrivilegioAdmin(req.user) || papel === 'gerente') {
+    if (temPrivilegioAdmin(req.user)) {
       const veiculo = await db.prepare('SELECT id, filial_id FROM veiculos WHERE id = ?').get(req.params.id);
       if (!veiculo) return res.status(404).json({ erro: 'Veículo não encontrado' });
       const escopo = filiaisEscopoIds(req);
@@ -295,13 +295,16 @@ router.delete('/:id', async (req, res, next) => {
         return res.status(403).json({ erro: 'Veículo fora do seu escopo' });
       }
       const result = await excluirVeiculoCompleto(db, veiculo.filial_id, veiculo.id);
-      const n = result.pneus_apagados || 0;
+      const n = result.pneus_desvinculados || 0;
       return res.json({
         mensagem: n
-          ? `Caminhão ${result.placa} excluído com ${n} pneu(s)`
+          ? `Caminhão ${result.placa} excluído. ${n} pneu(s) foram desvinculados (os que estavam montados voltaram ao estoque).`
           : `Caminhão ${result.placa} excluído`,
         ...result,
       });
+    }
+    if (papel === 'gerente') {
+      return res.status(403).json({ erro: 'Só o administrador pode excluir veículo' });
     }
     if (papel === 'filial') {
       const filialId = filialScopeId(req);

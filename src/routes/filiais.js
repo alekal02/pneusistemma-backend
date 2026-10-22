@@ -10,7 +10,7 @@ import {
   filiaisEscopoIds,
   isAdmin,
 } from '../auth.js';
-import { excluirFilialCompleta, excluirVeiculoCompleto } from '../services/limpar-filial.js';
+import { excluirFilialCompleta, excluirPneuEstoqueOuDescarte, excluirVeiculoCompleto } from '../services/limpar-filial.js';
 import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO, SQL_LOGS_MEDICAO_FILIAL } from '../sql-ultima-medicao.js';
 import { filtroCadastroCompleto } from '../schema-colunas.js';
@@ -36,6 +36,7 @@ import {
   POSICOES_PNEU,
   layoutNaEdicao,
   labelTipoPneu,
+  labelTratamentoDescarte,
 } from '../pneus-layouts.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
 import { consultarDiagnosticoExecutivo } from '../services/diagnostico-executivo.js';
@@ -786,19 +787,85 @@ router.put('/:id/veiculos/:veiculoId', async (req, res, next) => {
   }
 });
 
-/** Admin/gerente: exclui o caminhão e os pneus ainda montados nele */
+/** Admin: exclui o caminhão. Pneus montados voltam ao estoque. */
 router.delete('/:id/veiculos/:veiculoId', async (req, res, next) => {
+  if (req.user?.papel !== 'admin') {
+    return res.status(403).json({ erro: 'Só o administrador pode excluir veículo' });
+  }
   if (!assertFilialNoEscopo(req, req.params.id)) {
     return res.status(403).json({ erro: 'Filial fora do seu escopo' });
   }
   try {
     const db = getDb();
     const result = await excluirVeiculoCompleto(db, req.params.id, req.params.veiculoId);
-    const n = result.pneus_apagados || 0;
+    const n = result.pneus_desvinculados || 0;
     res.json({
       mensagem: n
-        ? `Caminhão ${result.placa} excluído com ${n} pneu(s)`
+        ? `Caminhão ${result.placa} excluído. ${n} pneu(s) foram desvinculados (os que estavam montados voltaram ao estoque).`
         : `Caminhão ${result.placa} excluído`,
+      ...result,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ erro: err.message });
+    next(err);
+  }
+});
+
+/** Admin: pneus em estoque ou descarte desta unidade, para exclusão. */
+router.get('/:id/pneus-livres', async (req, res, next) => {
+  if (req.user?.papel !== 'admin') {
+    return res.status(403).json({ erro: 'Só o administrador pode excluir pneu' });
+  }
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  const status = String(req.query.status || 'todos').toLowerCase();
+  if (!['todos', 'estoque', 'descarte'].includes(status)) {
+    return res.status(400).json({ erro: 'Status inválido' });
+  }
+  try {
+    const db = getDb();
+    const filtroStatus = status === 'todos'
+      ? `AND p.status_pneu IN ('estoque', 'descarte')`
+      : 'AND p.status_pneu = ?';
+    const params = status === 'todos' ? [req.params.id] : [req.params.id, status];
+    const rows = await db.prepare(`
+      SELECT
+        p.id, p.numero_fogo, p.marca, p.modelo, p.medida, p.dot,
+        p.tipo_pneu, p.condicao, p.vida_recap, p.status_pneu,
+        p.sulco_inicial_mm, p.tratamento_descarte
+      FROM pneus p
+      WHERE p.filial_id = ?
+        AND p.veiculo_id IS NULL
+        ${filtroStatus}
+      ORDER BY p.status_pneu, p.numero_fogo, p.id
+    `).all(...params);
+    res.json(rows.map((p) => ({
+      ...p,
+      padrao_label: labelTipoPneu(p.tipo_pneu),
+      tratamento_descarte_label: p.status_pneu === 'descarte'
+        ? labelTratamentoDescarte(p.tratamento_descarte)
+        : null,
+    })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Admin: exclui pneu somente em estoque ou descarte. */
+router.delete('/:id/pneus/:pneuId', async (req, res, next) => {
+  if (req.user?.papel !== 'admin') {
+    return res.status(403).json({ erro: 'Só o administrador pode excluir pneu' });
+  }
+  if (!assertFilialNoEscopo(req, req.params.id)) {
+    return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+  }
+  try {
+    const db = getDb();
+    const result = await excluirPneuEstoqueOuDescarte(db, req.params.id, req.params.pneuId);
+    const fogo = result.numero_fogo ? ` fogo ${result.numero_fogo}` : '';
+    res.json({
+      mensagem: `Pneu${fogo} excluído do ${result.status_pneu}`,
       ...result,
     });
   } catch (err) {
