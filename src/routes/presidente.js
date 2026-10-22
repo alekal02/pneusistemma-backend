@@ -94,8 +94,16 @@ router.get('/diagnostico-filiais', async (req, res, next) => {
 router.get('/visao.pdf', async (req, res, next) => {
   try {
     const filtros = lerFiltrosQuery(req.query);
-    const pacote = await obterSnapshotCompleto(getDb(), filtros);
-    const buffer = await gerarPdfExecutivoBuffer(pacote);
+    const db = getDb();
+    const [pacote, diagnostico] = await Promise.all([
+      obterSnapshotCompleto(db, filtros),
+      consultarDiagnosticoExecutivo(db, {
+        tipo: filtros.tipo || null,
+        incluirMatriz: filtros.incluirMatriz,
+        filialId: filtros.filialId,
+      }),
+    ]);
+    const buffer = await gerarPdfExecutivoBuffer({ ...pacote, diagnostico });
     const filename = nomeArquivoExecutivo(pacote.snapshot?.gerado_em);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

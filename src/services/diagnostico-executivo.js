@@ -1,18 +1,26 @@
 /**
  * Diagnóstico executivo das filiais. Somente leitura.
- * A classe de cada pneu vem de avaliarPneuPainel / bucketKpi.
- * Os cortes de 2 veículos, 20% e 50% são provisórios.
+ * A classe de cada pneu vem de avaliarPneuPainel / bucketKpi e dos limites oficiais.
+ * A situação da filial usa a fatia dos pneus montados. Pneu sem medição não entra como boa condição.
+ * Alta necessidade: 20% ou mais em substituição prioritária e pelo menos 2 pneus.
+ * Acompanhamento da unidade: 20% ou mais na faixa oficial de atenção, ou 10% ou mais em substituição.
+ * Abaixo disso a unidade permanece em boa condição e os pneus de substituição ficam listados à parte.
+ * Sensibilidade na frota real: 20% e 25% de substituição marcam as mesmas duas unidades;
+ * 30% deixaria de fora uma unidade com 27,8%. O exemplo 3/120 (2,5%) com 47,5% em acompanhamento
+ * fica em acompanhamento pela faixa de atenção, não por alta necessidade.
  */
 import { bucketKpi, avaliarPneuPainel, veiculoCombinaTipo } from './indicadores-frota.js';
 import { especificacaoMedicao } from '../medicao-perfil.js';
 import { posicoesDoLayout, situacaoMedicao } from './diagnostico-frota.js';
-import { labelPosicao } from '../pneus-layouts.js';
+import { labelPosicao, papelPosicao } from '../pneus-layouts.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import { limitesDoVeiculo } from '../limites.js';
 
 export const CORTES_EXECUTIVOS = {
-  min_veiculos_criticos: 2,
+  min_pneus_criticos: 2,
   pct_criticos: 20,
+  pct_prioridade_acompanhamento: 10,
+  pct_atencao: 20,
   pct_sem_dados_nao_avaliada: 50,
   pct_sem_dados_atencao: 20,
   pct_vencida_atencao: 50,
@@ -27,24 +35,122 @@ export function ehMatriz(codigo) {
 }
 
 export function labelSituacaoExecutiva(situacao) {
-  if (situacao === 'controlada') return 'Controlada';
-  if (situacao === 'atencao') return 'Atenção';
-  if (situacao === 'critica') return 'Crítica';
-  if (situacao === 'nao_avaliada') return 'Não avaliada';
+  if (situacao === 'controlada') return 'Boa condição';
+  if (situacao === 'atencao') return 'Requer acompanhamento';
+  if (situacao === 'critica') return 'Alta necessidade de intervenção';
+  if (situacao === 'nao_avaliada') return 'Dados insuficientes';
   return situacao || '—';
 }
 
 export function labelClasseVeiculo(classe) {
-  if (classe === 'critico') return 'Com pneus críticos';
-  if (classe === 'monitoramento') return 'Com pneus em monitoramento';
-  if (classe === 'sem_dados') return 'Sem dados suficientes';
-  if (classe === 'sem_risco') return 'Sem risco crítico identificado';
+  if (classe === 'critico') return 'Com substituição prioritária';
+  if (classe === 'monitoramento') return 'Com pneus em acompanhamento';
+  if (classe === 'sem_dados') return 'Dados insuficientes';
+  if (classe === 'sem_risco') return 'Sem substituição prioritária';
   return classe || '—';
 }
 
 function percentual(parte, total) {
   if (!total) return null;
   return Math.round((1000 * parte) / total) / 10;
+}
+
+/**
+ * Condição consolidada da unidade, separada da lista de pneus que pedem ação.
+ * Os mm continuam os limites oficiais. Não há índice único de saúde.
+ */
+export function decidirSituacaoExecutiva({
+  veiculos = 0,
+  diagnosticados = 0,
+  veiculosSemDados = 0,
+  pneusMontados = 0,
+  pneusOk = 0,
+  pneusCriticos = 0,
+  pneusMonitorar = 0,
+  pneusSemDados = 0,
+  vencidosDiagnosticados = 0,
+} = {}) {
+  const semDadosVeiculosPct = percentual(veiculosSemDados, veiculos);
+  const pctCritico = percentual(pneusCriticos, pneusMontados);
+  const pctAtencao = percentual(pneusMonitorar, pneusMontados);
+  const pctSemAlerta = percentual(pneusOk, pneusMontados);
+  const pctSemDados = percentual(pneusSemDados, pneusMontados);
+  const vencidaPct = percentual(vencidosDiagnosticados, diagnosticados);
+  const base = {
+    sem_frota: veiculos === 0,
+    pct_critico: pctCritico,
+    pct_atencao: pctAtencao,
+    pct_sem_alerta: pctSemAlerta,
+    pct_sem_dados: pctSemDados,
+  };
+
+  if (veiculos === 0) {
+    return { ...base, situacao: 'nao_avaliada', motivo: 'Dados insuficientes. Sem frota cadastrada.' };
+  }
+  if (pneusMontados === 0 || diagnosticados === 0) {
+    return {
+      ...base,
+      situacao: 'nao_avaliada',
+      motivo: pneusMontados === 0
+        ? 'Dados insuficientes. Há veículos ativos, mas nenhum pneu montado.'
+        : 'Dados insuficientes. Nenhum veículo ativo tem condição física comprovada pelo motor oficial.',
+    };
+  }
+  if (
+    pneusCriticos === 0
+    && pneusMonitorar === 0
+    && semDadosVeiculosPct >= CORTES_EXECUTIVOS.pct_sem_dados_nao_avaliada
+  ) {
+    return {
+      ...base,
+      situacao: 'nao_avaliada',
+      motivo: 'Dados insuficientes. Metade ou mais da frota está sem medição classificável e não há substituição nem acompanhamento comprovado.',
+    };
+  }
+  const prioridadeRelevante = pctCritico >= CORTES_EXECUTIVOS.pct_prioridade_acompanhamento;
+  if (
+    pneusCriticos >= CORTES_EXECUTIVOS.min_pneus_criticos
+    && pctCritico >= CORTES_EXECUTIVOS.pct_criticos
+  ) {
+    return {
+      ...base,
+      situacao: 'critica',
+      motivo: `Alta necessidade de intervenção: ${pneusCriticos} pneus (${pctCritico}%) na faixa oficial de substituição, entre ${pneusMontados} montados.`,
+    };
+  }
+  if (
+    prioridadeRelevante
+    || pctAtencao >= CORTES_EXECUTIVOS.pct_atencao
+    || semDadosVeiculosPct >= CORTES_EXECUTIVOS.pct_sem_dados_atencao
+    || pctSemDados >= CORTES_EXECUTIVOS.pct_sem_dados_atencao
+    || vencidaPct >= CORTES_EXECUTIVOS.pct_vencida_atencao
+  ) {
+    const partes = [];
+    if (pctAtencao >= CORTES_EXECUTIVOS.pct_atencao) {
+      partes.push(`${pneusMonitorar} pneus (${pctAtencao}%) na faixa oficial de acompanhamento`);
+    }
+    if (pctSemDados >= CORTES_EXECUTIVOS.pct_sem_dados_atencao) {
+      partes.push(`${pneusSemDados} pneus (${pctSemDados}%) sem medição, fora da boa condição`);
+    } else if (semDadosVeiculosPct >= CORTES_EXECUTIVOS.pct_sem_dados_atencao) {
+      partes.push(`${semDadosVeiculosPct}% dos veículos sem medição classificável`);
+    }
+    if (vencidaPct >= CORTES_EXECUTIVOS.pct_vencida_atencao) {
+      partes.push('metade ou mais dos veículos com condição comprovada está com medição vencida');
+    }
+    if (pneusCriticos > 0) {
+      partes.push(`${pneusCriticos} pneus (${pctCritico}%) com substituição prioritária, listados à parte`);
+    }
+    const motivo = `Requer acompanhamento: ${partes.join('; ')}. A unidade não está em alta necessidade de intervenção.`;
+    return { ...base, situacao: 'atencao', motivo };
+  }
+  const aParte = pneusCriticos > 0
+    ? ` ${pneusCriticos} pneu(s) (${pctCritico}%) com substituição prioritária ficam listados à parte e não mudam a condição da unidade.`
+    : '';
+  return {
+    ...base,
+    situacao: 'controlada',
+    motivo: `Boa condição: ${pctSemAlerta}% dos ${pneusMontados} pneus montados estão acima da faixa oficial de acompanhamento.${aParte}`,
+  };
 }
 
 function sulcoInformado(valor) {
@@ -95,6 +201,7 @@ export function classificarVeiculoExecutivo(veiculo, pneusMontados, { diaFilial 
   let integral = layout.disponivel && obrigatorias.length > 0 && vazias.length === 0;
   let medicaoVencida = false;
   let sulcoIncompleto = false;
+  const contagem = { montados: montados.length, ok: 0, monitorar: 0, critico: 0, sem_dado: 0, risco_imediato: 0 };
   const pneus = [];
 
   for (const pneu of montados) {
@@ -112,6 +219,10 @@ export function classificarVeiculoExecutivo(veiculo, pneusMontados, { diaFilial 
     });
     const obrigatorio = obrigatorias.includes(pneu.posicao);
     const classificavel = kpiClassificavel(kpi);
+    if (contagem[kpi] != null) contagem[kpi] += 1;
+    else contagem.sem_dado += 1;
+    const riscoImediato = kpi === 'critico' && papelPosicao(pneu.posicao) === 'direcional';
+    if (riscoImediato) contagem.risco_imediato += 1;
     if (kpi === 'critico') temCritico = true;
     if (kpi === 'monitorar') temMonitor = true;
     if (obrigatorio && !classificavel) {
@@ -141,6 +252,7 @@ export function classificarVeiculoExecutivo(veiculo, pneusMontados, { diaFilial 
         menor_sulco: aval.menor_sulco ?? null,
         data_medicao: dataIso(pneu.data_medicao),
         kpi,
+        risco_imediato: riscoImediato,
         sulco_incompleto: classificavel && !completa,
         medicao_vencida: situacao.situacao === 'atrasada',
         situacao_medicao: situacao.situacao,
@@ -175,6 +287,8 @@ export function classificarVeiculoExecutivo(veiculo, pneusMontados, { diaFilial 
     avaliado_integral: integral,
     medicao_vencida: medicaoVencida,
     sulco_incompleto: sulcoIncompleto,
+    risco_imediato: contagem.risco_imediato > 0,
+    contagem_pneus: contagem,
     posicoes_vazias: vazias.map((codigo) => ({ codigo, label: labelPosicao(codigo) })),
     pneus,
   };
@@ -191,45 +305,33 @@ export function classificarFilialExecutiva(veiculos) {
   const integrais = lista.filter((v) => v.avaliado_integral).length;
   const vencidos = lista.filter((v) => v.medicao_vencida).length;
   const vencidosDiagnosticados = lista.filter((v) => v.classe !== 'sem_dados' && v.medicao_vencida).length;
+  const somar = (campo) => lista.reduce((soma, veiculo) => soma + (Number(veiculo.contagem_pneus?.[campo]) || 0), 0);
+  const pneusMontados = somar('montados');
+  const pneusOk = somar('ok');
+  const pneusMonitorar = somar('monitorar');
+  const pneusCriticos = somar('critico');
+  const pneusSemDados = somar('sem_dado');
+  const riscosImediatos = somar('risco_imediato');
   const base = percentual(C, diagnosticados);
-  const semDadosPct = percentual(D, N);
-  const vencidaPct = percentual(vencidosDiagnosticados, diagnosticados);
   const avaliadaPct = percentual(integrais, N);
-
-  let situacao;
-  let motivo;
-  if (N === 0 || diagnosticados === 0) {
-    situacao = 'nao_avaliada';
-    motivo = N === 0
-      ? 'Sem veículo ativo.'
-      : 'Nenhum veículo ativo tem condição física comprovada pelo motor oficial.';
-  } else if (C === 0 && M === 0 && semDadosPct >= CORTES_EXECUTIVOS.pct_sem_dados_nao_avaliada) {
-    situacao = 'nao_avaliada';
-    motivo = 'Metade ou mais da frota sem dados suficientes e nenhum risco comprovado.';
-  } else if (C >= CORTES_EXECUTIVOS.min_veiculos_criticos && base >= CORTES_EXECUTIVOS.pct_criticos) {
-    situacao = 'critica';
-    motivo = `${C} veículos com pneu crítico, ${base}% dos veículos com condição comprovada.`;
-  } else if (
-    C >= 1
-    || M >= 1
-    || semDadosPct >= CORTES_EXECUTIVOS.pct_sem_dados_atencao
-    || vencidaPct >= CORTES_EXECUTIVOS.pct_vencida_atencao
-  ) {
-    situacao = 'atencao';
-    if (C === 1) {
-      motivo = 'Um veículo com pneu crítico. O risco individual permanece visível.';
-    } else if (C > 1) {
-      motivo = `${C} veículos críticos, ${base}% dos veículos com condição comprovada, abaixo de 20%.`;
-    } else if (M >= 1) {
-      motivo = `${M} veículo(s) em monitoramento, sem pneu crítico comprovado.`;
-    } else if (vencidaPct >= CORTES_EXECUTIVOS.pct_vencida_atencao) {
-      motivo = 'Sem risco físico comprovado, mas metade ou mais dos veículos com condição comprovada está com medição vencida.';
-    } else {
-      motivo = 'Sem risco físico comprovado, mas 20% ou mais da frota está sem dados suficientes.';
-    }
-  } else {
-    situacao = 'controlada';
-    motivo = 'Nenhum pneu crítico ou em monitoramento, e a maior parte da frota tem medição classificável nas posições obrigatórias.';
+  const decisao = decidirSituacaoExecutiva({
+    veiculos: N,
+    diagnosticados,
+    veiculosSemDados: D,
+    pneusMontados,
+    pneusOk,
+    pneusCriticos,
+    pneusMonitorar,
+    pneusSemDados,
+    vencidosDiagnosticados,
+  });
+  let { situacao, motivo } = decisao;
+  const frotaAfetada = percentual(C, N);
+  if (situacao !== 'critica' && pneusCriticos > 0 && frotaAfetada != null && frotaAfetada >= 30) {
+    motivo = `${motivo} A substituição está em ${frotaAfetada}% dos veículos.`;
+  }
+  if (riscosImediatos > 0) {
+    motivo = `${motivo} ${riscosImediatos} em posição direcional, com intervenção imediata destacada.`;
   }
 
   const justificativa = lista
@@ -242,14 +344,26 @@ export function classificarFilialExecutiva(veiculos) {
     situacao,
     situacao_label: labelSituacaoExecutiva(situacao),
     motivo,
+    sem_frota: decisao.sem_frota,
     veiculos_ativos: N,
     sem_risco_critico: R,
     com_monitoramento: M,
     com_criticos: C,
     sem_dados: D,
     frota_avaliada_pct: avaliadaPct,
+    frota_afetada_pct: percentual(C, N),
     veiculos_medicao_vencida: vencidos,
     criticos_sobre_diagnosticados_pct: base,
+    pneus_montados: pneusMontados,
+    pneus_sem_alerta: pneusOk,
+    pneus_atencao: pneusMonitorar,
+    pneus_criticos: pneusCriticos,
+    pneus_sem_dados: pneusSemDados,
+    pct_sem_alerta: decisao.pct_sem_alerta,
+    pct_atencao: decisao.pct_atencao,
+    pct_critico: decisao.pct_critico,
+    pct_sem_dados: decisao.pct_sem_dados,
+    riscos_imediatos: riscosImediatos,
     justificativa,
   };
 }

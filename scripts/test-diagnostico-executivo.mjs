@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   CORTES_EXECUTIVOS,
+  classificarFilialExecutiva,
   classificarVeiculoExecutivo,
   ehMatriz,
   montarDiagnosticoExecutivo,
@@ -13,8 +14,10 @@ import {
 const AGORA = new Date('2026-10-22T12:00:00-03:00');
 const POS_TOCO = ['1E', '1D', '2EE', '2EI', '2DI', '2DE'];
 
-assert.equal(CORTES_EXECUTIVOS.min_veiculos_criticos, 2);
+assert.equal(CORTES_EXECUTIVOS.min_pneus_criticos, 2);
 assert.equal(CORTES_EXECUTIVOS.pct_criticos, 20);
+assert.equal(CORTES_EXECUTIVOS.pct_atencao, 20);
+assert.equal(CORTES_EXECUTIVOS.pct_prioridade_acompanhamento, 10);
 assert.equal(CORTES_EXECUTIVOS.pct_sem_dados_nao_avaliada, 50);
 assert.equal(CORTES_EXECUTIVOS.pct_sem_dados_atencao, 20);
 assert.equal(CORTES_EXECUTIVOS.pct_vencida_atencao, 50);
@@ -115,8 +118,13 @@ for (let i = 1; i <= 5; i += 1) {
 }
 const criticaPequena = filialDe(doisDeCinco, pneus40);
 assert.equal(criticaPequena.com_criticos, 2);
-assert.equal(criticaPequena.criticos_sobre_diagnosticados_pct, 40);
-assert.equal(criticaPequena.situacao, 'critica');
+assert.equal(criticaPequena.pneus_montados, 30);
+assert.equal(criticaPequena.pneus_criticos, 2);
+assert.equal(criticaPequena.pct_critico, 6.7);
+assert.equal(criticaPequena.riscos_imediatos, 2);
+assert.equal(criticaPequena.situacao, 'controlada');
+assert.equal(criticaPequena.situacao_label, 'Boa condição');
+assert.notEqual(criticaPequena.situacao, 'critica');
 
 const frota15 = [];
 const pneus15 = [];
@@ -135,7 +143,7 @@ for (let i = 1; i <= 15; i += 1) {
 const atencaoProporcao = filialDe(frota15, pneus15);
 assert.equal(atencaoProporcao.com_criticos, 2);
 assert.equal(atencaoProporcao.com_monitoramento, 12);
-assert.equal(atencaoProporcao.situacao, 'atencao');
+assert.equal(atencaoProporcao.situacao, 'controlada');
 assert.equal(atencaoProporcao.justificativa.filter((v) => v.classe === 'critico').length, 2);
 assert.equal(
   atencaoProporcao.justificativa.filter((v) => v.classe === 'critico').every((v) => v.pneus.some((p) => p.kpi === 'critico')),
@@ -152,7 +160,11 @@ assert.equal(soMonitor.com_monitoramento, 1);
 
 const semFrota = filialDe([], []);
 assert.equal(semFrota.situacao, 'nao_avaliada');
-assert.equal(semFrota.motivo, 'Sem veículo ativo.');
+assert.equal(semFrota.sem_frota, true);
+assert.equal(semFrota.motivo, 'Dados insuficientes. Sem frota cadastrada.');
+assert.equal(semFrota.situacao_label, 'Dados insuficientes');
+assert.equal(semFrota.pct_critico, null);
+assert.equal(semFrota.pneus_montados, 0);
 
 const soSemDados = filialDe(
   [veiculo(1, { placa: 'SEM1' }), veiculo(2, { placa: 'SEM2' })],
@@ -240,5 +252,110 @@ const comMatriz = montarDiagnosticoExecutivo({
 });
 assert.equal(comMatriz.filiais.length, 1);
 assert.equal(comMatriz.filiais[0].situacao, 'atencao');
+assert.equal(comMatriz.filiais[0].riscos_imediatos, 1);
+
+function lote(montados, criticos, atencao = 0, semDados = 0) {
+  return classificarFilialExecutiva([{
+    classe: criticos ? 'critico' : (atencao ? 'monitoramento' : 'sem_risco'),
+    avaliado_integral: true,
+    medicao_vencida: false,
+    contagem_pneus: {
+      montados,
+      ok: montados - criticos - atencao - semDados,
+      monitorar: atencao,
+      critico: criticos,
+      sem_dado: semDados,
+      risco_imediato: 0,
+    },
+  }]);
+}
+
+const tresDeCem = lote(100, 3);
+assert.equal(tresDeCem.situacao, 'controlada');
+assert.equal(tresDeCem.situacao_label, 'Boa condição');
+assert.equal(tresDeCem.pct_critico, 3);
+assert.equal(tresDeCem.pct_sem_alerta, 97);
+assert.match(tresDeCem.motivo, /listados à parte/);
+
+const trintaDeCem = lote(100, 30);
+assert.equal(trintaDeCem.situacao, 'critica');
+assert.equal(trintaDeCem.pct_critico, 30);
+
+const nenhumDeCem = lote(100, 0);
+assert.equal(nenhumDeCem.situacao, 'controlada');
+assert.equal(nenhumDeCem.pct_critico, 0);
+assert.equal(nenhumDeCem.pct_sem_alerta, 100);
+
+const muitosSemMedicao = lote(100, 0, 0, 60);
+assert.equal(muitosSemMedicao.situacao, 'atencao');
+assert.equal(muitosSemMedicao.pct_sem_dados, 60);
+
+const direcional = filialDe(
+  [veiculo(1, { placa: 'DIR0001' }), veiculo(2, { placa: 'OK00002' })],
+  [
+    pneu('1E', 3, { veiculo_id: 1, numero_fogo: 'DIR-1' }),
+    ...POS_TOCO.slice(1).map((pos) => pneu(pos, 12, { veiculo_id: 1 })),
+    ...jogoOk(2),
+  ],
+);
+assert.equal(direcional.pneus_criticos, 1);
+assert.equal(direcional.situacao, 'controlada');
+assert.equal(direcional.riscos_imediatos, 1);
+assert.equal(direcional.justificativa[0].pneus.some((p) => p.risco_imediato && p.posicao === '1E'), true);
+
+const trator = filialDe(
+  [veiculo(1, { placa: 'TRT0001', tipo: 'Trator', layout_pneus: 'trator_4' })],
+  ['1E', '1D', '2E', '2D'].map((pos, i) => pneu(pos, i === 0 ? 9 : 20, { veiculo_id: 1 })),
+);
+assert.equal(trator.pneus_criticos, 1);
+assert.equal(trator.situacao, 'atencao');
+assert.equal(trator.situacao_label, 'Requer acompanhamento');
+assert.notEqual(trator.situacao, 'critica');
+
+const exemplo = lote(120, 3, 57, 0);
+assert.equal(exemplo.pneus_sem_alerta, 60);
+assert.equal(exemplo.pct_sem_alerta, 50);
+assert.equal(exemplo.pct_atencao, 47.5);
+assert.equal(exemplo.pct_critico, 2.5);
+assert.equal(exemplo.situacao, 'atencao');
+assert.equal(exemplo.situacao_label, 'Requer acompanhamento');
+assert.notEqual(exemplo.situacao, 'critica');
+assert.match(exemplo.motivo, /listados à parte/);
+
+const trinta = lote(100, 30);
+assert.equal(trinta.situacao_label, 'Alta necessidade de intervenção');
+
+const semMedicaoComPrioridade = lote(100, 3, 0, 25);
+assert.equal(semMedicaoComPrioridade.situacao, 'atencao');
+assert.equal(semMedicaoComPrioridade.pct_sem_dados, 25);
+assert.equal(semMedicaoComPrioridade.pct_critico, 3);
+assert.match(semMedicaoComPrioridade.motivo, /sem medição, fora da boa condição/);
+assert.match(semMedicaoComPrioridade.motivo, /listados à parte/);
+assert.equal(semMedicaoComPrioridade.justificativa.some((v) => v.classe === 'critico'), true);
+
+const semMedicaoGrave = lote(100, 25, 0, 50);
+assert.equal(semMedicaoGrave.situacao, 'critica');
+assert.equal(semMedicaoGrave.situacao_label, 'Alta necessidade de intervenção');
+assert.equal(semMedicaoGrave.pct_sem_dados, 50);
+
+const maioriaVeiculosSemMedicao = classificarFilialExecutiva([
+  ...Array.from({ length: 6 }, () => ({ classe: 'sem_dados', avaliado_integral: false, medicao_vencida: false, contagem_pneus: { montados: 0, ok: 0, monitorar: 0, critico: 0, sem_dado: 0, risco_imediato: 0 } })),
+  ...Array.from({ length: 4 }, () => ({ classe: 'sem_risco', avaliado_integral: true, medicao_vencida: false, contagem_pneus: { montados: 6, ok: 6, monitorar: 0, critico: 0, sem_dado: 0, risco_imediato: 0 } })),
+]);
+assert.equal(maioriaVeiculosSemMedicao.situacao, 'nao_avaliada');
+assert.equal(maioriaVeiculosSemMedicao.situacao_label, 'Dados insuficientes');
+
+const semMedicaoNaoEscondePrioridade = classificarFilialExecutiva([
+  ...Array.from({ length: 6 }, () => ({ classe: 'sem_dados', avaliado_integral: false, medicao_vencida: false, contagem_pneus: { montados: 6, ok: 0, monitorar: 0, critico: 0, sem_dado: 6, risco_imediato: 0 } })),
+  { classe: 'critico', avaliado_integral: true, medicao_vencida: false, contagem_pneus: { montados: 6, ok: 5, monitorar: 0, critico: 1, sem_dado: 0, risco_imediato: 1 }, pneus: [{ kpi: 'critico', risco_imediato: true, posicao: '1E' }] },
+  ...Array.from({ length: 3 }, () => ({ classe: 'sem_risco', avaliado_integral: true, medicao_vencida: false, contagem_pneus: { montados: 6, ok: 6, monitorar: 0, critico: 0, sem_dado: 0, risco_imediato: 0 } })),
+]);
+assert.notEqual(semMedicaoNaoEscondePrioridade.situacao, 'nao_avaliada');
+assert.equal(semMedicaoNaoEscondePrioridade.situacao, 'atencao');
+assert.equal(semMedicaoNaoEscondePrioridade.pneus_criticos, 1);
+assert.equal(semMedicaoNaoEscondePrioridade.riscos_imediatos, 1);
+assert.match(semMedicaoNaoEscondePrioridade.motivo, /listados à parte/);
+assert.match(semMedicaoNaoEscondePrioridade.motivo, /intervenção imediata/);
+assert.equal(semMedicaoNaoEscondePrioridade.justificativa.some((v) => v.classe === 'critico'), true);
 
 console.log('diagnostico executivo: ok');

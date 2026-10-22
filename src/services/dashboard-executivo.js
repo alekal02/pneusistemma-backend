@@ -7,7 +7,8 @@ import { filialForaDoIndicadorExecutivo } from './saude-desgaste-relatorio.js';
 import { avaliarPneuPainel, bucketKpi, contarAcaoLegada, veiculoCombinaTipo } from './indicadores-frota.js';
 import { getLimites, limitesDoVeiculo } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
-import { LAYOUTS_PNEU } from '../pneus-layouts.js';
+import { LAYOUTS_PNEU, papelPosicao } from '../pneus-layouts.js';
+import { decidirSituacaoExecutiva, labelSituacaoExecutiva } from './diagnostico-executivo.js';
 import { resolverTipoEquipamento } from '../equipamento-tipos.js';
 
 /** Validade da medição: o mês corrente (America/Sao_Paulo). Fora do mês, ou sem data, não está atualizada. */
@@ -176,7 +177,7 @@ export function situacaoOperacional({
   veiculosSemPneu = 0,
 } = {}) {
   if (criticos > 0) {
-    return { codigo: 'critica', label: 'Situação crítica', cor: 'vermelho' };
+    return { codigo: 'critica', label: 'Substituição prioritária', cor: 'vermelho' };
   }
   if ((veiculos > 0 && montados === 0) || veiculosSemPneu > 0) {
     return { codigo: 'insuficiente', label: DADOS_INSUFICIENTES, cor: 'cinza' };
@@ -185,9 +186,9 @@ export function situacaoOperacional({
     return { codigo: 'insuficiente', label: DADOS_INSUFICIENTES, cor: 'cinza' };
   }
   if (atrasados > 0 || monitorar > 0) {
-    return { codigo: 'atencao', label: 'Requer atenção', cor: 'amarelo' };
+    return { codigo: 'atencao', label: 'Requer acompanhamento', cor: 'amarelo' };
   }
-  return { codigo: 'ok', label: 'Dentro do critério', cor: 'verde' };
+  return { codigo: 'ok', label: 'Boa condição', cor: 'verde' };
 }
 
 export function percentualAtualizados(atualizados, montados) {
@@ -234,9 +235,9 @@ function layoutPosicoes(layoutId) {
 }
 
 function kpiLabel(kpi) {
-  if (kpi === 'ok') return 'OK';
-  if (kpi === 'monitorar') return 'Monitoramento';
-  if (kpi === 'critico') return 'Crítico';
+  if (kpi === 'ok') return 'Boa condição';
+  if (kpi === 'monitorar') return 'Acompanhamento';
+  if (kpi === 'critico') return 'Substituição prioritária';
   if (kpi === 'sem_dado') return 'Sem medição';
   return '—';
 }
@@ -405,6 +406,18 @@ export function agregarVisao({
       veiculos: veiculosFilial.length,
       veiculosSemPneu,
     });
+    const ok = mont.filter((p) => p.kpi === 'ok').length;
+    const decisao = decidirSituacaoExecutiva({
+      veiculos: veiculosFilial.length,
+      diagnosticados: Math.max(0, veiculosFilial.length - veiculosSemPneu),
+      veiculosSemDados: veiculosSemPneu,
+      pneusMontados: mont.length,
+      pneusOk: ok,
+      pneusCriticos: criticos,
+      pneusMonitorar: monitorar,
+      pneusSemDados: semMedicao,
+      vencidosDiagnosticados: 0,
+    });
     return {
       id,
       nome: f.nome,
@@ -420,6 +433,15 @@ export function agregarVisao({
       veiculos_sem_pneu: veiculosSemPneu,
       percentual_atualizado: mont.length ? percentualAtualizados(atualizados, mont.length) : null,
       situacao: situacaoF,
+      situacao_executiva: decisao.situacao,
+      situacao_executiva_label: decisao.sem_frota ? 'Sem frota cadastrada' : labelSituacaoExecutiva(decisao.situacao),
+      sem_frota: decisao.sem_frota,
+      pct_critico: decisao.pct_critico,
+      pct_atencao: decisao.pct_atencao,
+      pct_sem_alerta: decisao.pct_sem_alerta,
+      pct_sem_dados: decisao.pct_sem_dados,
+      pneus_ok: ok,
+      riscos_imediatos: mont.filter((p) => p.kpi === 'critico' && papelPosicao(p.posicao) === 'direcional').length,
     };
   }).sort(ordenarSituacao);
 
@@ -433,14 +455,14 @@ export function agregarVisao({
   const estoque = pneusRecorte.filter((p) => p.status_pneu === 'estoque').length;
   const recapagem = pneusRecorte.filter((p) => p.status_pneu === 'recapagem').length;
   const filiaisPendentes = filiaisVisao.filter((f) => f.situacao.codigo !== 'ok').length;
-  const filiaisCriticas = filiaisVisao.filter((f) => f.situacao.codigo === 'critica').length;
+  const filiaisCriticas = filiaisVisao.filter((f) => f.situacao_executiva === 'critica').length;
 
   const rotuloFilial = filtroSituacao || filtroEstrutural ? 'Filiais no recorte' : 'Filiais';
   const cards = [
     card('filiais', rotuloFilial, filiaisVisao.length, 'neutro', { painel: 'filiais' }),
     card('veiculos', 'Veículos', veiculosRecorte.length, 'neutro', { painel: 'frota' }),
     card('montados', 'Pneus montados', montados.length, 'neutro', { painel: 'pneus', foco: 'montados' }),
-    card('criticos', 'Pneus críticos', contagem.critico, contagem.critico > 0 ? 'critico' : 'ok', {
+    card('criticos', 'Substituição prioritária', contagem.critico, contagem.critico > 0 ? 'critico' : 'ok', {
       painel: 'pneus',
       foco: 'critico',
       comparacao: comparacao?.criticos || null,
@@ -500,7 +522,7 @@ export function agregarVisao({
     regras: {
       condicao: 'Condição física: menor sulco válido entre os pontos medidos, no motor operacional (atenção 8 mm, crítico 3 mm).',
       atualizacao: 'Medição vigente só no mês corrente. Sem data não entra como 0 mm.',
-      filial: 'Vermelho com pneu crítico. Amarelo com monitoramento ou medição fora do mês. Cinza sem base para decidir. Verde só com pneus montados dentro do critério.',
+      filial: 'A condição da unidade usa a distribuição dos pneus montados. Alta necessidade de intervenção exige ao menos 2 pneus e 20% na faixa oficial de substituição. Abaixo de 10% nessa faixa, a unidade pode permanecer em boa condição, com esses pneus listados à parte. Requer acompanhamento quando o acompanhamento chega a 20%, a substituição prioritária chega a 10%, ou a base sem medição chega a 20%. Dados insuficientes quando não há frota ou a maior parte dos veículos não tem medição utilizável. Intervenção imediata em posição direcional é destacada sem rebaixar a unidade inteira.',
       matriz: 'A unidade Matriz fica fora da produção, salvo inclusão explícita.',
       periodo: 'O período altera a evolução e a comparação. Os cards mostram a situação atual.',
       comparacao: 'A comparação usa só o conjunto que já tinha medição antes do período.',
@@ -512,7 +534,7 @@ export function agregarVisao({
       condicao: [
         { id: 'ok', label: 'OK', valor: contagem.ok, cor: 'ok' },
         { id: 'monitorar', label: 'Monitoramento', valor: contagem.monitorar, cor: 'atencao' },
-        { id: 'critico', label: 'Crítico', valor: contagem.critico, cor: 'critico' },
+        { id: 'critico', label: 'Substituição prioritária', valor: contagem.critico, cor: 'critico' },
         { id: 'sem_dado', label: 'Sem medição', valor: contagem.sem_dado, cor: 'cinza' },
       ],
       atualizacao: [
@@ -576,7 +598,7 @@ function montarAlertas({ hoje, prazoOk, filiaisVisao, montados, pneusRecorte, in
         prioridade: 'critica',
         filial_id: Number(p.filial_id),
         filial: p.filial_nome || '',
-        tipo: 'Pneu crítico',
+        tipo: 'Substituição prioritária',
         titulo: p.apelido ? `${p.placa || 'Veículo'} · ${p.apelido}` : (p.placa || `Veículo ${id}`),
         qtd: 0,
         destino: { painel: 'pneus', foco: 'critico', veiculo_id: id, filial_id: Number(p.filial_id) },
@@ -586,7 +608,7 @@ function montarAlertas({ hoje, prazoOk, filiaisVisao, montados, pneusRecorte, in
   }
   const veiculosCriticos = [...porVeiculoCritico.values()].map((v) => ({
     ...v,
-    detalhe: `${v.qtd} pneu(s) crítico(s) no motor operacional.`,
+    detalhe: `${v.qtd} pneu(s) em substituição prioritária no motor operacional.`,
   }));
 
   const vencidas = montados.filter((p) => p.atrasada).map((p) => ({

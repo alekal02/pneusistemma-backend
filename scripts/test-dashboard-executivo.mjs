@@ -136,6 +136,9 @@ assert.notEqual(sul.situacao.codigo, 'ok');
 
 const norte = visao.filiais.find((f) => f.id === 1);
 assert.equal(norte.situacao.codigo, 'critica');
+assert.equal(norte.situacao_executiva, 'atencao');
+assert.equal(norte.pct_critico, 100);
+assert.equal(norte.riscos_imediatos, 1);
 
 const vazio = montarSerie({ periodo });
 for (const serie of Object.values(vazio.series)) {

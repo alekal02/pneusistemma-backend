@@ -25,15 +25,34 @@ function ensure(doc, altura = 36) {
   if (doc.y > doc.page.height - doc.page.margins.bottom - altura) doc.addPage();
 }
 
-function barra(doc, valor, max, cor) {
+function barraDistribuicao(doc, filial) {
   const largura = 220;
   const y = doc.y;
+  const partes = [
+    [Number(filial.pneus_sem_alerta) || 0, '#15803d'],
+    [Number(filial.pneus_atencao) || 0, '#a16207'],
+    [Number(filial.pneus_criticos) || 0, '#b91c1c'],
+    [Number(filial.pneus_sem_dados) || 0, '#94a3b8'],
+  ];
+  const total = partes.reduce((soma, item) => soma + item[0], 0);
   doc.save();
   doc.roundedRect(doc.x, y, largura, 8, 2).fill('#e5ece6');
-  const pct = max > 0 && valor != null ? Math.max(0, Math.min(1, valor / max)) : 0;
-  if (pct > 0) doc.roundedRect(doc.x, y, Math.max(2, largura * pct), 8, 2).fill(cor);
+  if (total > 0) {
+    let x = doc.x;
+    for (const [valor, cor] of partes) {
+      if (!valor) continue;
+      const w = (valor / total) * largura;
+      doc.rect(x, y, w, 8).fill(cor);
+      x += w;
+    }
+  }
   doc.restore();
   doc.y = y + 12;
+}
+
+function textoPct(valor) {
+  if (valor == null || valor === '') return '—';
+  return `${Number(valor).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 }
 
 export function nomeArquivoExecutivo(iso) {
@@ -41,7 +60,7 @@ export function nomeArquivoExecutivo(iso) {
   return `visao-executiva-${dia || 'presidente'}.pdf`;
 }
 
-export function gerarPdfExecutivoBuffer({ snapshot, evolucao }) {
+export function gerarPdfExecutivoBuffer({ snapshot, evolucao, diagnostico = null }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
     const chunks = [];
@@ -71,19 +90,37 @@ export function gerarPdfExecutivoBuffer({ snapshot, evolucao }) {
     doc.moveDown(0.4);
     doc.font('Helvetica-Bold').fontSize(12).fillColor('#145223').text('Filiais');
     doc.moveDown(0.25);
-    const filiais = snapshot?.filiais || [];
-    const maxMont = Math.max(1, ...filiais.map((f) => f.montados || 0));
+    const porDiagnostico = new Map((diagnostico?.filiais || []).map((f) => [Number(f.id), f]));
+    const filiais = (diagnostico?.filiais?.length ? diagnostico.filiais : (snapshot?.filiais || []));
     if (!filiais.length) {
       doc.font('Helvetica').fontSize(9).fillColor('#5a6e60').text('Sem filiais neste recorte.');
     }
-    for (const f of filiais) {
-      ensure(doc, 32);
-      const pct = f.percentual_atualizado == null ? '—' : `${f.percentual_atualizado}% no mês`;
+    for (const bruto of filiais) {
+      ensure(doc, 48);
+      const diag = porDiagnostico.get(Number(bruto.id)) || bruto;
+      const nome = diag.nome || bruto.nome || '—';
+      if (diag.sem_frota || (diag.veiculos_ativos === 0 && diag.pneus_montados == null && !diag.montados)) {
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#14261a').text(`${nome}  ·  Sem frota cadastrada`);
+        doc.font('Helvetica').fontSize(8).fillColor('#5a6e60').text('Dados insuficientes. Sem frota cadastrada. Sem percentual de pneus.');
+        doc.moveDown(0.3);
+        continue;
+      }
+      const rotulo = diag.situacao_label || diag.situacao_executiva_label || bruto.situacao?.label || '—';
+      const criticos = diag.pneus_criticos ?? bruto.criticos ?? 0;
+      const montados = diag.pneus_montados ?? bruto.montados ?? 0;
       doc.font('Helvetica-Bold').fontSize(9).fillColor('#14261a')
-        .text(`${f.nome}  ·  ${f.situacao?.label || '—'}  ·  ${pct}`, { continued: false });
+        .text(`${nome}  ·  ${rotulo}  ·  ${criticos} substituição prioritária (${textoPct(diag.pct_critico)})`);
       doc.font('Helvetica').fontSize(8).fillColor('#5a6e60')
-        .text(`Críticos ${f.criticos} · Fora do mês ${f.atrasados} · Montados ${f.montados}`);
-      barra(doc, f.montados, maxMont, CORES[f.situacao?.cor] || CORES.cinza);
+        .text(`Boa condição ${diag.pneus_sem_alerta ?? '—'} (${textoPct(diag.pct_sem_alerta)}) · Acompanhamento ${diag.pneus_atencao ?? '—'} (${textoPct(diag.pct_atencao)}) · Sem medição ${diag.pneus_sem_dados ?? '—'} (${textoPct(diag.pct_sem_dados)}) · Montados ${montados}`);
+      if (diag.riscos_imediatos > 0) {
+        doc.fillColor('#b91c1c').text(`Intervenção imediata: ${diag.riscos_imediatos} pneu(s) em posição direcional.`);
+      }
+      barraDistribuicao(doc, diag.pneus_montados != null ? diag : {
+        pneus_sem_alerta: bruto.pneus_ok,
+        pneus_atencao: bruto.monitorar,
+        pneus_criticos: bruto.criticos,
+        pneus_sem_dados: bruto.sem_medicao,
+      });
     }
 
     doc.moveDown(0.3);
@@ -103,7 +140,7 @@ export function gerarPdfExecutivoBuffer({ snapshot, evolucao }) {
     const series = evolucao?.series || {};
     const nomes = [
       ['medicoes', 'Medições'],
-      ['criticos', 'Pneus críticos'],
+      ['criticos', 'Substituição prioritária'],
       ['filiais', 'Filiais com medição'],
       ['recapagens', 'Recapagens'],
       ['descartes', 'Descartes'],
