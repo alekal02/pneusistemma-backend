@@ -20,6 +20,7 @@ import whatsappRouter from './src/routes/whatsapp.js';
 import frotaRouter from './src/routes/frota.js';
 import usuariosRouter from './src/routes/usuarios.js';
 import relatoriosRouter from './src/routes/relatorios.js';
+import presidenteRouter from './src/routes/presidente.js';
 import acessoRapidoRouter from './src/routes/acesso-rapido.js';
 
 async function main() {
@@ -69,6 +70,7 @@ async function main() {
   app.use('/api/filiais', filiaisRouter);
   app.use('/api/usuarios', usuariosRouter);
   app.use('/api/relatorios', relatoriosRouter);
+  app.use('/api/presidente', presidenteRouter);
   app.use('/api/veiculos', veiculosRouter);
   app.use('/api/acesso-rapido', acessoRapidoRouter);
   app.use('/api/pneus', pneusRouter);

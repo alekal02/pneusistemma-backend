@@ -123,6 +123,14 @@ export function requireAdmin(req, res, next) {
   next();
 }
 
+/** Consulta executiva: presidente (somente leitura) ou administrador. */
+export function requireLeituraExecutiva(req, res, next) {
+  if (!req.user || !['admin', 'presidente'].includes(req.user.papel)) {
+    return res.status(403).json({ erro: 'Acesso restrito à visão executiva' });
+  }
+  next();
+}
+
 /**
  * Saúde e desgaste, PDF executivo e o futuro planejamento de compras.
  * Admin, gerente e filial não passam, mesmo com URL direta.
@@ -201,6 +209,42 @@ export function filiaisEscopoIds(req) {
     return [req.user.filial_id];
   }
   return [];
+}
+
+/** Papéis que o gerente pode ver e cuja senha pode redefinir. Admin e presidente ficam de fora. */
+export const PAPEIS_GERENCIAVEIS_PELO_GERENTE = ['gerente', 'filial'];
+
+/**
+ * Quem pode redefinir a senha de outra conta.
+ * Admin altera qualquer uma. Gerente altera só gerente/filial no escopo
+ * (sem filial, o escopo continua o da listagem: todas as unidades).
+ * Admin e presidente só têm a senha redefinida pelo administrador total,
+ * mesmo que o alvo tenha filial_id. Filial e presidente não redefinem terceiros.
+ */
+export function decidirResetSenha(ator, alvo) {
+  if (!ator?.papel) {
+    return { permitido: false, status: 401, erro: 'Não autenticado' };
+  }
+  if (!alvo) {
+    return { permitido: false, status: 404, erro: 'Usuário não encontrado' };
+  }
+  const protegido = alvo.papel === 'admin' || alvo.papel === 'presidente';
+  if (ator.papel !== 'admin' && protegido) {
+    return {
+      permitido: false,
+      status: 403,
+      erro: 'Somente o administrador total redefine a senha deste acesso',
+    };
+  }
+  if (ator.papel === 'admin') return { permitido: true };
+  if (ator.papel !== 'gerente') {
+    return { permitido: false, status: 403, erro: 'Acesso restrito a gerentes ou administrador' };
+  }
+  const escopo = ator.filial_id ? [ator.filial_id] : null;
+  if (escopo?.length && !escopo.includes(alvo.filial_id)) {
+    return { permitido: false, status: 403, erro: 'Usuário fora do escopo da sua unidade' };
+  }
+  return { permitido: true };
 }
 
 /** ID da filial no escopo operacional (usuário filial). Admin/gerente não operam frota aqui. */

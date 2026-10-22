@@ -8,7 +8,9 @@ import {
   usuarioPublico,
   LABELS_PAPEL,
   PAPEIS,
+  PAPEIS_GERENCIAVEIS_PELO_GERENTE,
   filiaisEscopoIds,
+  decidirResetSenha,
   papelSemFilial,
   ehPresidenteReservado,
 } from '../auth.js';
@@ -58,8 +60,8 @@ router.get('/', requireGerenteOuAdmin, async (req, res, next) => {
     const params = [];
 
     if (req.user.papel === 'gerente') {
-      // Gerente não vê admin total; vê gerentes/operadores no escopo
-      sql += ` AND u.papel IN ('gerente', 'filial')`;
+      sql += ` AND u.papel IN (${PAPEIS_GERENCIAVEIS_PELO_GERENTE.map(() => '?').join(',')})`;
+      params.push(...PAPEIS_GERENCIAVEIS_PELO_GERENTE);
       if (escopo?.length) {
         sql += ` AND u.filial_id IN (${escopo.map(() => '?').join(',')})`;
         params.push(...escopo);
@@ -133,7 +135,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
   }
 });
 
-/** Reset de senha — admin qualquer; gerente só operadores da sua filial */
+/** Reset de senha — admin qualquer; gerente só gerente/filial no escopo. Nunca admin ou presidente. */
 router.post('/:id/reset-senha', requireGerenteOuAdmin, async (req, res, next) => {
   const { senha } = req.body || {};
   if (!senha || senha.length < 4) {
@@ -148,14 +150,9 @@ router.post('/:id/reset-senha', requireGerenteOuAdmin, async (req, res, next) =>
     `).get(req.params.id);
     if (!alvo) return res.status(404).json({ erro: 'Usuário não encontrado' });
 
-    if (req.user.papel === 'gerente') {
-      if (alvo.papel === 'admin' || alvo.papel === 'presidente') {
-        return res.status(403).json({ erro: 'Gerente não pode alterar senha do admin total nem do presidente' });
-      }
-      const escopo = filiaisEscopoIds(req);
-      if (escopo?.length && !escopo.includes(alvo.filial_id)) {
-        return res.status(403).json({ erro: 'Usuário fora do escopo da sua unidade' });
-      }
+    const decisao = decidirResetSenha(req.user, alvo);
+    if (!decisao.permitido) {
+      return res.status(decisao.status).json({ erro: decisao.erro });
     }
 
     await db.prepare(`

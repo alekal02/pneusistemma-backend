@@ -412,6 +412,20 @@ async function seedAuthAndFilial() {
   return matriz.id;
 }
 
+/**
+ * Produção só conecta e confere o schema idempotente.
+ * Seed, backfill de dados e correção antiga exigem BOOT_MIGRACOES=1.
+ * Colunas, índices, constraint de notificação e a trava do histórico
+ * continuam em todo boot: a operação atual depende delas.
+ * Desenvolvimento segue inicializando banco vazio.
+ */
+export function bootManutencaoHabilitada() {
+  const flag = String(process.env.BOOT_MIGRACOES ?? '').trim().toLowerCase();
+  if (flag === '1' || flag === 'true' || flag === 'sim') return true;
+  if (flag === '0' || flag === 'false' || flag === 'nao' || flag === 'não') return false;
+  return String(process.env.NODE_ENV || 'development') !== 'production';
+}
+
 export async function initDatabase() {
   if (ready) return getDb();
   if (!config.databaseUrl) {
@@ -475,8 +489,6 @@ export async function initDatabase() {
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_veiculos_tipo_codigo ON veiculos(tipo_codigo);
   `);
-  await seedEquipamentoTipos(db);
-  await backfillTipoCodigoVeiculos(db);
   await ensureColumn('tokens_acesso_rapido', 'tipo', "TEXT NOT NULL DEFAULT 'medir'");
   await ensureColumn('tokens_acesso_rapido', 'pneu_id', 'BIGINT');
   await ensureColumn('veiculos', 'cadastro_completo', 'INTEGER DEFAULT 1');
@@ -509,30 +521,36 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
   `);
 
-  await seedConfigs();
-  const matrizId = await seedAuthAndFilial();
+  if (bootManutencaoHabilitada()) {
+    await seedEquipamentoTipos(db);
+    await backfillTipoCodigoVeiculos(db);
+    await seedConfigs();
+    const matrizId = await seedAuthAndFilial();
 
-  await db.prepare(`
-    UPDATE pneus SET filial_id = (
-      SELECT v.filial_id FROM veiculos v WHERE v.id = pneus.veiculo_id
-    )
-    WHERE filial_id IS NULL AND veiculo_id IS NOT NULL
-  `).run();
-  await db.prepare(`UPDATE pneus SET filial_id = ? WHERE filial_id IS NULL`).run(matrizId);
+    await db.prepare(`
+      UPDATE pneus SET filial_id = (
+        SELECT v.filial_id FROM veiculos v WHERE v.id = pneus.veiculo_id
+      )
+      WHERE filial_id IS NULL AND veiculo_id IS NOT NULL
+    `).run();
+    await db.prepare(`UPDATE pneus SET filial_id = ? WHERE filial_id IS NULL`).run(matrizId);
 
-  try {
-    const jaCorrigiu = await db.prepare(
-      'SELECT valor FROM configuracoes WHERE chave = ?'
-    ).get('encoding_corrigido_v1');
-    if (!jaCorrigiu) {
-      await corrigirEncodingBanco(db);
-      await db.prepare(`
-        INSERT INTO configuracoes (chave, valor) VALUES (?, ?)
-        ON CONFLICT (chave) DO NOTHING
-      `).run('encoding_corrigido_v1', '1');
+    try {
+      const jaCorrigiu = await db.prepare(
+        'SELECT valor FROM configuracoes WHERE chave = ?'
+      ).get('encoding_corrigido_v1');
+      if (!jaCorrigiu) {
+        await corrigirEncodingBanco(db);
+        await db.prepare(`
+          INSERT INTO configuracoes (chave, valor) VALUES (?, ?)
+          ON CONFLICT (chave) DO NOTHING
+        `).run('encoding_corrigido_v1', '1');
+      }
+    } catch (err) {
+      console.warn('[database] encoding:', err.message);
     }
-  } catch (err) {
-    console.warn('[database] encoding:', err.message);
+  } else {
+    console.log('[database] Produção: schema conferido, sem seed, correção ou limpeza.');
   }
 
   ready = true;

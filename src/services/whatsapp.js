@@ -7,7 +7,7 @@
  */
 import crypto from 'crypto';
 import { config } from '../config.js';
-import { getDb } from '../database.js';
+import { bootManutencaoHabilitada, getDb } from '../database.js';
 
 export function limparTelefone(phone) {
   if (!phone) return '';
@@ -839,6 +839,10 @@ function ehUsuarioWuzapiPorFilial(name) {
  * Mantém os grupos. O admin reconecta um único chip.
  */
 export async function limparTokensChatbotAntigos() {
+  if (!bootManutencaoHabilitada()) {
+    return { skipped: true, motivo: 'boot_producao' };
+  }
+
   const db = getDb();
   const flag = await db.prepare(
     'SELECT valor FROM configuracoes WHERE chave = ?'
