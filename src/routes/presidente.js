@@ -12,6 +12,7 @@ import {
   obterSnapshotCompleto,
 } from '../services/dashboard-executivo.js';
 import { gerarPdfExecutivoBuffer, nomeArquivoExecutivo } from '../services/dashboard-executivo-pdf.js';
+import { consultarDiagnosticoExecutivo } from '../services/diagnostico-executivo.js';
 
 const router = Router();
 
@@ -70,6 +71,21 @@ router.get('/detalhe', async (req, res, next) => {
       pagina: req.query.pagina,
       limite: req.query.limite,
     }));
+  } catch (err) {
+    falha(err, res, next);
+  }
+});
+
+router.get('/diagnostico-filiais', async (req, res, next) => {
+  try {
+    const filtros = lerFiltrosQuery(req.query);
+    const diagnostico = await consultarDiagnosticoExecutivo(getDb(), {
+      escopo: null,
+      tipo: filtros.tipo || null,
+      incluirMatriz: filtros.incluirMatriz,
+      filialId: filtros.filialId,
+    });
+    res.json(diagnostico);
   } catch (err) {
     falha(err, res, next);
   }

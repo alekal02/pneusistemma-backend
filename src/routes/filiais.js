@@ -38,6 +38,7 @@ import {
   labelTipoPneu,
 } from '../pneus-layouts.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
+import { consultarDiagnosticoExecutivo } from '../services/diagnostico-executivo.js';
 import { camposTipoVeiculo } from '../equipamento-tipos.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 
@@ -394,6 +395,27 @@ router.get('/compras/consolidado', async (req, res, next) => {
       ),
       limites,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/diagnostico-executivo', async (req, res, next) => {
+  try {
+    const db = getDb();
+    const incluirMatriz = String(req.query.incluir_matriz || '') === '1';
+    const filialId = req.query.filial_id || null;
+    const escopo = filiaisEscopoIds(req);
+    if (filialId && !assertFilialNoEscopo(req, filialId)) {
+      return res.status(403).json({ erro: 'Filial fora do seu escopo' });
+    }
+    const diagnostico = await consultarDiagnosticoExecutivo(db, {
+      escopo,
+      tipo: req.query.tipo || null,
+      incluirMatriz,
+      filialId,
+    });
+    res.json(diagnostico);
   } catch (err) {
     next(err);
   }
