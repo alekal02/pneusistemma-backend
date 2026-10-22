@@ -82,7 +82,9 @@ assert.equal(industrialSemRegua.kpi, 'sem_dado');
 
 assert.equal(medicaoAtrasada('2026-09-30', hoje), true);
 assert.equal(medicaoAtrasada('2026-10-02', hoje), false);
-assert.equal(medicaoAtrasada(null, hoje), true);
+assert.equal(medicaoAtrasada(null, hoje), false);
+assert.equal(medicaoAtrasada('', hoje), false);
+assert.equal(medicaoAtrasada('sem-data', hoje), false);
 
 assert.equal(situacaoOperacional({
   montados: 4, criticos: 0, atrasados: 0, monitorar: 0, veiculos: 1, veiculosSemPneu: 0,
@@ -112,6 +114,8 @@ const visao = agregarVisao({
       id: 1, status_pneu: 'montado', kpi: 'critico', menor_sulco: 3, atrasada: false,
       filial_id: 1, filial_nome: 'Norte', veiculo_id: 10, placa: 'AAA1A11', posicao: '1E',
       numero_fogo: '10', tipo_codigo: 'toco_mini', acao: null, veiculo_ativo: 1, veiculo_filial_id: 1,
+      sulco_externo: 9, sulco_central: 8, sulco_interno: 7, sulco_auxiliar: 3,
+      pressao_psi: 110, data_medicao: '2026-10-02', perfil_sulco: 'quatro_pontos',
     },
     {
       id: 2, status_pneu: 'estoque', kpi: null, menor_sulco: null, atrasada: false,
@@ -139,6 +143,23 @@ assert.equal(norte.situacao.codigo, 'critica');
 assert.equal(norte.situacao_executiva, 'atencao');
 assert.equal(norte.pct_critico, 100);
 assert.equal(norte.riscos_imediatos, 1);
+
+const frotaNorte = visao.listas.frota.find((v) => v.id === 10);
+assert.deepEqual(frotaNorte.posicoes, ['1E', '1D', '2EE', '2EI', '2DI', '2DE']);
+assert.equal(frotaNorte.pneus.length, 1);
+assert.equal(frotaNorte.pneus[0].numero_fogo, '10');
+assert.equal(frotaNorte.pneus[0].sulco_externo, 9);
+assert.equal(frotaNorte.pneus[0].sulco_central, 8);
+assert.equal(frotaNorte.pneus[0].sulco_interno, 7);
+assert.equal(frotaNorte.pneus[0].sulco_auxiliar, 3);
+assert.equal(frotaNorte.pneus[0].menor_sulco, 3);
+assert.equal(frotaNorte.pneus[0].pressao_psi, 110);
+assert.equal(frotaNorte.pneus[0].perfil_sulco, 'quatro_pontos');
+assert.equal('media_sulco' in frotaNorte.pneus[0], false);
+const frotaSul = visao.listas.frota.find((v) => v.id === 11);
+assert.equal(frotaSul.pneus.length, 0);
+assert.equal(frotaSul.medicao_label, 'Sem pneus montados');
+assert.equal(frotaSul.posicoes.length, 6);
 
 const vazio = montarSerie({ periodo });
 for (const serie of Object.values(vazio.series)) {

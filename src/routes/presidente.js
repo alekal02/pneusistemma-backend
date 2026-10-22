@@ -12,17 +12,13 @@ import {
   obterSnapshotCompleto,
 } from '../services/dashboard-executivo.js';
 import { gerarPdfExecutivoBuffer, nomeArquivoExecutivo } from '../services/dashboard-executivo-pdf.js';
-import { consultarDiagnosticoExecutivo } from '../services/diagnostico-executivo.js';
+import { consultarDiagnosticoExecutivo, filtrarFiliaisPorSituacao } from '../services/diagnostico-executivo.js';
+import { somenteLeituraExecutiva } from './presidente-leitura.js';
 
 const router = Router();
 
 router.use(requireAuth);
-router.use((req, res, next) => {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    return res.status(405).json({ erro: 'A visão executiva é somente leitura.' });
-  }
-  next();
-});
+router.use(somenteLeituraExecutiva);
 router.use(requireLeituraExecutiva);
 
 function falha(err, res, next) {
@@ -85,7 +81,7 @@ router.get('/diagnostico-filiais', async (req, res, next) => {
       incluirMatriz: filtros.incluirMatriz,
       filialId: filtros.filialId,
     });
-    res.json(diagnostico);
+    res.json(filtrarFiliaisPorSituacao(diagnostico, filtros.situacao));
   } catch (err) {
     falha(err, res, next);
   }
@@ -103,7 +99,10 @@ router.get('/visao.pdf', async (req, res, next) => {
         filialId: filtros.filialId,
       }),
     ]);
-    const buffer = await gerarPdfExecutivoBuffer({ ...pacote, diagnostico });
+    const buffer = await gerarPdfExecutivoBuffer({
+      ...pacote,
+      diagnostico: filtrarFiliaisPorSituacao(diagnostico, filtros.situacao),
+    });
     const filename = nomeArquivoExecutivo(pacote.snapshot?.gerado_em);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

@@ -7,8 +7,14 @@ import { filialForaDoIndicadorExecutivo } from './saude-desgaste-relatorio.js';
 import { avaliarPneuPainel, bucketKpi, contarAcaoLegada, veiculoCombinaTipo } from './indicadores-frota.js';
 import { getLimites, limitesDoVeiculo } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
-import { LAYOUTS_PNEU, papelPosicao } from '../pneus-layouts.js';
-import { decidirSituacaoExecutiva, labelSituacaoExecutiva } from './diagnostico-executivo.js';
+import { LAYOUTS_PNEU, papelPosicao, labelPosicao } from '../pneus-layouts.js';
+import {
+  filtrarFiliaisPorSituacao,
+  labelSituacaoExecutiva,
+  montarDiagnosticoExecutivo,
+  situacaoMedicaoExecutiva as situacaoMedicao,
+} from './diagnostico-executivo.js';
+import { especificacaoMedicao } from '../medicao-perfil.js';
 import { resolverTipoEquipamento } from '../equipamento-tipos.js';
 
 /** Validade da medição: o mês corrente (America/Sao_Paulo). Fora do mês, ou sem data, não está atualizada. */
@@ -55,10 +61,16 @@ export function diasEntreIso(inicio, fim) {
 
 /** Fora da validade mensal. Ausência de data não vira 0 mm: só indica medição não vigente. */
 export function medicaoAtrasada(dataMedicao, hoje) {
-  if (!dataMedicao) return true;
+  if (!dataMedicao) return false;
   const d = String(dataMedicao).slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
   return d.slice(0, 7) !== String(hoje).slice(0, 7);
+}
+
+function numeroOuNulo(valor) {
+  if (valor == null || valor === '') return null;
+  const n = Number(valor);
+  return Number.isFinite(n) ? n : null;
 }
 
 function erroStatus(mensagem, status) {
@@ -234,6 +246,55 @@ function layoutPosicoes(layoutId) {
   return LAYOUTS_PNEU[layoutId].posicoes || null;
 }
 
+export const CAMPOS_VEICULO_FROTA = [
+  'id', 'placa', 'apelido', 'tipo', 'layout_id', 'layout_nome', 'posicoes',
+  'pneus', 'medicao_label', 'sem_layout', 'sem_pneu',
+];
+
+export const CAMPOS_PNEU_FROTA = [
+  'id', 'posicao', 'posicao_label', 'numero_fogo', 'kpi', 'condicao',
+  'menor_sulco', 'sulco_externo', 'sulco_central', 'sulco_interno', 'sulco_auxiliar',
+  'sulco_mm', 'pressao_psi', 'data_medicao', 'sem_medicao', 'situacao_medicao',
+  'risco_imediato', 'perfil_sulco', 'atrasada',
+];
+
+function detalhePneuFrota(p) {
+  const semMedicao = p.situacao_medicao
+    ? p.situacao_medicao === 'sem_medicao'
+    : !p.data_medicao;
+  const atrasada = semMedicao
+    ? false
+    : (p.situacao_medicao ? p.situacao_medicao === 'atrasada' : Boolean(p.data_medicao && p.atrasada));
+  return {
+    id: p.id,
+    posicao: p.posicao || '',
+    posicao_label: p.posicao ? labelPosicao(p.posicao) : '',
+    numero_fogo: p.numero_fogo || '',
+    kpi: p.kpi,
+    condicao: p.condicao || kpiLabel(p.kpi),
+    menor_sulco: p.menor_sulco ?? null,
+    sulco_externo: p.sulco_externo ?? null,
+    sulco_central: p.sulco_central ?? null,
+    sulco_interno: p.sulco_interno ?? null,
+    sulco_auxiliar: p.sulco_auxiliar ?? null,
+    sulco_mm: p.sulco_mm ?? null,
+    pressao_psi: p.pressao_psi ?? null,
+    data_medicao: p.data_medicao || null,
+    sem_medicao: semMedicao,
+    situacao_medicao: p.situacao_medicao || (semMedicao ? 'sem_medicao' : null),
+    risco_imediato: Boolean(p.risco_imediato),
+    perfil_sulco: p.perfil_sulco || null,
+    atrasada,
+  };
+}
+
+function rotuloMedicaoVeiculo(pneus) {
+  if (!pneus.length) return 'Sem pneus montados';
+  if (pneus.every((p) => p.sem_medicao)) return 'Sem medição';
+  if (pneus.some((p) => p.atrasada)) return 'Medição vencida';
+  return 'Medição em dia';
+}
+
 function kpiLabel(kpi) {
   if (kpi === 'ok') return 'Boa condição';
   if (kpi === 'monitorar') return 'Acompanhamento';
@@ -277,16 +338,30 @@ export function agregarVisao({
     return true;
   });
 
-  const pneusRecorte = filtroSituacao
-    ? pneusEstruturais.filter((p) => p.status_pneu === 'montado' && p.kpi === situacao)
-    : pneusEstruturais;
+  const agoraRef = new Date(`${String(hoje).slice(0, 10)}T15:00:00-03:00`);
+  const diagnosticoCheio = montarDiagnosticoExecutivo({
+    filiais,
+    veiculos: veiculosTipo,
+    pneus: pneusEstruturais.filter((p) => p.status_pneu === 'montado'),
+    incluirMatriz: true,
+    agora: agoraRef,
+  });
+  const diagnosticoVisivel = filtrarFiliaisPorSituacao(diagnosticoCheio, situacao);
+  const diagPorId = new Map(diagnosticoCheio.filiais.map((f) => [Number(f.id), f]));
+  const idsVisiveis = new Set(diagnosticoVisivel.filiais.map((f) => Number(f.id)));
 
+  let filiaisBase = filiais || [];
+  if (filtroSituacao) {
+    filiaisBase = filiaisBase.filter((f) => idsVisiveis.has(Number(f.id)));
+  } else if (filtroEstrutural) {
+    const idsComDado = new Set(pneusEstruturais.map((p) => Number(p.filial_id)));
+    for (const v of veiculosTipo) idsComDado.add(Number(v.filial_id));
+    filiaisBase = filiaisBase.filter((f) => idsComDado.has(Number(f.id)));
+  }
+  const idsFilial = new Set(filiaisBase.map((f) => Number(f.id)));
+  const veiculosRecorte = veiculosTipo.filter((v) => idsFilial.has(Number(v.filial_id)));
+  const pneusRecorte = pneusEstruturais.filter((p) => idsFilial.has(Number(p.filial_id)));
   const montados = pneusRecorte.filter((p) => p.status_pneu === 'montado');
-  const idsMontadosVeiculo = new Set(montados.map((p) => Number(p.veiculo_id)).filter(Boolean));
-
-  const veiculosRecorte = filtroSituacao
-    ? veiculosTipo.filter((v) => idsMontadosVeiculo.has(Number(v.id)))
-    : veiculosTipo;
 
   const porFilialPneu = new Map();
   for (const p of pneusRecorte) {
@@ -300,10 +375,6 @@ export function agregarVisao({
     if (!porFilialVeiculo.has(id)) porFilialVeiculo.set(id, []);
     porFilialVeiculo.get(id).push(v);
   }
-
-  const filiaisBase = filtroSituacao || filtroEstrutural
-    ? (filiais || []).filter((f) => porFilialPneu.has(Number(f.id)) || porFilialVeiculo.has(Number(f.id)))
-    : (filiais || []);
 
   const posicoesPorVeiculo = new Map();
   for (const p of pneusEstruturais) {
@@ -335,6 +406,10 @@ export function agregarVisao({
     const faltantes = esperadas ? esperadas.filter((pos) => !ocupadas.has(pos)) : [];
     const semLayout = !v.layout_pneus || !LAYOUTS_PNEU[v.layout_pneus];
     const incompleto = semPneu || semLayout || faltantes.length > 0;
+    const doVeiculoDesenho = (pneusEstruturais || []).filter((p) => (
+      p.status_pneu === 'montado' && Number(p.veiculo_id) === id
+    ));
+    const pneusDesenho = doVeiculoDesenho.map(detalhePneuFrota);
     const item = {
       id,
       placa: v.placa || '—',
@@ -352,6 +427,13 @@ export function agregarVisao({
       sem_pneu: semPneu,
       sem_layout: semLayout,
       situacao: situacaoV,
+      layout_id: LAYOUTS_PNEU[v.layout_pneus]?.id || null,
+      layout_nome: LAYOUTS_PNEU[v.layout_pneus]?.nome || null,
+      posicoes: LAYOUTS_PNEU[v.layout_pneus]?.posicoes
+        ? [...LAYOUTS_PNEU[v.layout_pneus].posicoes]
+        : [],
+      pneus: pneusDesenho,
+      medicao_label: rotuloMedicaoVeiculo(pneusDesenho),
     };
     frota.push(item);
     if (semPneu) {
@@ -406,18 +488,7 @@ export function agregarVisao({
       veiculos: veiculosFilial.length,
       veiculosSemPneu,
     });
-    const ok = mont.filter((p) => p.kpi === 'ok').length;
-    const decisao = decidirSituacaoExecutiva({
-      veiculos: veiculosFilial.length,
-      diagnosticados: Math.max(0, veiculosFilial.length - veiculosSemPneu),
-      veiculosSemDados: veiculosSemPneu,
-      pneusMontados: mont.length,
-      pneusOk: ok,
-      pneusCriticos: criticos,
-      pneusMonitorar: monitorar,
-      pneusSemDados: semMedicao,
-      vencidosDiagnosticados: 0,
-    });
+    const diag = diagPorId.get(id);
     return {
       id,
       nome: f.nome,
@@ -433,28 +504,39 @@ export function agregarVisao({
       veiculos_sem_pneu: veiculosSemPneu,
       percentual_atualizado: mont.length ? percentualAtualizados(atualizados, mont.length) : null,
       situacao: situacaoF,
-      situacao_executiva: decisao.situacao,
-      situacao_executiva_label: decisao.sem_frota ? 'Sem frota cadastrada' : labelSituacaoExecutiva(decisao.situacao),
-      sem_frota: decisao.sem_frota,
-      pct_critico: decisao.pct_critico,
-      pct_atencao: decisao.pct_atencao,
-      pct_sem_alerta: decisao.pct_sem_alerta,
-      pct_sem_dados: decisao.pct_sem_dados,
-      pneus_ok: ok,
-      riscos_imediatos: mont.filter((p) => p.kpi === 'critico' && papelPosicao(p.posicao) === 'direcional').length,
+      situacao_executiva: diag?.situacao || 'nao_avaliada',
+      situacao_executiva_label: diag?.sem_frota
+        ? 'Sem frota cadastrada'
+        : (diag?.situacao_label || labelSituacaoExecutiva(diag?.situacao)),
+      sem_frota: Boolean(diag?.sem_frota),
+      pct_critico: diag?.pct_critico ?? null,
+      pct_atencao: diag?.pct_atencao ?? null,
+      pct_sem_alerta: diag?.pct_sem_alerta ?? null,
+      pct_sem_dados: diag?.pct_sem_dados ?? null,
+      pneus_ok: diag?.pneus_sem_alerta ?? 0,
+      pneus_atencao: diag?.pneus_atencao ?? 0,
+      pneus_criticos: diag?.pneus_criticos ?? 0,
+      pneus_sem_dados: diag?.pneus_sem_dados ?? 0,
+      veiculos_ativos: diag?.veiculos_ativos ?? veiculosFilial.length,
+      riscos_imediatos: diag?.riscos_imediatos ?? 0,
     };
   }).sort(ordenarSituacao);
 
   const contagem = { ok: 0, monitorar: 0, critico: 0, sem_dado: 0 };
-  let atrasadas = 0;
+  let vencidas = 0;
+  let foraDoMes = 0;
+  let semData = 0;
   for (const p of montados) {
     if (contagem[p.kpi] != null) contagem[p.kpi] += 1;
     else contagem.sem_dado += 1;
-    if (p.atrasada) atrasadas += 1;
+    const semMedicao = p.situacao_medicao === 'sem_medicao' || !p.data_medicao;
+    if (semMedicao) semData += 1;
+    else if (p.fora_do_mes || medicaoAtrasada(p.data_medicao, hoje)) foraDoMes += 1;
+    if (!semMedicao && (p.situacao_medicao === 'atrasada' || p.atrasada)) vencidas += 1;
   }
   const estoque = pneusRecorte.filter((p) => p.status_pneu === 'estoque').length;
   const recapagem = pneusRecorte.filter((p) => p.status_pneu === 'recapagem').length;
-  const filiaisPendentes = filiaisVisao.filter((f) => f.situacao.codigo !== 'ok').length;
+  const filiaisPendentes = filiaisVisao.filter((f) => f.situacao_executiva !== 'controlada').length;
   const filiaisCriticas = filiaisVisao.filter((f) => f.situacao_executiva === 'critica').length;
 
   const rotuloFilial = filtroSituacao || filtroEstrutural ? 'Filiais no recorte' : 'Filiais';
@@ -468,7 +550,7 @@ export function agregarVisao({
       comparacao: comparacao?.criticos || null,
       sentido: 'menor_melhor',
     }),
-    card('atrasadas', 'Medições atrasadas', atrasadas, atrasadas > 0 ? 'atencao' : 'ok', {
+    card('atrasadas', 'Medição vencida', vencidas, vencidas > 0 ? 'atencao' : 'ok', {
       painel: 'pneus',
       foco: 'atrasadas',
       comparacao: comparacao?.atrasadas || null,
@@ -532,14 +614,15 @@ export function agregarVisao({
     filiais: filiaisVisao,
     saude: {
       condicao: [
-        { id: 'ok', label: 'OK', valor: contagem.ok, cor: 'ok' },
-        { id: 'monitorar', label: 'Monitoramento', valor: contagem.monitorar, cor: 'atencao' },
+        { id: 'ok', label: 'Boa condição', valor: contagem.ok, cor: 'ok' },
+        { id: 'monitorar', label: 'Acompanhamento', valor: contagem.monitorar, cor: 'atencao' },
         { id: 'critico', label: 'Substituição prioritária', valor: contagem.critico, cor: 'critico' },
         { id: 'sem_dado', label: 'Sem medição', valor: contagem.sem_dado, cor: 'cinza' },
       ],
       atualizacao: [
-        { id: 'atualizada', label: 'Atualizada', valor: montados.length - atrasadas, cor: 'ok' },
-        { id: 'atrasada', label: 'Atrasada', valor: atrasadas, cor: 'atencao' },
+        { id: 'atualizada', label: 'No mês', valor: Math.max(0, montados.length - foraDoMes - semData), cor: 'ok' },
+        { id: 'atrasada', label: 'Fora do mês', valor: foraDoMes, cor: 'atencao' },
+        { id: 'sem_medicao', label: 'Sem medição', valor: semData, cor: 'cinza' },
       ],
       localizacao: [
         { id: 'montado', label: 'Montado', valor: montados.length, cor: 'ok' },
@@ -693,7 +776,7 @@ function montarAlertas({ hoje, prazoOk, filiaisVisao, montados, pneusRecorte, in
   const ordem = { critica: 0, alta: 1, media: 2 };
   const grupos = [
     grupo('filiais_sem_atualizacao', 'Filiais sem atualização', 'alta', semAtualizacao),
-    grupo('veiculos_criticos', 'Veículos com pneu crítico', 'critica', veiculosCriticos),
+    grupo('veiculos_criticos', 'Veículos com substituição prioritária', 'critica', veiculosCriticos),
     grupo('medicoes_vencidas', 'Medições vencidas', 'alta', vencidas),
     grupo('cadastros_incompletos', 'Cadastros incompletos', 'media', incompletos),
     grupo('pendencias_recapagem', 'Pendências de recapagem', 'media', recap),
@@ -827,7 +910,7 @@ export function recortar(snapshot, { recorte = 'pneus', foco = '', filialId = nu
     else if (foco === 'recap_indicada') itens = itens.filter((p) => p.acao === 'recap');
   }
   if (recorte === 'filiais' && (foco === 'pendentes' || foco === 'nao_ok')) {
-    itens = itens.filter((f) => f.situacao?.codigo !== 'ok');
+    itens = itens.filter((f) => f.situacao_executiva !== 'controlada');
   }
   if (filialId && recorte === 'filiais') {
     itens = itens.filter((f) => Number(f.id) === Number(filialId));
@@ -910,6 +993,15 @@ async function emLotes(ids, fn, tamanho = 1500) {
 function mapPneu(row, hoje) {
   const montado = row.status_pneu === 'montado';
   const classe = montado ? classificarLinha(row) : { kpi: null, acao: null, menor_sulco: null };
+  const agora = new Date(`${String(hoje).slice(0, 10)}T15:00:00-03:00`);
+  const medicao = montado
+    ? situacaoMedicao({
+      dataMedicao: row.data_medicao,
+      diaVeiculo: row.dia_medicao,
+      diaFilial: row.filial_dia_medicao,
+      agora,
+    })
+    : null;
   return {
     id: Number(row.id),
     filial_id: Number(row.filial_id),
@@ -925,10 +1017,26 @@ function mapPneu(row, hoje) {
     tipo: row.tipo_codigo || row.tipo || '',
     tipo_codigo: row.tipo_codigo || row.tipo || '',
     data_medicao: row.data_medicao || null,
-    atrasada: montado ? medicaoAtrasada(row.data_medicao, hoje) : false,
+    dia_medicao: row.dia_medicao ?? null,
+    filial_dia_medicao: row.filial_dia_medicao ?? null,
+    situacao_medicao: medicao?.situacao || null,
+    sem_medicao: medicao?.situacao === 'sem_medicao',
+    atrasada: medicao?.situacao === 'atrasada',
+    fora_do_mes: montado ? medicaoAtrasada(row.data_medicao, hoje) : false,
     kpi: classe.kpi,
+    condicao: montado ? kpiLabel(classe.kpi) : null,
     acao: classe.acao,
     menor_sulco: classe.menor_sulco,
+    sulco_externo: numeroOuNulo(row.sulco_externo),
+    sulco_central: numeroOuNulo(row.sulco_central),
+    sulco_interno: numeroOuNulo(row.sulco_interno),
+    sulco_auxiliar: numeroOuNulo(row.sulco_auxiliar),
+    sulco_mm: numeroOuNulo(row.sulco_mm),
+    pressao_psi: numeroOuNulo(row.pressao_psi),
+    perfil_sulco: montado
+      ? especificacaoMedicao(row.tipo_codigo || row.tipo, row.layout_pneus).sulco
+      : null,
+    risco_imediato: montado && classe.kpi === 'critico' && papelPosicao(row.posicao) === 'direcional',
     recap_enviado_em: row.recap_enviado_em ? String(row.recap_enviado_em).slice(0, 10) : null,
   };
 }
@@ -976,7 +1084,8 @@ async function montarSnapshot(db, filtros, hoje) {
   const [veiculosRows, pneusRows, vagas] = await Promise.all([
     db.prepare(`
       SELECT v.id, v.placa, v.apelido, v.tipo, v.tipo_codigo, v.layout_pneus, v.filial_id,
-             v.km_atual, v.hr_atual, v.ativo, f.nome AS filial_nome
+             v.km_atual, v.hr_atual, v.ativo, v.dia_medicao, v.cadastro_completo,
+             f.nome AS filial_nome, f.dia_medicao AS filial_dia_medicao
       FROM veiculos v
       JOIN filiais f ON f.id = v.filial_id
       WHERE v.ativo = 1 AND v.filial_id = ANY(?::bigint[])
@@ -987,8 +1096,9 @@ async function montarSnapshot(db, filtros, hoje) {
              f.nome AS filial_nome,
              v.placa, v.apelido, v.tipo, v.tipo_codigo, v.layout_pneus, v.km_atual, v.hr_atual,
              v.filial_id AS veiculo_filial_id, v.ativo AS veiculo_ativo,
+             v.dia_medicao, f.dia_medicao AS filial_dia_medicao,
              um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
-             um.inspecao_danos, um.data_medicao
+             um.pressao_psi, um.inspecao_danos, um.data_medicao
       FROM pneus p
       JOIN filiais f ON f.id = p.filial_id
       LEFT JOIN veiculos v ON v.id = p.veiculo_id

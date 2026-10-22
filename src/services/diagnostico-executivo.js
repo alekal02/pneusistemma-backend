@@ -30,6 +30,16 @@ const PONTOS_QUATRO = ['sulco_externo', 'sulco_central', 'sulco_interno', 'sulco
 
 const ORDEM_CLASSE = { critico: 0, monitoramento: 1, sem_dados: 2, sem_risco: 3 };
 
+/** Na visão executiva, ausência de data é sem medição. Não vira medição vencida. */
+export function situacaoMedicaoExecutiva({ dataMedicao, diaVeiculo, diaFilial, agora } = {}) {
+  const base = situacaoMedicao({ dataMedicao, diaVeiculo, diaFilial, agora });
+  const bruto = dataMedicao == null || dataMedicao === '' ? '' : String(dataMedicao).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bruto)) {
+    return { ...base, situacao: 'sem_medicao', medida: null };
+  }
+  return base;
+}
+
 export function ehMatriz(codigo) {
   return String(codigo || '').trim().toUpperCase() === 'MATRIZ';
 }
@@ -211,7 +221,7 @@ export function classificarVeiculoExecutivo(veiculo, pneusMontados, { diaFilial 
     );
     const kpi = bucketKpi(aval);
     const completa = medicaoPerfilCompleta(pneu, veiculo.tipo, veiculo.layout_pneus);
-    const situacao = situacaoMedicao({
+    const situacao = situacaoMedicaoExecutiva({
       dataMedicao: pneu.data_medicao,
       diaVeiculo: veiculo.dia_medicao,
       diaFilial,
@@ -365,6 +375,22 @@ export function classificarFilialExecutiva(veiculos) {
     pct_sem_dados: decisao.pct_sem_dados,
     riscos_imediatos: riscosImediatos,
     justificativa,
+  };
+}
+
+export function filtrarFiliaisPorSituacao(diagnostico, situacao) {
+  if (!situacao || !diagnostico?.filiais) return diagnostico;
+  const campo = {
+    ok: 'pneus_sem_alerta',
+    monitorar: 'pneus_atencao',
+    critico: 'pneus_criticos',
+    sem_dado: 'pneus_sem_dados',
+    sem_medicao: 'pneus_sem_dados',
+  }[situacao];
+  if (!campo) return diagnostico;
+  return {
+    ...diagnostico,
+    filiais: diagnostico.filiais.filter((filial) => Number(filial[campo]) > 0),
   };
 }
 
