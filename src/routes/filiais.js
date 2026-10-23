@@ -40,6 +40,7 @@ import {
   calcularPendenciasFilial,
   calcularResumoFilial,
   carregarPainelFiliais,
+  revisaoPainelFiliais,
 } from '../services/filiais-painel.js';
 import { camposTipoVeiculo } from '../equipamento-tipos.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
@@ -72,6 +73,7 @@ router.get('/', async (req, res, next) => {
   try {
     const db = getDb();
     const escopo = filiaisEscopoIds(req);
+    const inicio = revisaoPainelFiliais(escopo);
     let sql = `
       SELECT f.*,
         (SELECT login FROM usuarios u
@@ -110,6 +112,7 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    marcarRevisao(res, escopo, inicio, null);
     res.json(resultado);
   } catch (err) {
     next(err);
@@ -122,6 +125,7 @@ router.get('/compras/consolidado', async (req, res, next) => {
     const db = getDb();
     const limites = getLimites();
     const escopo = filiaisEscopoIds(req);
+    const inicio = revisaoPainelFiliais(escopo);
     let sql = `SELECT id, nome, codigo, contrato FROM filiais WHERE ativo = 1`;
     const params = [];
     if (escopo?.length) {
@@ -151,7 +155,7 @@ router.get('/compras/consolidado', async (req, res, next) => {
     const totalRecap = porFilial.reduce((s, f) => s + f.compras.pneus_para_recap, 0);
     const totalMonitorar = porFilial.reduce((s, f) => s + f.compras.pneus_monitorar, 0);
 
-    res.json({
+    res.json(marcarRevisao(res, escopo, inicio, {
       totais: {
         pneus_para_comprar: totalComprar,
         pneus_para_recap: totalRecap,
@@ -163,10 +167,22 @@ router.get('/compras/consolidado', async (req, res, next) => {
         || f.compras.pneus_monitorar > 0
       ),
       limites,
-    });
+    }));
   } catch (err) {
     next(err);
   }
+});
+
+function marcarRevisao(res, escopo, inicio, corpo) {
+  const estavel = inicio === revisaoPainelFiliais(escopo);
+  if (estavel) res.set('X-Painel-Revisao', inicio);
+  if (corpo && !Array.isArray(corpo)) corpo.revisao = estavel ? inicio : null;
+  return corpo;
+}
+
+/** Selo em memória do escopo. Não lê frota nem medição. */
+router.get('/revisao', (req, res) => {
+  res.json({ revisao: revisaoPainelFiliais(filiaisEscopoIds(req)) });
 });
 
 router.get('/diagnostico-executivo', async (req, res, next) => {
@@ -178,13 +194,14 @@ router.get('/diagnostico-executivo', async (req, res, next) => {
     if (filialId && !assertFilialNoEscopo(req, filialId)) {
       return res.status(403).json({ erro: 'Filial fora do seu escopo' });
     }
+    const inicio = revisaoPainelFiliais(escopo);
     const diagnostico = await consultarDiagnosticoExecutivo(db, {
       escopo,
       tipo: req.query.tipo || null,
       incluirMatriz,
       filialId,
     });
-    res.json(diagnostico);
+    res.json(marcarRevisao(res, escopo, inicio, diagnostico));
   } catch (err) {
     next(err);
   }

@@ -25,6 +25,7 @@ import {
   limparCacheFrotaExecutiva,
   obterFrotaExecutiva,
 } from './frota-executiva-compartilhada.js';
+import { invalidarPainelFiliais } from './filiais-painel.js';
 
 /** Validade da medição: o mês corrente (America/Sao_Paulo). Fora do mês, ou sem data, não está atualizada. */
 export const VALIDADE_MEDICAO = 'mes_corrente';
@@ -89,6 +90,7 @@ export function invalidarIndicadoresExecutivos(filialId = null) {
   invalidarSnapshotsExecutivos(filialId);
   invalidarFrotaExecutiva(filialId);
   invalidarDiagnosticoExecutivo(filialId);
+  invalidarPainelFiliais(filialId);
 }
 
 export function isoHoje(agora = new Date()) {

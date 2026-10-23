@@ -1,9 +1,26 @@
 /**
  * Painel de várias filiais numa única leitura.
  * A última medição segue por pneu (LATERAL), apoiada em idx_medicoes_pneu_recente.
- * Não há cache entre requisições: cada chamada só recebe os ids já autorizados.
+ *
+ * A chave é só a lista de filiais que a rota já autorizou. Admin e gerente
+ * não compartilham entrada. Um pedido menor pode fatiar uma entrada maior,
+ * e a resposta devolve apenas os ids pedidos.
+ *
+ * A frota do diagnóstico executivo não alimenta este mapa: o painel exige
+ * cadastro completo, conta descarte e monta a recapagem pelas movimentações.
+ * Reusar aquelas linhas mudaria os totais.
+ *
+ * Validade curta, a mesma da frota executiva. Gravação confirmada chama
+ * invalidarPainelFiliais. Duas chamadas simultâneas da mesma chave esperam
+ * a mesma ida ao banco: a lista pede a base e o consolidado pede a base
+ * mais as recapagens.
  */
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
+import {
+  VALIDADE_SNAPSHOT_EXECUTIVO_MS,
+  agoraCacheExecutivo,
+  filaUnica,
+} from './frota-executiva-compartilhada.js';
 import { filtroCadastroCompleto } from '../schema-colunas.js';
 import { classificarSulco, limitesDoVeiculo, menorSulco } from '../limites.js';
 import {
@@ -156,36 +173,149 @@ export function sqlsDoPainel({
   return saida;
 }
 
-export async function carregarPainelFiliais(db, filialIds, { comPendencias = false } = {}) {
-  const ids = normalizarIds(filialIds);
-  const mapa = new Map(ids.map((id) => [id, bucketVazio()]));
-  if (!ids.length) return mapa;
+const MAX_PAINEL = 8;
+let geracaoPainel = 0;
+let pisoGlobal = 0;
+const pisoFilial = new Map();
+const cachePainel = new Map();
+const voosBase = new Map();
+const voosRecap = new Map();
+const seloPainel = new Map();
+const contagemPainel = { leituras: 0, reusos: 0, recaps: 0 };
 
-  const cadVeiculo = await filtroCadastroCompleto(db, 'veiculos');
-  const cadVeiculoAlias = await filtroCadastroCompleto(db, 'veiculos', 'v.cadastro_completo');
-  const cadPneu = await filtroCadastroCompleto(db, 'pneus');
-  const sql = sqlsDoPainel({
-    cadVeiculo,
-    cadVeiculoAlias,
-    cadPneu,
-    quantidade: ids.length,
-    comPendencias,
+export function limparCachePainelFiliais() {
+  geracaoPainel += 1;
+  pisoGlobal = 0;
+  pisoFilial.clear();
+  cachePainel.clear();
+  voosBase.clear();
+  voosRecap.clear();
+  seloPainel.clear();
+  contagemPainel.leituras = 0;
+  contagemPainel.reusos = 0;
+  contagemPainel.recaps = 0;
+}
+
+function marcaPainel(chave) {
+  return `${geracaoPainel}:${seloPainel.get(chave) || 0}`;
+}
+
+function chaveIds(ids) {
+  return ids.join(',');
+}
+
+function idsDaChave(chave) {
+  return String(chave || '').split(',').map(Number).filter((id) => Number.isInteger(id) && id > 0);
+}
+
+function chaveCobreFilial(chave, filialId) {
+  return idsDaChave(chave).includes(Number(filialId));
+}
+
+/** filialId numérico: só as chaves que incluem a unidade. Sem id: todas. */
+export function invalidarPainelFiliais(filialId = null) {
+  const id = Number(filialId);
+  const todas = !Number.isInteger(id) || id <= 0;
+  if (todas) pisoGlobal += 1;
+  else pisoFilial.set(id, (pisoFilial.get(id) || 0) + 1);
+  const chaves = new Set([...cachePainel.keys(), ...voosBase.keys(), ...voosRecap.keys()]);
+  for (const chave of chaves) {
+    if (!todas && !chaveCobreFilial(chave, id)) continue;
+    seloPainel.set(chave, (seloPainel.get(chave) || 0) + 1);
+    cachePainel.delete(chave);
+    voosBase.delete(chave);
+    voosRecap.delete(chave);
+  }
+}
+
+/**
+ * Selo barato, sem SQL. Escopo null é a leitura irrestrita (admin).
+ * Uma lista de ids só muda quando o piso global muda ou uma dessas filiais muda.
+ */
+export function revisaoPainelFiliais(escopo) {
+  if (escopo == null) {
+    let soma = pisoGlobal;
+    for (const valor of pisoFilial.values()) soma += valor;
+    return `irrestrito:${soma}`;
+  }
+  const ids = normalizarIds(escopo);
+  const partes = ids.map((id) => `${id}.${pisoFilial.get(id) || 0}`);
+  return `${pisoGlobal}|${partes.join(',')}`;
+}
+
+export function estatisticasPainelFiliais() {
+  return {
+    leituras: contagemPainel.leituras,
+    reusos: contagemPainel.reusos,
+    recaps: contagemPainel.recaps,
+    entradas: cachePainel.size,
+    emVoo: voosBase.size + voosRecap.size,
+  };
+}
+
+function fresca(hit) {
+  return Boolean(hit) && (agoraCacheExecutivo() - hit.em < VALIDADE_SNAPSHOT_EXECUTIVO_MS);
+}
+
+function guardarPainel(chave, mapa, ids, temRecaps, marca) {
+  if (marca !== marcaPainel(chave)) return;
+  cachePainel.set(chave, {
+    em: agoraCacheExecutivo(),
+    mapa,
+    ids,
+    temRecaps,
   });
+  if (cachePainel.size <= MAX_PAINEL) return;
+  const antigo = [...cachePainel.entries()].sort((a, b) => a[1].em - b[1].em)[0];
+  if (antigo && antigo[0] !== chave) cachePainel.delete(antigo[0]);
+}
 
-  const tarefas = [
-    db.prepare(sql.veiculos).all(...ids),
-    db.prepare(sql.contagens).all(...ids),
-    db.prepare(sql.montados).all(...ids),
-  ];
-  if (comPendencias) tarefas.push(db.prepare(sql.recaps).all(...ids));
+function fatiarMapa(mapa, ids) {
+  const saida = new Map();
+  for (const id of ids) {
+    const bucket = mapa.get(id);
+    if (!bucket) {
+      saida.set(id, bucketVazio());
+      continue;
+    }
+    saida.set(id, {
+      veiculos: bucket.veiculos,
+      counts: bucket.counts,
+      montados: bucket.montados,
+      recaps: bucket.recaps.slice(),
+    });
+  }
+  return saida;
+}
 
-  const [veiculos, contagens, montados, recaps] = await Promise.all(tarefas);
+function lerExato(ids, comPendencias) {
+  const hit = cachePainel.get(chaveIds(ids));
+  if (!fresca(hit)) return null;
+  if (comPendencias && !hit.temRecaps) return null;
+  contagemPainel.reusos += 1;
+  return hit.mapa;
+}
 
-  for (const veiculo of veiculos) {
+function lerSuperset(ids, comPendencias) {
+  let melhor = null;
+  for (const hit of cachePainel.values()) {
+    if (!fresca(hit)) continue;
+    if (comPendencias && !hit.temRecaps) continue;
+    if (hit.ids.length <= ids.length) continue;
+    if (!ids.every((id) => hit.ids.includes(id))) continue;
+    if (!melhor || hit.ids.length < melhor.ids.length) melhor = hit;
+  }
+  if (!melhor) return null;
+  contagemPainel.reusos += 1;
+  return fatiarMapa(melhor.mapa, ids);
+}
+
+function distribuir(mapa, veiculos, contagens, montados, recaps) {
+  for (const veiculo of veiculos || []) {
     const bucket = mapa.get(Number(veiculo.filial_id));
     if (bucket) bucket.veiculos.push(veiculo);
   }
-  for (const linha of contagens) {
+  for (const linha of contagens || []) {
     const bucket = mapa.get(Number(linha.filial_id));
     if (!bucket) continue;
     bucket.counts = {
@@ -194,7 +324,7 @@ export async function carregarPainelFiliais(db, filialIds, { comPendencias = fal
       em_estoque: Number(linha.em_estoque || 0),
     };
   }
-  for (const pneu of montados) {
+  for (const pneu of montados || []) {
     const bucket = mapa.get(Number(pneu.filial_id));
     if (bucket) bucket.montados.push(pneu);
   }
@@ -203,6 +333,84 @@ export async function carregarPainelFiliais(db, filialIds, { comPendencias = fal
     if (bucket) bucket.recaps.push(recap);
   }
   return mapa;
+}
+
+async function filtrosDoPainel(db) {
+  const cadVeiculo = await filtroCadastroCompleto(db, 'veiculos');
+  const cadVeiculoAlias = await filtroCadastroCompleto(db, 'veiculos', 'v.cadastro_completo');
+  const cadPneu = await filtroCadastroCompleto(db, 'pneus');
+  return { cadVeiculo, cadVeiculoAlias, cadPneu };
+}
+
+async function preencherBase(db, ids) {
+  const filtros = await filtrosDoPainel(db);
+  const sql = sqlsDoPainel({ ...filtros, quantidade: ids.length, comPendencias: false });
+  contagemPainel.leituras += 1;
+  const [veiculos, contagens, montados] = await Promise.all([
+    db.prepare(sql.veiculos).all(...ids),
+    db.prepare(sql.contagens).all(...ids),
+    db.prepare(sql.montados).all(...ids),
+  ]);
+  return distribuir(new Map(ids.map((id) => [id, bucketVazio()])), veiculos, contagens, montados);
+}
+
+async function consultarRecaps(db, ids) {
+  const filtros = await filtrosDoPainel(db);
+  const sql = sqlsDoPainel({ ...filtros, quantidade: ids.length, comPendencias: true });
+  contagemPainel.recaps += 1;
+  return db.prepare(sql.recaps).all(...ids);
+}
+
+async function garantirBase(db, ids) {
+  const chave = chaveIds(ids);
+  const hit = cachePainel.get(chave);
+  if (fresca(hit)) return hit.mapa;
+  const amplo = lerSuperset(ids, false);
+  if (amplo) return amplo;
+  const marca = marcaPainel(chave);
+  return filaUnica(voosBase, chave, async () => {
+    const ja = cachePainel.get(chave);
+    if (fresca(ja)) return ja.mapa;
+    const carregado = await preencherBase(db, ids);
+    guardarPainel(chave, carregado, ids, false, marca);
+    return carregado;
+  });
+}
+
+async function carregarComRecaps(db, ids) {
+  const cheio = lerExato(ids, true) || lerSuperset(ids, true);
+  if (cheio) return cheio;
+  const chave = chaveIds(ids);
+  const marca = marcaPainel(chave);
+  return filaUnica(voosRecap, chave, async () => {
+    const ja = lerExato(ids, true) || lerSuperset(ids, true);
+    if (ja) return ja;
+    const base = await garantirBase(db, ids);
+    const hit = cachePainel.get(chave);
+    const proprio = Boolean(hit && hit.mapa === base && fresca(hit));
+    const destino = proprio ? base : fatiarMapa(base, ids);
+    const recaps = await consultarRecaps(db, ids);
+    if (marca !== marcaPainel(chave)) return distribuir(destino, [], [], [], recaps);
+    distribuir(destino, [], [], [], recaps);
+    if (proprio) {
+      hit.temRecaps = true;
+      hit.em = agoraCacheExecutivo();
+    } else {
+      guardarPainel(chave, destino, ids, true, marca);
+    }
+    return destino;
+  });
+}
+
+export async function carregarPainelFiliais(db, filialIds, { comPendencias = false } = {}) {
+  const ids = normalizarIds(filialIds);
+  if (!ids.length) return new Map();
+  if (comPendencias) return carregarComRecaps(db, ids);
+  const exato = lerExato(ids, false);
+  if (exato) return exato;
+  const amplo = lerSuperset(ids, false);
+  if (amplo) return amplo;
+  return garantirBase(db, ids);
 }
 
 export function calcularResumoFilial(painel, tipoFiltro = null) {

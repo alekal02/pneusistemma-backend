@@ -197,6 +197,7 @@ async function main() {
     calcularResumoFilial,
     calcularPendenciasFilial,
     sqlsDoPainel,
+    limparCachePainelFiliais,
   } = await import('../src/services/filiais-painel.js');
   const { filtroCadastroCompleto } = await import('../src/schema-colunas.js');
 
@@ -221,6 +222,12 @@ async function main() {
   };
 
   const db = getDb();
+  await db.exec(`
+    ALTER TABLE veiculos ADD COLUMN IF NOT EXISTS cadastro_completo INTEGER DEFAULT 1;
+    ALTER TABLE pneus ADD COLUMN IF NOT EXISTS cadastro_completo INTEGER DEFAULT 1;
+    ALTER TABLE medicoes ADD COLUMN IF NOT EXISTS pressao_psi NUMERIC;
+  `);
+  limparCacheColunas();
   const hash = bcrypt.hashSync(SENHA, 10);
   const filiaisCriadas = [];
 
@@ -402,6 +409,7 @@ async function main() {
     .map((f) => Number(f.id));
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   const httpLista = await medir(() => req('GET', '/filiais', admin));
   assert.equal(httpLista.valor.status, 200);
   const lista = httpLista.valor.dados;
@@ -410,6 +418,7 @@ async function main() {
   assert.equal(lista.filter((f) => f.ativo === 1).length, lista.length);
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   const leve = await medir(() => req('GET', '/filiais?leve=1', admin));
   assert.equal(leve.valor.status, 200);
   assert.equal(leve.valor.dados.length, FILIAIS + 1);
@@ -418,6 +427,7 @@ async function main() {
   assert.equal(leve.classe.agrupada, 0);
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   const servicoLista = await medir(() => carregarPainelFiliais(db, idsAtivos));
   for (const filial of lista) {
     const calc = calcularResumoFilial(servicoLista.valor.get(Number(filial.id)));
@@ -436,6 +446,7 @@ async function main() {
   assert.equal(idsLista.includes(inativaId), false);
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   const httpCons = await medir(() => req('GET', '/filiais/compras/consolidado', admin));
   assert.equal(httpCons.valor.status, 200);
   const cons = httpCons.valor.dados;
@@ -446,6 +457,7 @@ async function main() {
   assert.equal(cons.filiais.some((f) => f.codigo === 'MATRIZ' || f.codigo === 'INATIVA'), false);
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   const servicoCons = await medir(() => carregarPainelFiliais(db, idsAtivos, { comPendencias: true }));
   for (const filial of cons.filiais) {
     const painel = servicoCons.valor.get(Number(filial.filial_id));
@@ -523,18 +535,22 @@ async function main() {
   assert.equal(comprasLista.dados.length, FILIAIS + 1);
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   const httpListaAtraso = await medir(() => req('GET', '/filiais', admin), { atrasoMs: ATRASO_REDE_MS });
   limparCacheColunas();
+  limparCachePainelFiliais();
   const servicoListaAtraso = await medir(
     () => carregarPainelFiliais(db, idsAtivos),
     { atrasoMs: ATRASO_REDE_MS },
   );
   limparCacheColunas();
+  limparCachePainelFiliais();
   const httpConsAtraso = await medir(
     () => req('GET', '/filiais/compras/consolidado', admin),
     { atrasoMs: ATRASO_REDE_MS },
   );
   limparCacheColunas();
+  limparCachePainelFiliais();
   const servicoConsAtraso = await medir(
     () => carregarPainelFiliais(db, idsAtivos, { comPendencias: true }),
     { atrasoMs: ATRASO_REDE_MS },
@@ -543,6 +559,7 @@ async function main() {
   assert.ok(servicoConsAtraso.tempo < httpConsAtraso.tempo);
 
   limparCacheColunas();
+  limparCachePainelFiliais();
   medidor.consultas = [];
   medidor.ativo = true;
   const tConc = performance.now();
@@ -582,6 +599,36 @@ async function main() {
   const invalidos = await medir(() => carregarPainelFiliais(db, [null, 'abc', -1, 0]));
   assert.equal(invalidos.valor.size, 0);
   assert.equal(invalidos.classe.total, 0);
+
+  limparCacheColunas();
+  limparCachePainelFiliais();
+  const abertura = await medir(() => Promise.all([
+    req('GET', '/filiais', admin),
+    req('GET', '/filiais/compras/consolidado', admin),
+    req('GET', '/filiais/diagnostico-executivo', admin),
+  ]));
+  const repetida = await medir(() => Promise.all([
+    req('GET', '/filiais', admin),
+    req('GET', '/filiais/compras/consolidado', admin),
+    req('GET', '/filiais/diagnostico-executivo', admin),
+  ]));
+  abertura.valor.forEach((item, indice) => {
+    assert.equal(item.status, 200, `${indice} ${JSON.stringify(item.dados)}`);
+  });
+  assert.equal(abertura.valor[0].dados.length, lista.length);
+  assert.equal(
+    abertura.valor[1].dados.totais.pneus_para_comprar,
+    httpCons.valor.dados.totais.pneus_para_comprar,
+  );
+  assert.ok(repetida.classe.total < abertura.classe.total, 'voltar à tela não repete a leitura');
+  assert.equal(repetida.valor[1].dados.totais.pneus_para_comprar, abertura.valor[1].dados.totais.pneus_para_comprar);
+  const somaFria = httpLista.classe.total + httpCons.classe.total;
+  assert.ok(abertura.classe.total < somaFria, `${abertura.classe.total} < ${somaFria}`);
+
+  const foraDepois = await medir(() => req('GET', '/filiais', gerente));
+  assert.equal(foraDepois.valor.dados.length, 1);
+  assert.equal(foraDepois.valor.dados[0].codigo, 'U01');
+  assert.ok(!foraDepois.valor.dados.some((f) => f.codigo && f.codigo !== 'U01'));
 
   const indexes = await db.prepare(`
     SELECT indexname FROM pg_indexes
@@ -653,6 +700,9 @@ async function main() {
     consolidado_servico_atraso_2ms: resumoMedicao('consolidado-servico-atraso', servicoConsAtraso),
     concorrencia_8_lista_ms: Math.round(tempoConc * 10) / 10,
     concorrencia_8_consultas: consultasConc,
+    abertura_simultanea: resumoMedicao('abertura', abertura),
+    abertura_repetida: resumoMedicao('repetida', repetida),
+    soma_fria_lista_consolidado: somaFria,
     indexes: indexes.map((i) => i.indexname),
     planos: {
       montados: (planos.montados.match(/idx_\w+/g) || []).filter((v, i, a) => a.indexOf(v) === i),
