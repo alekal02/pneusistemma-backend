@@ -9,6 +9,7 @@ import {
   verificarSenha,
   filiaisEscopoIds,
   isAdmin,
+  revogarSessoesDoUsuario,
 } from '../auth.js';
 import { excluirFilialCompleta, excluirPneuEstoqueOuDescarte, excluirVeiculoCompleto } from '../services/limpar-filial.js';
 import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
@@ -1266,17 +1267,20 @@ router.post('/:id/reset-senha', async (req, res, next) => {
       return res.json({ mensagem: `Usuário ${login.trim().toLowerCase()} criado com a nova senha` });
     }
 
-    await db.prepare(`
-      UPDATE usuarios SET
-        senha_hash = ?,
-        login = COALESCE(?, login),
-        updated_at = NOW()
-      WHERE id = ?
-    `).run(
-      hashSenha(senha),
-      login?.trim()?.toLowerCase() || null,
-      user.id
-    );
+    await db.transaction(async () => {
+      await db.prepare(`
+        UPDATE usuarios SET
+          senha_hash = ?,
+          login = COALESCE(?, login),
+          updated_at = NOW()
+        WHERE id = ?
+      `).run(
+        hashSenha(senha),
+        login?.trim()?.toLowerCase() || null,
+        user.id
+      );
+      await revogarSessoesDoUsuario(user.id);
+    });
 
     res.json({ mensagem: 'Senha da filial atualizada' });
   } catch (err) {

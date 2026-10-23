@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { config } from './config.js';
@@ -38,10 +39,66 @@ export function verificarSenha(senha, hash) {
   return bcrypt.compareSync(senha, hash);
 }
 
-export function emitirToken(usuario) {
+/**
+ * Uma ida ao banco: valida usuário ativo e sessão, e só grava visto_em
+ * se o toque anterior já passou do intervalo configurado.
+ */
+export const SQL_AUTENTICAR_SESSAO = `
+WITH alvo AS (
+  SELECT
+    s.id AS sessao_id,
+    s.visto_em AS sessao_visto_em,
+    u.id,
+    u.login,
+    u.papel,
+    u.cargo,
+    u.whatsapp,
+    u.filial_id,
+    u.ultimo_login,
+    u.ativo,
+    f.nome AS filial_nome,
+    f.codigo AS filial_codigo
+  FROM sessoes_login s
+  JOIN usuarios u ON u.id = s.usuario_id AND u.ativo = 1
+  LEFT JOIN filiais f ON f.id = u.filial_id
+  WHERE s.id = ?
+    AND s.usuario_id = ?
+    AND s.revogada_em IS NULL
+    AND s.expira_em > NOW()
+    AND s.visto_em > NOW() - (? * INTERVAL '1 minute')
+),
+toque AS (
+  UPDATE sessoes_login
+  SET visto_em = NOW()
+  FROM alvo
+  WHERE sessoes_login.id = alvo.sessao_id
+    AND alvo.sessao_visto_em <= NOW() - (? * INTERVAL '1 minute')
+  RETURNING sessoes_login.id
+)
+SELECT
+  alvo.id,
+  alvo.login,
+  alvo.papel,
+  alvo.cargo,
+  alvo.whatsapp,
+  alvo.filial_id,
+  alvo.ultimo_login,
+  alvo.ativo,
+  alvo.filial_nome,
+  alvo.filial_codigo,
+  alvo.sessao_id
+FROM alvo
+LEFT JOIN toque ON toque.id = alvo.sessao_id
+`;
+
+export function emitirToken(usuario, sid) {
+  if (!sid) {
+    throw new Error('Sessão ausente');
+  }
   return jwt.sign(
     {
       sub: usuario.id,
+      sid,
       login: usuario.login,
       papel: usuario.papel,
       cargo: usuario.cargo || null,
@@ -50,6 +107,74 @@ export function emitirToken(usuario) {
     config.jwtSecret,
     { expiresIn: config.jwtExpiresIn }
   );
+}
+
+export function lerPayloadToken(token) {
+  try {
+    return { ok: true, payload: jwt.verify(token, config.jwtSecret) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Token antigo, sem sid, não pode ser renovado nem reaproveitado. */
+export function recusaPayload(payload) {
+  if (!payload?.sid || payload.sub == null) return 'Sessão expirada ou inválida';
+  return null;
+}
+
+function montarUsuarioSessao(row) {
+  return {
+    id: row.id,
+    login: row.login,
+    papel: row.papel,
+    cargo: row.cargo || null,
+    whatsapp: row.whatsapp || null,
+    filial_id: row.filial_id ?? null,
+    ultimo_login: row.ultimo_login || null,
+    ativo: row.ativo,
+    sessao_id: row.sessao_id,
+    filial: row.filial_id
+      ? { id: row.filial_id, nome: row.filial_nome, codigo: row.filial_codigo }
+      : null,
+  };
+}
+
+export async function criarSessao(usuarioId, db = getDb()) {
+  const sid = randomUUID();
+  await db.prepare(`
+    INSERT INTO sessoes_login (id, usuario_id, expira_em)
+    VALUES (?, ?, NOW() + (? * INTERVAL '1 hour'))
+  `).run(sid, usuarioId, config.sessaoDuracaoHoras);
+  return sid;
+}
+
+export async function autenticarSessao(db, usuarioId, sid) {
+  const row = await db.prepare(SQL_AUTENTICAR_SESSAO).get(
+    sid,
+    usuarioId,
+    config.sessaoOciosidadeMin,
+    config.sessaoToqueMin,
+  );
+  if (!row) return null;
+  return montarUsuarioSessao(row);
+}
+
+export async function revogarSessao(sid, db = getDb()) {
+  if (!sid) return;
+  await db.prepare(`
+    UPDATE sessoes_login
+    SET revogada_em = NOW()
+    WHERE id = ? AND revogada_em IS NULL
+  `).run(sid);
+}
+
+export async function revogarSessoesDoUsuario(usuarioId, db = getDb()) {
+  await db.prepare(`
+    UPDATE sessoes_login
+    SET revogada_em = NOW()
+    WHERE usuario_id = ? AND revogada_em IS NULL
+  `).run(usuarioId);
 }
 
 export function usuarioPublico(row, filial = null) {
@@ -92,18 +217,23 @@ export async function requireAuth(req, res, next) {
     return res.status(401).json({ erro: 'Não autenticado' });
   }
 
-  let payload;
-  try {
-    payload = jwt.verify(token, config.jwtSecret);
-  } catch {
+  const lido = lerPayloadToken(token);
+  if (!lido.ok) {
     return res.status(401).json({ erro: 'Sessão expirada ou inválida' });
+  }
+  const recusa = recusaPayload(lido.payload);
+  if (recusa) {
+    return res.status(401).json({ erro: recusa });
   }
 
   try {
-    const user = await carregarUsuario(payload.sub);
-    if (!user) return res.status(401).json({ erro: 'Usuário inválido ou inativo' });
+    const user = await autenticarSessao(getDb(), lido.payload.sub, lido.payload.sid);
+    if (!user) return res.status(401).json({ erro: 'Sessão expirada ou inválida' });
+    req.sessaoId = user.sessao_id;
+    delete user.sessao_id;
     req.user = user;
-    if (user.papel === 'presidente' && req.method !== 'GET' && req.method !== 'HEAD') {
+    const encerraPropriaSessao = req.path === '/logout';
+    if (user.papel === 'presidente' && req.method !== 'GET' && req.method !== 'HEAD' && !encerraPropriaSessao) {
       return res.status(403).json({
         erro: 'O painel do presidente é somente consulta. Nenhuma alteração foi gravada.',
         somente_leitura: true,

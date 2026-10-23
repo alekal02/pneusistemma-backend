@@ -13,6 +13,7 @@ import {
   decidirResetSenha,
   papelSemFilial,
   ehPresidenteReservado,
+  revogarSessoesDoUsuario,
 } from '../auth.js';
 
 const router = Router();
@@ -155,10 +156,13 @@ router.post('/:id/reset-senha', requireGerenteOuAdmin, async (req, res, next) =>
       return res.status(decisao.status).json({ erro: decisao.erro });
     }
 
-    await db.prepare(`
-      UPDATE usuarios SET senha_hash = ?, updated_at = NOW()
-      WHERE id = ?
-    `).run(hashSenha(senha), alvo.id);
+    await db.transaction(async () => {
+      await db.prepare(`
+        UPDATE usuarios SET senha_hash = ?, updated_at = NOW()
+        WHERE id = ?
+      `).run(hashSenha(senha), alvo.id);
+      await revogarSessoesDoUsuario(alvo.id);
+    });
 
     res.json({
       mensagem: `Senha de ${alvo.login} redefinida`,
@@ -210,23 +214,27 @@ router.patch('/:id', requireAdmin, async (req, res, next) => {
       ? (String(cargo).trim() || null)
       : (papel != null ? cargoPadrao(papelFinal) : alvo.cargo);
 
-    await db.prepare(`
-      UPDATE usuarios SET
-        ativo = COALESCE(?, ativo),
-        cargo = ?,
-        whatsapp = COALESCE(?, whatsapp),
-        papel = ?,
-        filial_id = ?,
-        updated_at = NOW()
-      WHERE id = ?
-    `).run(
-      ativo == null ? null : (ativo ? 1 : 0),
-      cargoFinal,
-      whatsapp != null ? String(whatsapp).replace(/\D/g, '') || null : null,
-      papelFinal,
-      filialFinal,
-      alvo.id
-    );
+    const desativou = ativo === false || ativo === 0 || ativo === '0';
+    await db.transaction(async () => {
+      await db.prepare(`
+        UPDATE usuarios SET
+          ativo = COALESCE(?, ativo),
+          cargo = ?,
+          whatsapp = COALESCE(?, whatsapp),
+          papel = ?,
+          filial_id = ?,
+          updated_at = NOW()
+        WHERE id = ?
+      `).run(
+        ativo == null ? null : (ativo ? 1 : 0),
+        cargoFinal,
+        whatsapp != null ? String(whatsapp).replace(/\D/g, '') || null : null,
+        papelFinal,
+        filialFinal,
+        alvo.id
+      );
+      if (desativou) await revogarSessoesDoUsuario(alvo.id);
+    });
 
     const row = await db.prepare(`
       SELECT u.*, f.nome as filial_nome, f.codigo as filial_codigo

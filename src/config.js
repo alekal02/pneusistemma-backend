@@ -18,6 +18,19 @@ function parseCorsOrigins(raw) {
 const nodeEnv = process.env.NODE_ENV || 'development';
 const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
 
+function inteiroPositivo(raw, padrao) {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : padrao;
+}
+
+/** Duração máxima da sessão e ociosidade. JWT_EXPIRES_IN não entra mais na conta. */
+const sessaoOciosidadeMin = inteiroPositivo(process.env.SESSAO_OCIOSIDADE_MIN, 30);
+const sessaoDuracaoHoras = inteiroPositivo(process.env.SESSAO_DURACAO_HORAS, 12);
+const sessaoToqueMinBruto = inteiroPositivo(process.env.SESSAO_TOQUE_MIN, 1);
+const sessaoToqueMin = sessaoToqueMinBruto >= sessaoOciosidadeMin
+  ? Math.max(1, sessaoOciosidadeMin - 1)
+  : sessaoToqueMinBruto;
+
 /** Connection string PostgreSQL (obrigatória) */
 function resolveDatabaseUrl() {
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL.trim();
@@ -40,7 +53,11 @@ export const config = {
   corsOrigin: corsOrigins[0],
   frontendUrl: (process.env.FRONTEND_URL || corsOrigins[0] || 'http://localhost:5173').replace(/\/$/, ''),
   jwtSecret: process.env.JWT_SECRET || 'pneu-dev-secret-altere-em-producao',
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  /** Segundos. A validade do JWT acompanha a duração máxima da sessão. */
+  jwtExpiresIn: sessaoDuracaoHoras * 60 * 60,
+  sessaoOciosidadeMin,
+  sessaoDuracaoHoras,
+  sessaoToqueMin,
   adminUser: process.env.ADMIN_USER || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || 'admin123',
   wuzapiBaseUrl: (process.env.WUZAPI_BASE_URL || 'http://localhost:8080').replace(/\/$/, ''),

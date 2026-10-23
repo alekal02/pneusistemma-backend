@@ -24,8 +24,12 @@ services:
         value: "true"
       - key: JWT_SECRET
         generateValue: true
-      - key: JWT_EXPIRES_IN
-        value: 7d
+      - key: SESSAO_OCIOSIDADE_MIN
+        value: "30"
+      - key: SESSAO_DURACAO_HORAS
+        value: "12"
+      - key: SESSAO_TOQUE_MIN
+        value: "1"
       - key: ADMIN_USER
         value: admin
       - key: ADMIN_PASSWORD

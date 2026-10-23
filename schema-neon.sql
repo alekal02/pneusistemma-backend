@@ -248,3 +248,15 @@ ON CONFLICT (chave) DO NOTHING;
 
 -- Usuários (admin, matriz, etc.) são criados automaticamente no 1º start da API
 -- (initDatabase / seedAuthAndFilial). Não precisa inserir aqui.
+
+-- Sessões de login. O boot da API também cria esta tabela.
+-- Pode ser executado sozinho. Não altera linhas operacionais.
+CREATE TABLE IF NOT EXISTS sessoes_login (
+  id TEXT PRIMARY KEY,
+  usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  visto_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expira_em TIMESTAMPTZ NOT NULL,
+  revogada_em TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_sessoes_login_usuario ON sessoes_login(usuario_id);

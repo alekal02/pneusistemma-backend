@@ -521,6 +521,19 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_wa_sessoes_expira ON whatsapp_sessoes(expira_em);
   `);
 
+  // Tabela vazia e idempotente. Não altera usuários, senhas, frota nem medições.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS sessoes_login (
+      id TEXT PRIMARY KEY,
+      usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      visto_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expira_em TIMESTAMPTZ NOT NULL,
+      revogada_em TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessoes_login_usuario ON sessoes_login(usuario_id);
+  `);
+
   if (bootManutencaoHabilitada()) {
     await seedEquipamentoTipos(db);
     await backfillTipoCodigoVeiculos(db);

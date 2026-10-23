@@ -6,7 +6,9 @@ import {
   emitirToken,
   usuarioPublico,
   requireAuth,
-  carregarUsuario,
+  criarSessao,
+  revogarSessao,
+  revogarSessoesDoUsuario,
 } from '../auth.js';
 
 const router = Router();
@@ -47,7 +49,8 @@ router.post('/login', async (req, res, next) => {
       ? { id: row.filial_id, nome: row.filial_nome, codigo: row.filial_codigo }
       : null;
 
-    const token = emitirToken(row);
+    const sid = await criarSessao(row.id);
+    const token = emitirToken(row, sid);
     res.json({
       token,
       usuario: usuarioPublico({ ...row, ultimo_login: new Date().toISOString() }, filial),
@@ -57,10 +60,14 @@ router.post('/login', async (req, res, next) => {
   }
 });
 
-router.get('/me', requireAuth, async (req, res, next) => {
+router.get('/me', requireAuth, (req, res) => {
+  res.json(usuarioPublico(req.user, req.user.filial));
+});
+
+router.post('/logout', requireAuth, async (req, res, next) => {
   try {
-    const user = await carregarUsuario(req.user.id);
-    res.json(usuarioPublico(user, user.filial));
+    await revogarSessao(req.sessaoId);
+    res.json({ mensagem: 'Sessão encerrada' });
   } catch (err) {
     next(err);
   }
@@ -79,12 +86,15 @@ router.post('/trocar-senha', requireAuth, async (req, res, next) => {
       return res.status(400).json({ erro: 'Senha atual incorreta' });
     }
 
-    await db.prepare(`
-      UPDATE usuarios SET senha_hash = ?, updated_at = NOW()
-      WHERE id = ?
-    `).run(hashSenha(senha_nova), req.user.id);
+    await db.transaction(async () => {
+      await db.prepare(`
+        UPDATE usuarios SET senha_hash = ?, updated_at = NOW()
+        WHERE id = ?
+      `).run(hashSenha(senha_nova), req.user.id);
+      await revogarSessoesDoUsuario(req.user.id);
+    });
 
-    res.json({ mensagem: 'Senha alterada com sucesso' });
+    res.json({ mensagem: 'Senha alterada. Entre novamente.' });
   } catch (err) {
     next(err);
   }
