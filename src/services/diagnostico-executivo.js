@@ -452,12 +452,44 @@ export function montarDiagnosticoExecutivo({
 
 const cacheDiagnostico = new Map();
 const voosDiagnostico = new Map();
+const seloDiagnostico = new Map();
 let geracaoDiagnostico = 0;
+
+function marcaDiagnostico(chave) {
+  return `${geracaoDiagnostico}:${seloDiagnostico.get(chave) || 0}`;
+}
+
+function diagnosticoAtingeFilial(chave, filialId) {
+  let obj;
+  try {
+    obj = JSON.parse(chave);
+  } catch {
+    return true;
+  }
+  if (obj.filialId != null && obj.filialId !== '') return Number(obj.filialId) === Number(filialId);
+  if (obj.escopo === 'irrestrito') return true;
+  if (!obj.escopo || obj.escopo === 'vazio') return false;
+  return String(obj.escopo).split(',').map(Number).includes(Number(filialId));
+}
 
 export function limparCacheDiagnosticoExecutivo() {
   geracaoDiagnostico += 1;
   cacheDiagnostico.clear();
   voosDiagnostico.clear();
+  seloDiagnostico.clear();
+}
+
+/** Mesma regra da frota: agregado que inclui a filial sai; o recorte de outra unidade fica. */
+export function invalidarDiagnosticoExecutivo(filialId = null) {
+  const id = Number(filialId);
+  const todas = !Number.isInteger(id) || id <= 0;
+  const chaves = new Set([...cacheDiagnostico.keys(), ...voosDiagnostico.keys()]);
+  for (const chave of chaves) {
+    if (!todas && !diagnosticoAtingeFilial(chave, id)) continue;
+    seloDiagnostico.set(chave, (seloDiagnostico.get(chave) || 0) + 1);
+    cacheDiagnostico.delete(chave);
+    voosDiagnostico.delete(chave);
+  }
 }
 
 function chaveDiagnostico({ escopo, tipo, incluirMatriz, filialId }) {
@@ -546,10 +578,10 @@ export async function consultarDiagnosticoExecutivo(db, {
   const chave = chaveDiagnostico(opcoes);
   const hit = cacheDiagnostico.get(chave);
   if (hit && agoraCacheExecutivo() - hit.em < VALIDADE_SNAPSHOT_EXECUTIVO_MS) return hit.valor;
-  const marca = geracaoDiagnostico;
+  const marca = marcaDiagnostico(chave);
   return filaUnica(voosDiagnostico, chave, async () => {
     const valor = await construirDiagnostico(db, opcoes);
-    if (marca === geracaoDiagnostico) {
+    if (marca === marcaDiagnostico(chave)) {
       cacheDiagnostico.set(chave, { em: agoraCacheExecutivo(), valor });
       if (cacheDiagnostico.size > 8) {
         const antigo = [...cacheDiagnostico.entries()].sort((a, b) => a[1].em - b[1].em)[0];

@@ -1,11 +1,11 @@
 /**
  * Leitura única da frota usada pela visão do presidente e pelo diagnóstico das filiais.
  *
- * Validade: 20 segundos (VALIDADE_SNAPSHOT_EXECUTIVO_MS).
- * Uma medição, movimentação ou troca de pneu feita nesse intervalo só aparece
- * na leitura seguinte, quando a entrada expira. limparCacheFrotaExecutiva()
- * descarta na hora. Esta fase não altera as rotas de gravação: a validade curta
- * é o limite de defasagem, de propósito.
+ * Validade: 20 segundos (VALIDADE_SNAPSHOT_EXECUTIVO_MS), só como rede de
+ * segurança. Gravação confirmada chama invalidarFrotaExecutiva(filialId) e
+ * descarta na hora as chaves que incluem aquela filial. O agregado irrestrito
+ * entra, porque a visão "todas" soma essa unidade. A chave de outra filial,
+ * ou de um gerente que não a inclui, permanece.
  *
  * A chave é o escopo autorizado mais o filtro de filial.
  * - Leitura executiva (admin e presidente) usa escopo irrestrito: os dois papéis
@@ -13,6 +13,10 @@
  * - Gerente ou qualquer lista de filiais usa só esses ids. Essa entrada não é
  *   lida pelo escopo irrestrito, nem o contrário.
  * Usuários com permissões diferentes não reutilizam o resultado um do outro.
+ *
+ * Cada chave tem um selo. A leitura que já estava no ar guarda o resultado só
+ * se o selo não mudou. Assim o dado antigo não reocupa a vaga depois da gravação,
+ * e a leitura de uma filial não afetada ainda pode gravar a sua.
  *
  * Chamadas simultâneas da mesma chave esperam a mesma ida ao banco.
  */
@@ -26,6 +30,7 @@ let relogio = () => Date.now();
 let geracao = 0;
 const cache = new Map();
 const voos = new Map();
+const selo = new Map();
 const contagem = { leituras: 0, reusos: 0 };
 
 export function definirRelogioFrotaExecutiva(fn) {
@@ -40,8 +45,40 @@ export function limparCacheFrotaExecutiva() {
   geracao += 1;
   cache.clear();
   voos.clear();
+  selo.clear();
   contagem.leituras = 0;
   contagem.reusos = 0;
+}
+
+function marcaAtual(chave) {
+  return `${geracao}:${selo.get(chave) || 0}`;
+}
+
+/** true quando a chave agrega a filial ou está filtrada nela. */
+export function chaveFrotaAtingeFilial(chave, filialId) {
+  const id = Number(filialId);
+  const [escopo, filial] = String(chave).split('|');
+  const filialChave = filial === '*' || filial == null || filial === '' ? null : Number(filial);
+  if (filialChave != null) return filialChave === id;
+  if (escopo === 'irrestrito') return true;
+  if (!escopo || escopo === 'vazio') return false;
+  return escopo.split(',').map(Number).includes(id);
+}
+
+/**
+ * filialId numérico: só as chaves dessa unidade e os agregados que a incluem.
+ * Sem filial (admin ou importação): descarta todas as chaves.
+ */
+export function invalidarFrotaExecutiva(filialId = null) {
+  const id = Number(filialId);
+  const todas = !Number.isInteger(id) || id <= 0;
+  const chaves = new Set([...cache.keys(), ...voos.keys()]);
+  for (const chave of chaves) {
+    if (!todas && !chaveFrotaAtingeFilial(chave, id)) continue;
+    selo.set(chave, (selo.get(chave) || 0) + 1);
+    cache.delete(chave);
+    voos.delete(chave);
+  }
 }
 
 export function estatisticasFrotaExecutiva() {
@@ -94,7 +131,7 @@ function entradaFresca(chave) {
 }
 
 function guardar(chave, valor, marca) {
-  if (marca !== geracao) return;
+  if (marca !== marcaAtual(chave)) return;
   cache.set(chave, { em: relogio(), valor });
   if (cache.size <= MAX_ENTRADAS) return;
   const antigo = [...cache.entries()].sort((a, b) => a[1].em - b[1].em)[0];
@@ -123,7 +160,7 @@ function emVoo(chave, produtor) {
     contagem.reusos += 1;
     return existente;
   }
-  const marca = geracao;
+  const marca = marcaAtual(chave);
   return filaUnica(voos, chave, async () => {
     const valor = await produtor();
     guardar(chave, valor, marca);

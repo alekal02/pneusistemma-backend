@@ -14,8 +14,10 @@ import {
   marcarTokenUsado,
 } from '../services/acesso-rapido.js';
 import { notificarGerentesAposMedicao } from '../services/alertas-whatsapp.js';
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
 
 const router = Router();
+router.use(invalidarExecutivoAoConfirmar());
 
 /**
  * JWT de filial OU token de acesso rápido (WhatsApp)

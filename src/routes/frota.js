@@ -26,9 +26,12 @@ import {
   mapStatusPneu,
 } from '../csv-utils.js';
 
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
+
 const router = Router();
 router.use(requireAuth);
 router.use(requireFilial);
+router.use(invalidarExecutivoAoConfirmar());
 
 router.get('/import/modelo', (_req, res) => {
   const csv = toCsv(FROTA_TEMPLATE_HEADERS, FROTA_TEMPLATE_ROWS);

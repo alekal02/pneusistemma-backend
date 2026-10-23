@@ -9,6 +9,7 @@ import { getLimites, limitesDoVeiculo } from '../limites.js';
 import { LAYOUTS_PNEU, papelPosicao, labelPosicao } from '../pneus-layouts.js';
 import {
   filtrarFiliaisPorSituacao,
+  invalidarDiagnosticoExecutivo,
   labelSituacaoExecutiva,
   limparCacheDiagnosticoExecutivo,
   montarDiagnosticoExecutivo,
@@ -20,6 +21,7 @@ import {
   VALIDADE_SNAPSHOT_EXECUTIVO_MS,
   agoraCacheExecutivo,
   filaUnica,
+  invalidarFrotaExecutiva,
   limparCacheFrotaExecutiva,
   obterFrotaExecutiva,
 } from './frota-executiva-compartilhada.js';
@@ -38,14 +40,55 @@ const SITUACOES = {
 
 const cache = new Map();
 const voosSnapshot = new Map();
+const seloSnapshot = new Map();
 let geracaoSnapshot = 0;
+
+function marcaSnapshot(chave) {
+  return `${geracaoSnapshot}:${seloSnapshot.get(chave) || 0}`;
+}
+
+function snapshotAtingeFilial(chave, filialId) {
+  let obj;
+  try {
+    obj = JSON.parse(chave);
+  } catch {
+    return true;
+  }
+  if (obj.filialId == null || obj.filialId === '') return true;
+  return Number(obj.filialId) === Number(filialId);
+}
 
 export function limparCacheExecutivo() {
   geracaoSnapshot += 1;
   cache.clear();
   voosSnapshot.clear();
+  seloSnapshot.clear();
   limparCacheFrotaExecutiva();
   limparCacheDiagnosticoExecutivo();
+}
+
+/** Descarta os recortes da visão que incluem a filial. Sem id, descarta todos. */
+export function invalidarSnapshotsExecutivos(filialId = null) {
+  const id = Number(filialId);
+  const todas = !Number.isInteger(id) || id <= 0;
+  const chaves = new Set([...cache.keys(), ...voosSnapshot.keys()]);
+  for (const chave of chaves) {
+    if (!todas && !snapshotAtingeFilial(chave, id)) continue;
+    seloSnapshot.set(chave, (seloSnapshot.get(chave) || 0) + 1);
+    cache.delete(chave);
+    voosSnapshot.delete(chave);
+  }
+}
+
+/**
+ * Depois que a gravação respondeu com sucesso.
+ * Filial conhecida: agregado executivo e as chaves dessa unidade.
+ * Filial desconhecida: cache executivo inteiro.
+ */
+export function invalidarIndicadoresExecutivos(filialId = null) {
+  invalidarSnapshotsExecutivos(filialId);
+  invalidarFrotaExecutiva(filialId);
+  invalidarDiagnosticoExecutivo(filialId);
 }
 
 export function isoHoje(agora = new Date()) {
@@ -1379,7 +1422,7 @@ async function contarMedicoes(db, ids, de, ate) {
 }
 
 function guardarSnapshot(chave, entry, marca) {
-  if (marca !== geracaoSnapshot) return;
+  if (marca !== marcaSnapshot(chave)) return;
   cache.set(chave, entry);
   if (cache.size <= 12) return;
   const antigo = [...cache.entries()].sort((a, b) => a[1].em - b[1].em)[0];
@@ -1390,7 +1433,7 @@ async function obterEntrada(db, filtros, hoje) {
   const chave = chaveCache(filtros);
   const hit = cache.get(chave);
   if (hit && agoraCacheExecutivo() - hit.em < VALIDADE_SNAPSHOT_EXECUTIVO_MS) return hit;
-  const marca = geracaoSnapshot;
+  const marca = marcaSnapshot(chave);
   return filaUnica(voosSnapshot, chave, async () => {
     const montado = await montarSnapshot(db, filtros, hoje);
     const entry = {

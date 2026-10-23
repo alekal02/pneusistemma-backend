@@ -10,6 +10,7 @@ import {
   reivindicarGravacaoMedicao,
 } from './whatsapp-sessao.js';
 import { getDb } from '../database.js';
+import { invalidarOperacaoConfirmada } from './invalidacao-executiva.js';
 import {
   telefoneConfiavel,
   chipsWhatsappIguais,
@@ -496,6 +497,7 @@ async function gravarMovimentacaoConfirmada(ctx, { fluxos, passos, executar }) {
       });
       return executar(auditoriaDe(participante));
     });
+    invalidarOperacaoConfirmada(participante.filialId);
     await clear(ctx);
     return resultado;
   } catch (err) {
@@ -535,6 +537,7 @@ async function gravarMedicaoConfirmada(ctx, d) {
         responsavel: textoResponsavel(participante),
       });
     });
+    invalidarOperacaoConfirmada(participante.filialId);
     await clear(ctx);
     const kmTxt = resultado.km != null ? ` · KM ${resultado.km}` : '';
     await reply(ctx, `✅ ${resultado.total} medições em *${resultado.placa}*${kmTxt}.`);
@@ -778,6 +781,7 @@ async function concluirPreCadastroVeiculo(ctx, { placa, tipoVeiculo }) {
     tipo: tipoVeiculo,
     preCadastro: true,
   });
+  invalidarOperacaoConfirmada(ctx.filialId);
   const { link } = await gerarTokenAcessoRapido({
     tipo: 'cadastrar_veiculo',
     veiculoId: created.id,
@@ -804,6 +808,7 @@ async function concluirPreCadastroPneu(ctx, { fogo }) {
     modelo: 'Pendente',
     preCadastro: true,
   });
+  invalidarOperacaoConfirmada(ctx.filialId);
   const { link } = await gerarTokenAcessoRapido({
     tipo: 'cadastrar_pneu',
     pneuId: created.id,

@@ -18,10 +18,13 @@ import {
   veiculoCombinaTipo,
 } from '../services/indicadores-frota.js';
 
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
+
 const router = Router();
 
 router.use(requireAuth);
 router.use(requireFilial);
+router.use(invalidarExecutivoAoConfirmar());
 
 router.get('/desenhos', async (req, res, next) => {
   try {

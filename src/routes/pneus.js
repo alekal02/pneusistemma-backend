@@ -54,6 +54,7 @@ import {
   resolverNumeroFogo,
   assertFogoLivre,
 } from '../numero-fogo.js';
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
 
 const router = Router();
 
@@ -62,6 +63,7 @@ const TIPOS_MOVIMENTACAO = ['montagem', 'retirada', 'mudanca_posicao'];
 
 router.use(requireAuth);
 router.use(requireFilial);
+router.use(invalidarExecutivoAoConfirmar());
 
 function usuarioDe(req) {
   return req.user?.login || null;

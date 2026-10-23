@@ -2,10 +2,12 @@ import { Router } from 'express';
 import { getLimites, setLimites } from '../limites.js';
 import { DIAGNOSTICOS, ACOES } from '../diagnostico.js';
 import { requireAuth, requireAdmin } from '../auth.js';
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
 
 const router = Router();
 
 router.use(requireAuth);
+router.use(invalidarExecutivoAoConfirmar());
 
 router.get('/', (_req, res) => {
   const limites = getLimites();

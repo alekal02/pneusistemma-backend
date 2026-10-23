@@ -42,8 +42,10 @@ import {
 import { consultarProximoFogo, comRetryFogoUnico } from '../numero-fogo.js';
 import { montarPneu, completarVeiculo } from '../services/whatsapp-ops.js';
 import { excluirVeiculoCompleto } from '../services/limpar-filial.js';
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
 
 const router = Router();
+router.use(invalidarExecutivoAoConfirmar());
 
 /** Público: acesso via token WhatsApp (sem JWT) */
 router.get('/acesso-rapido', async (req, res, next) => {
@@ -106,6 +108,7 @@ router.post('/acesso-rapido/montar-novo', async (req, res, next) => {
     if (!tokenRow) {
       return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
+    req.acessoRapido = tokenRow;
     await marcarTokenUsado(tokenRow.id);
 
     const filialId = tokenRow.filial_id;

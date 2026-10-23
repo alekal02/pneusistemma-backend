@@ -24,16 +24,19 @@ import {
   listarLayoutsPublicos,
 } from '../pneus-layouts.js';
 import { consultarProximoFogo } from '../numero-fogo.js';
+import { invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
 
 const router = Router();
+router.use(invalidarExecutivoAoConfirmar());
 
-async function tokenOuErro(token, tipos, { permitirUsado = false } = {}) {
+async function tokenOuErro(token, tipos, { permitirUsado = false, req = null } = {}) {
   const row = await validarTokenAcessoRapido(String(token || ''), tipos, { permitirUsado });
   if (!row) {
     const err = new Error('Link inválido ou expirado');
     err.status = 401;
     throw err;
   }
+  if (req) req.acessoRapido = row;
   return row;
 }
 
@@ -141,7 +144,7 @@ router.get('/proximo-fogo', async (req, res, next) => {
 router.post('/veiculo', async (req, res, next) => {
   try {
     const { token, placa, apelido, tipo, km_atual, hr_atual, layout_pneus, marca, modelo } = req.body || {};
-    const row = await tokenOuErro(token, ['cadastrar_veiculo'], { permitirUsado: true });
+    const row = await tokenOuErro(token, ['cadastrar_veiculo'], { permitirUsado: true, req });
     const ja = await confirmarCadastroJaGravado(row);
     if (ja?.ja_gravado) return res.status(200).json(ja);
     if (ja?.status) return res.status(ja.status).json({ erro: ja.erro });
@@ -202,7 +205,7 @@ router.post('/pneu', async (req, res, next) => {
     const {
       token, numero_fogo, marca, modelo, tipo_pneu, condicao, sulco_inicial_mm,
     } = req.body || {};
-    const row = await tokenOuErro(token, ['cadastrar_pneu'], { permitirUsado: true });
+    const row = await tokenOuErro(token, ['cadastrar_pneu'], { permitirUsado: true, req });
     const ja = await confirmarCadastroJaGravado(row);
     if (ja?.ja_gravado) return res.status(200).json(ja);
     if (ja?.status) return res.status(ja.status).json({ erro: ja.erro });
@@ -328,7 +331,7 @@ router.post('/pneu-acao', async (req, res, next) => {
       motivo,
       permitir_vazio,
     } = req.body || {};
-    const row = await tokenOuErro(token, ['medir', 'troca']);
+    const row = await tokenOuErro(token, ['medir', 'troca'], { req });
     const acaoNorm = String(acao || '');
     const pneuId = parseInt(
       acaoNorm === 'montar_estoque' ? (montar_pneu_id || pneu_id) : pneu_id,
@@ -455,7 +458,7 @@ router.post('/troca', async (req, res, next) => {
       montar_pneu_id,
       km_veiculo,
     } = req.body || {};
-    const row = await tokenOuErro(token, ['troca']);
+    const row = await tokenOuErro(token, ['troca'], { req });
     if (!montar_pneu_id) {
       return res.status(400).json({ erro: 'Informe o pneu do estoque para montar' });
     }

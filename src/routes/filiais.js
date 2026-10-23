@@ -43,11 +43,19 @@ import {
 } from '../services/filiais-painel.js';
 import { camposTipoVeiculo } from '../equipamento-tipos.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
+import { filialDaGravacao, invalidarExecutivoAoConfirmar } from '../services/invalidacao-executiva.js';
 
 const router = Router();
 
 router.use(requireAuth);
 router.use(requireGerenteOuAdmin);
+router.use(invalidarExecutivoAoConfirmar({
+  filialDe(req) {
+    const id = Number(req.params?.id);
+    if (Number.isInteger(id) && id > 0) return id;
+    return filialDaGravacao(req);
+  },
+}));
 
 function assertFilialNoEscopo(req, filialId) {
   const escopo = filiaisEscopoIds(req);
