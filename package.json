@@ -18,7 +18,8 @@
     "test:auth-presidente": "node scripts/test-auth-presidente.mjs",
     "test:executivo": "node scripts/test-dashboard-executivo.mjs && node scripts/test-diagnostico-executivo.mjs && node scripts/test-pdf-executivo.mjs && node scripts/test-contrato-frota.mjs && node scripts/test-snapshot-compartilhado.mjs",
     "test:usuarios": "node scripts/test-reset-senha-acesso.mjs",
-    "test:boot": "node scripts/test-boot-nao-altera-dados.mjs"
+    "test:boot": "node scripts/test-boot-nao-altera-dados.mjs",
+    "test:filiais": "node --expose-gc scripts/test-filiais-carregamento.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

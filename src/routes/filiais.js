@@ -12,17 +12,12 @@ import {
   revogarSessoesDoUsuario,
 } from '../auth.js';
 import { excluirFilialCompleta, excluirPneuEstoqueOuDescarte, excluirVeiculoCompleto } from '../services/limpar-filial.js';
-import { classificarSulco, getLimites, limitesDoVeiculo, menorSulco } from '../limites.js';
+import { classificarSulco, getLimites, limitesDoVeiculo } from '../limites.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO, SQL_LOGS_MEDICAO_FILIAL } from '../sql-ultima-medicao.js';
-import { filtroCadastroCompleto } from '../schema-colunas.js';
-import { percentualVida } from '../diagnostico.js';
 import { especificacaoMedicao, prepararMedicao } from '../medicao-perfil.js';
+import { percentualVida } from '../diagnostico.js';
 import {
-  acumularAlerta,
   avaliarPneuPainel,
-  contarAcaoLegada,
-  indicadoresUso,
-  novoAcumulador,
   piorStatus,
   statusPainel,
   unidadeUsoVeiculo,
@@ -41,6 +36,11 @@ import {
 } from '../pneus-layouts.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
 import { consultarDiagnosticoExecutivo } from '../services/diagnostico-executivo.js';
+import {
+  calcularPendenciasFilial,
+  calcularResumoFilial,
+  carregarPainelFiliais,
+} from '../services/filiais-painel.js';
 import { camposTipoVeiculo } from '../equipamento-tipos.js';
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 
@@ -56,252 +56,13 @@ function assertFilialNoEscopo(req, filialId) {
 }
 
 async function resumoFilial(db, filialId, _limites, tipoFiltro = null) {
-  const cadVeiculo = await filtroCadastroCompleto(db, 'veiculos');
-  const cadVeiculoAlias = await filtroCadastroCompleto(db, 'veiculos', 'v.cadastro_completo');
-  const cadPneu = await filtroCadastroCompleto(db, 'pneus');
-  const veiculosRows = await db.prepare(`
-    SELECT id, tipo, layout_pneus, km_atual, hr_atual
-    FROM veiculos WHERE filial_id = ? AND ativo = 1 AND ${cadVeiculo}
-  `).all(filialId);
-  const veiculosLista = veiculosRows.filter((v) => veiculoCombinaTipo(v.tipo, tipoFiltro));
-  const veiculos = veiculosLista.length;
-
-  const counts = await db.prepare(`
-    SELECT
-      COUNT(*) FILTER (WHERE ativo = 1 AND status_pneu = 'recapagem') as em_recapagem,
-      COUNT(*) FILTER (WHERE status_pneu = 'descarte') as em_descarte,
-      COUNT(*) FILTER (WHERE ativo = 1 AND status_pneu = 'estoque' AND ${cadPneu}) as em_estoque
-    FROM pneus
-    WHERE filial_id = ?
-  `).get(filialId);
-  const emRecapagem = Number(counts?.em_recapagem || 0);
-  const emDescarte = Number(counts?.em_descarte || 0);
-  const emEstoque = Number(counts?.em_estoque || 0);
-
-  const pneus = await db.prepare(`
-    SELECT
-      p.id, p.vida_recap, p.posicao, p.veiculo_id,
-      v.tipo, v.layout_pneus, v.km_atual, v.hr_atual,
-      um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
-      um.inspecao_danos, um.data_medicao
-    FROM pneus p
-    JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
-      AND ${cadVeiculoAlias}
-    ${SQL_LATERAL_ULTIMA_MEDICAO}
-    WHERE p.ativo = 1 AND p.status_pneu = 'montado'
-  `).all(filialId);
-
-  const acc = novoAcumulador();
-  const accKm = novoAcumulador();
-  const accHoras = novoAcumulador();
-  let ultimaMedicao = null;
-
-  for (const p of pneus) {
-    if (!veiculoCombinaTipo(p.tipo, tipoFiltro)) continue;
-    const aval = avaliarPneuPainel(p, { limites: limitesDoVeiculo(p) });
-    const unidade = unidadeUsoVeiculo(p.tipo, p.layout_pneus);
-    acumularAlerta(acc, aval);
-    acumularAlerta(unidade === 'horas' ? accHoras : accKm, aval);
-
-    if (p.data_medicao && (!ultimaMedicao || p.data_medicao > ultimaMedicao)) {
-      ultimaMedicao = p.data_medicao;
-    }
-  }
-
-  let diasSemMedicao = null;
-  if (ultimaMedicao) {
-    const diff = Date.now() - new Date(`${ultimaMedicao}T12:00:00`).getTime();
-    diasSemMedicao = Math.floor(diff / (1000 * 60 * 60 * 24));
-  }
-
-  return {
-    veiculos_ativos: veiculos,
-    pneus_total: acc.ok + acc.monitorar + acc.critico + acc.sem_dado,
-    pneus_ok: acc.ok,
-    pneus_alerta: acc.monitorar,
-    pneus_critico: acc.critico,
-    pneus_sem_dado: acc.sem_dado,
-    pneus_em_recapagem: emRecapagem,
-    pneus_em_descarte: emDescarte,
-    pneus_em_estoque: emEstoque,
-    acoes: { troca: acc.troca, recap: emRecapagem, monitorar: acc.acao_monitorar, recap_sugerido: acc.recap },
-    compras: {
-      pneus_para_comprar: acc.troca,
-      // KPI “Recap” = pneus já enviados ao processo (status recapagem)
-      pneus_para_recap: emRecapagem,
-      pneus_monitorar: acc.acao_monitorar,
-    },
-    indicadores_uso: indicadoresUso(veiculosLista, accKm, accHoras),
-    filtro_tipo: tipoFiltro || null,
-    ultima_medicao: ultimaMedicao,
-    dias_sem_medicao: diasSemMedicao,
-    precisa_medir_semana: diasSemMedicao == null ? veiculos > 0 : diasSemMedicao >= 7,
-  };
-}
-
-/** Pneus já enviados ao processo de recap (status operacional) */
-async function listarEmRecapagem(db, filialId) {
-  const rows = await db.prepare(`
-    SELECT
-      p.id as pneu_id, p.numero_fogo, p.marca as pneu_marca,
-      p.tipo_pneu, p.condicao, p.vida_recap, p.sulco_inicial_mm,
-      (SELECT sulco_externo FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_externo,
-      (SELECT sulco_central FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_central,
-      (SELECT sulco_interno FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_interno,
-      (SELECT sulco_auxiliar FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as sulco_auxiliar,
-      (SELECT data_medicao FROM medicoes WHERE pneu_id = p.id ORDER BY data_medicao DESC, id DESC LIMIT 1) as data_medicao,
-      (SELECT m.data_evento FROM movimentacoes m
-        WHERE m.pneu_id = p.id AND m.tipo IN ('recap', 'retirada')
-        ORDER BY m.id DESC LIMIT 1) as data_envio,
-      (SELECT COALESCE(m.veiculo_placa, '') FROM movimentacoes m
-        WHERE m.pneu_id = p.id AND m.tipo = 'retirada'
-        ORDER BY m.id DESC LIMIT 1) as placa_origem,
-      (SELECT m.posicao FROM movimentacoes m
-        WHERE m.pneu_id = p.id AND m.tipo = 'retirada'
-        ORDER BY m.id DESC LIMIT 1) as posicao_origem
-    FROM pneus p
-    WHERE p.filial_id = ? AND p.ativo = 1 AND p.status_pneu = 'recapagem'
-    ORDER BY COALESCE(
-      (SELECT m.data_evento FROM movimentacoes m
-        WHERE m.pneu_id = p.id AND m.tipo IN ('recap', 'retirada')
-        ORDER BY m.id DESC LIMIT 1),
-      '1970-01-01'
-    ) DESC, p.numero_fogo
-  `).all(filialId);
-
-  return rows.map((p) => {
-    const menor = menorSulco(p);
-    return {
-      pneu_id: p.pneu_id,
-      veiculo_id: null,
-      placa: p.placa_origem || '—',
-      apelido: 'Em recapagem',
-      veiculo_tipo: null,
-      km_atual: null,
-      posicao: p.posicao_origem || null,
-      posicao_label: p.posicao_origem ? labelPosicao(p.posicao_origem) : '—',
-      numero_fogo: p.numero_fogo,
-      pneu_marca: p.pneu_marca,
-      tipo_pneu: p.tipo_pneu,
-      condicao: p.condicao,
-      vida_recap: p.vida_recap,
-      menor_sulco: menor,
-      status_sulco: classificarSulco(menor),
-      sulcos: {
-        m1: p.sulco_externo,
-        m2: p.sulco_central,
-        m3: p.sulco_interno,
-        m4: p.sulco_auxiliar,
-      },
-      data_medicao: p.data_envio || p.data_medicao,
-      diagnostico: 'recapagem',
-      diagnostico_label: 'Em processo',
-      acao_sugerida: 'recap',
-      acao_label: 'Em recapagem',
-      acao_motivo: `Enviado à recap (${p.vida_recap || 1}ª vida). Quando voltar, devolva ao estoque (WhatsApp *6* ou aba Pneus).`,
-      em_recapagem: true,
-    };
-  });
-}
-
-/** Lista pneus com ação pendente (troca/recap/monitorar) — base para compras */
-async function pendenciasFilial(db, filialId, _limites, tipoFiltro = null) {
-  const cadVeiculoAlias = await filtroCadastroCompleto(db, 'veiculos', 'v.cadastro_completo');
-  const rows = await db.prepare(`
-    SELECT
-      p.id as pneu_id, p.posicao, p.numero_fogo, p.marca as pneu_marca,
-      p.tipo_pneu, p.condicao, p.vida_recap, p.sulco_inicial_mm,
-      v.id as veiculo_id, v.placa, v.apelido, v.tipo as veiculo_tipo, v.km_atual, v.hr_atual, v.layout_pneus,
-      um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
-      um.inspecao_danos, um.data_medicao, um.diagnostico, um.km_veiculo
-    FROM pneus p
-    JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
-      AND ${cadVeiculoAlias}
-    ${SQL_LATERAL_ULTIMA_MEDICAO}
-    WHERE p.ativo = 1 AND p.status_pneu = 'montado'
-  `).all(filialId);
-
-  const itens = rows.filter((p) => veiculoCombinaTipo(p.veiculo_tipo, tipoFiltro)).map((p) => {
-    const limV = limitesDoVeiculo({ tipo: p.veiculo_tipo, layout_pneus: p.layout_pneus });
-    const aval = avaliarPneuPainel({ ...p, tipo: p.veiculo_tipo }, { limites: limV });
-    const menor = aval.menor_sulco;
-    const status = statusPainel(aval);
-    const diag = aval.diagnostico || {};
-    const acao = aval.acao || {};
-    const unidade = unidadeUsoVeiculo(p.veiculo_tipo, p.layout_pneus);
-    return {
-      pneu_id: p.pneu_id,
-      veiculo_id: p.veiculo_id,
-      placa: p.placa,
-      apelido: p.apelido,
-      veiculo_tipo: p.veiculo_tipo,
-      km_atual: unidade === 'km' ? p.km_atual : null,
-      hr_atual: unidade === 'horas' ? p.hr_atual : null,
-      unidade_uso: unidade,
-      posicao: p.posicao,
-      posicao_label: labelPosicao(p.posicao),
-      numero_fogo: p.numero_fogo,
-      pneu_marca: p.pneu_marca,
-      tipo_pneu: p.tipo_pneu,
-      condicao: p.condicao,
-      vida_recap: p.vida_recap,
-      menor_sulco: menor,
-      status_sulco: status,
-      sulcos: {
-        m1: p.sulco_externo,
-        m2: p.sulco_central,
-        m3: p.sulco_interno,
-        m4: p.sulco_auxiliar,
-      },
-      data_medicao: p.data_medicao,
-      diagnostico: diag.codigo,
-      diagnostico_label: diag.label,
-      diagnostico_desc: diag.descricao || '',
-      acao_sugerida: acao.codigo,
-      acao_label: acao.label,
-      acao_motivo: acao.motivo,
-    };
-  });
-
-  const pendentesMontados = itens
-    .filter((i) => {
-      const leg = contarAcaoLegada(i.acao_sugerida);
-      return leg === 'troca' || leg === 'monitorar' || leg === 'rodizio';
-    })
-    .sort((a, b) => {
-      const ordem = { troca: 0, substituir: 0, corte: 0, dano_lateral: 0, monitorar: 1, rodizio: 2 };
-      return (ordem[a.acao_sugerida] ?? 9) - (ordem[b.acao_sugerida] ?? 9)
-        || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99);
-    });
-
-  const emRecapagem = await listarEmRecapagem(db, filialId);
-  const troca = pendentesMontados.filter((i) => contarAcaoLegada(i.acao_sugerida) === 'troca');
-  const monitorar = pendentesMontados.filter((i) => {
-    const leg = contarAcaoLegada(i.acao_sugerida);
-    return leg === 'monitorar' || leg === 'rodizio';
-  });
-  const todos = [...troca, ...emRecapagem, ...monitorar];
-  const ordemDiag = {
-    critico: 0, falta_calib: 1, excesso_calib: 2, irregular: 3, desgaste_progressivo: 4,
-  };
-  const diagnosticos = itens
-    .filter((i) => i.diagnostico && i.diagnostico !== 'ok' && i.diagnostico !== 'sem_dado')
-    .sort((a, b) => (ordemDiag[a.diagnostico] ?? 9) - (ordemDiag[b.diagnostico] ?? 9)
-      || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
-
-  return {
-    troca,
-    recap: emRecapagem,
-    monitorar,
-    todos,
-    diagnosticos,
-  };
+  const mapa = await carregarPainelFiliais(db, [filialId]);
+  return calcularResumoFilial(mapa.get(Number(filialId)), tipoFiltro);
 }
 
 router.get('/', async (req, res, next) => {
   try {
     const db = getDb();
-    const limites = getLimites();
     const escopo = filiaisEscopoIds(req);
     let sql = `
       SELECT f.*,
@@ -330,14 +91,13 @@ router.get('/', async (req, res, next) => {
         });
       }
     } else {
-      const resumos = await Promise.all(filiais.map((f) => resumoFilial(db, f.id, limites)));
-      for (let i = 0; i < filiais.length; i += 1) {
-        const f = filiais[i];
+      const mapa = await carregarPainelFiliais(db, filiais.map((f) => f.id));
+      for (const f of filiais) {
         resultado.push({
           ...f,
           wuzapi_token: undefined,
           tem_wuzapi_token: Boolean(f.wuzapi_token?.trim()),
-          resumo: resumos[i],
+          resumo: calcularResumoFilial(mapa.get(Number(f.id))),
         });
       }
     }
@@ -362,12 +122,11 @@ router.get('/compras/consolidado', async (req, res, next) => {
     }
     sql += ' ORDER BY nome';
     const filiais = await db.prepare(sql).all(...params);
-
-    const porFilial = await Promise.all(filiais.map(async (f) => {
-      const [resumo, pendencias] = await Promise.all([
-        resumoFilial(db, f.id, limites),
-        pendenciasFilial(db, f.id, limites),
-      ]);
+    const mapa = await carregarPainelFiliais(db, filiais.map((f) => f.id), { comPendencias: true });
+    const porFilial = filiais.map((f) => {
+      const painel = mapa.get(Number(f.id));
+      const resumo = calcularResumoFilial(painel);
+      const pendencias = calcularPendenciasFilial(painel);
       return {
         filial_id: f.id,
         nome: f.nome,
@@ -378,7 +137,7 @@ router.get('/compras/consolidado', async (req, res, next) => {
         recap: pendencias.recap,
         monitorar: pendencias.monitorar,
       };
-    }));
+    });
 
     const totalComprar = porFilial.reduce((s, f) => s + f.compras.pneus_para_comprar, 0);
     const totalRecap = porFilial.reduce((s, f) => s + f.compras.pneus_para_recap, 0);
@@ -439,8 +198,10 @@ router.get('/:id', async (req, res, next) => {
 
     const limites = getLimites();
     const tipoFiltro = req.query.tipo;
-    const resumo = await resumoFilial(db, f.id, limites, tipoFiltro);
-    const pendencias = await pendenciasFilial(db, f.id, limites, tipoFiltro);
+    const mapa = await carregarPainelFiliais(db, [f.id], { comPendencias: true });
+    const painel = mapa.get(Number(f.id));
+    const resumo = calcularResumoFilial(painel, tipoFiltro);
+    const pendencias = calcularPendenciasFilial(painel, tipoFiltro);
 
     const veiculos = await db.prepare(`
     SELECT v.*,
