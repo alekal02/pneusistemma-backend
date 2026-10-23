@@ -6,16 +6,23 @@
 import { filialForaDoIndicadorExecutivo } from './saude-desgaste-relatorio.js';
 import { avaliarPneuPainel, bucketKpi, contarAcaoLegada, veiculoCombinaTipo } from './indicadores-frota.js';
 import { getLimites, limitesDoVeiculo } from '../limites.js';
-import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import { LAYOUTS_PNEU, papelPosicao, labelPosicao } from '../pneus-layouts.js';
 import {
   filtrarFiliaisPorSituacao,
   labelSituacaoExecutiva,
+  limparCacheDiagnosticoExecutivo,
   montarDiagnosticoExecutivo,
   situacaoMedicaoExecutiva as situacaoMedicao,
 } from './diagnostico-executivo.js';
 import { especificacaoMedicao } from '../medicao-perfil.js';
 import { resolverTipoEquipamento } from '../equipamento-tipos.js';
+import {
+  VALIDADE_SNAPSHOT_EXECUTIVO_MS,
+  agoraCacheExecutivo,
+  filaUnica,
+  limparCacheFrotaExecutiva,
+  obterFrotaExecutiva,
+} from './frota-executiva-compartilhada.js';
 
 /** Validade da medição: o mês corrente (America/Sao_Paulo). Fora do mês, ou sem data, não está atualizada. */
 export const VALIDADE_MEDICAO = 'mes_corrente';
@@ -29,11 +36,16 @@ const SITUACOES = {
   sem_medicao: 'sem_dado',
 };
 
-const CACHE_MS = 20_000;
 const cache = new Map();
+const voosSnapshot = new Map();
+let geracaoSnapshot = 0;
 
 export function limparCacheExecutivo() {
+  geracaoSnapshot += 1;
   cache.clear();
+  voosSnapshot.clear();
+  limparCacheFrotaExecutiva();
+  limparCacheDiagnosticoExecutivo();
 }
 
 export function isoHoje(agora = new Date()) {
@@ -969,7 +981,10 @@ export function lerFiltrosQuery(query = {}, hoje = isoHoje()) {
 }
 
 function chaveCache(filtros) {
+  // Só a leitura executiva monta este agregado. Gerente não passa por aqui.
+  // Admin e presidente enxergam a mesma frota; o recorte é que separa as entradas.
   return JSON.stringify({
+    audiencia: 'leitura-executiva',
     filialId: filtros.filialId,
     situacao: filtros.situacao,
     tipo: filtros.tipo,
@@ -1042,11 +1057,11 @@ function mapPneu(row, hoje) {
 }
 
 async function montarSnapshot(db, filtros, hoje) {
-  const filiaisTodas = await db.prepare(`
-    SELECT id, nome, codigo, ativo, dia_medicao
-    FROM filiais
-    ORDER BY nome
-  `).all();
+  const bruta = await obterFrotaExecutiva(db, {
+    escopo: null,
+    filialId: filtros.filialId,
+  });
+  const filiaisTodas = bruta.filiais;
 
   const escopo = filiaisTodas.filter((f) => filialEntraNoEscopo(f, filtros));
   const ids = escopo.map((f) => Number(f.id));
@@ -1081,34 +1096,10 @@ async function montarSnapshot(db, filtros, hoje) {
     return { snapshot: vazio, ids: [], pneuIds: [] };
   }
 
-  const [veiculosRows, pneusRows, vagas] = await Promise.all([
-    db.prepare(`
-      SELECT v.id, v.placa, v.apelido, v.tipo, v.tipo_codigo, v.layout_pneus, v.filial_id,
-             v.km_atual, v.hr_atual, v.ativo, v.dia_medicao, v.cadastro_completo,
-             f.nome AS filial_nome, f.dia_medicao AS filial_dia_medicao
-      FROM veiculos v
-      JOIN filiais f ON f.id = v.filial_id
-      WHERE v.ativo = 1 AND v.filial_id = ANY(?::bigint[])
-    `).all([ids]),
-    db.prepare(`
-      SELECT p.id, p.filial_id, p.veiculo_id, p.posicao, p.numero_fogo, p.status_pneu,
-             p.vida_recap, p.condicao, p.recap_enviado_em,
-             f.nome AS filial_nome,
-             v.placa, v.apelido, v.tipo, v.tipo_codigo, v.layout_pneus, v.km_atual, v.hr_atual,
-             v.filial_id AS veiculo_filial_id, v.ativo AS veiculo_ativo,
-             v.dia_medicao, f.dia_medicao AS filial_dia_medicao,
-             um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
-             um.pressao_psi, um.inspecao_danos, um.data_medicao
-      FROM pneus p
-      JOIN filiais f ON f.id = p.filial_id
-      LEFT JOIN veiculos v ON v.id = p.veiculo_id
-      ${SQL_LATERAL_ULTIMA_MEDICAO}
-      WHERE p.ativo = 1
-        AND p.status_pneu IN ('montado', 'estoque', 'recapagem')
-        AND p.filial_id = ANY(?::bigint[])
-    `).all([ids]),
-    lerVagas(db, ids),
-  ]);
+  const idSet = new Set(ids);
+  const veiculosRows = bruta.veiculos.filter((v) => idSet.has(Number(v.filial_id)));
+  const pneusRows = bruta.pneus.filter((p) => idSet.has(Number(p.filial_id)));
+  const vagas = await lerVagas(db, ids);
 
   const pneus = (pneusRows || []).map((row) => mapPneu(row, hoje));
   const veiculos = (veiculosRows || []).map((v) => ({
@@ -1387,18 +1378,30 @@ async function contarMedicoes(db, ids, de, ate) {
   return total;
 }
 
+function guardarSnapshot(chave, entry, marca) {
+  if (marca !== geracaoSnapshot) return;
+  cache.set(chave, entry);
+  if (cache.size <= 12) return;
+  const antigo = [...cache.entries()].sort((a, b) => a[1].em - b[1].em)[0];
+  if (antigo) cache.delete(antigo[0]);
+}
+
 async function obterEntrada(db, filtros, hoje) {
   const chave = chaveCache(filtros);
   const hit = cache.get(chave);
-  if (hit && Date.now() - hit.em < CACHE_MS) return hit;
-  const montado = await montarSnapshot(db, filtros, hoje);
-  const entry = { em: Date.now(), snapshot: montado.snapshot, evolucao: undefined, evolucaoErro: null };
-  cache.set(chave, entry);
-  if (cache.size > 12) {
-    const antigo = [...cache.entries()].sort((a, b) => a[1].em - b[1].em)[0];
-    if (antigo) cache.delete(antigo[0]);
-  }
-  return entry;
+  if (hit && agoraCacheExecutivo() - hit.em < VALIDADE_SNAPSHOT_EXECUTIVO_MS) return hit;
+  const marca = geracaoSnapshot;
+  return filaUnica(voosSnapshot, chave, async () => {
+    const montado = await montarSnapshot(db, filtros, hoje);
+    const entry = {
+      em: agoraCacheExecutivo(),
+      snapshot: montado.snapshot,
+      evolucao: undefined,
+      evolucaoErro: null,
+    };
+    guardarSnapshot(chave, entry, marca);
+    return entry;
+  });
 }
 
 export async function obterResumoExecutivo(db, filtros, hoje = isoHoje()) {

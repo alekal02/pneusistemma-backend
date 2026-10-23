@@ -13,8 +13,13 @@ import { bucketKpi, avaliarPneuPainel, veiculoCombinaTipo } from './indicadores-
 import { especificacaoMedicao } from '../medicao-perfil.js';
 import { posicoesDoLayout, situacaoMedicao } from './diagnostico-frota.js';
 import { labelPosicao, papelPosicao } from '../pneus-layouts.js';
-import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
 import { limitesDoVeiculo } from '../limites.js';
+import {
+  VALIDADE_SNAPSHOT_EXECUTIVO_MS,
+  agoraCacheExecutivo,
+  filaUnica,
+  obterFrotaExecutiva,
+} from './frota-executiva-compartilhada.js';
 
 export const CORTES_EXECUTIVOS = {
   min_pneus_criticos: 2,
@@ -445,25 +450,65 @@ export function montarDiagnosticoExecutivo({
   };
 }
 
-export async function consultarDiagnosticoExecutivo(db, {
-  escopo = null,
-  tipo = null,
-  incluirMatriz = false,
-  filialId = null,
-  agora = new Date(),
-} = {}) {
-  let sql = `SELECT id, nome, codigo, dia_medicao FROM filiais WHERE ativo = 1`;
-  const params = [];
-  if (Array.isArray(escopo) && escopo.length) {
-    sql += ` AND id IN (${escopo.map(() => '?').join(',')})`;
-    params.push(...escopo.map(Number));
-  }
-  if (filialId != null && filialId !== '') {
-    sql += ' AND id = ?';
-    params.push(Number(filialId));
-  }
-  sql += ' ORDER BY nome';
-  const filiais = await db.prepare(sql).all(...params);
+const cacheDiagnostico = new Map();
+const voosDiagnostico = new Map();
+let geracaoDiagnostico = 0;
+
+export function limparCacheDiagnosticoExecutivo() {
+  geracaoDiagnostico += 1;
+  cacheDiagnostico.clear();
+  voosDiagnostico.clear();
+}
+
+function chaveDiagnostico({ escopo, tipo, incluirMatriz, filialId }) {
+  const lista = Array.isArray(escopo) && escopo.length
+    ? [...new Set(escopo.map((id) => Number(id)))].sort((a, b) => a - b).join(',')
+    : (escopo == null ? 'irrestrito' : 'vazio');
+  const filial = filialId != null && filialId !== '' ? Number(filialId) : null;
+  return JSON.stringify({
+    escopo: lista,
+    tipo: tipo || '',
+    incluirMatriz: Boolean(incluirMatriz),
+    filialId: filial,
+  });
+}
+
+function filiaisAtivas(filiais, { escopo, filialId }) {
+  const permitidas = Array.isArray(escopo) && escopo.length
+    ? new Set(escopo.map((id) => Number(id)))
+    : null;
+  const filial = filialId != null && filialId !== '' ? Number(filialId) : null;
+  return (filiais || []).filter((f) => {
+    if (Number(f.ativo) !== 1) return false;
+    if (permitidas && !permitidas.has(Number(f.id))) return false;
+    if (filial != null && Number(f.id) !== filial) return false;
+    return true;
+  });
+}
+
+/** Mesmas colunas da consulta antiga. Km e hora do veículo não entram: o diagnóstico não os lia. */
+function pneuComoDiagnostico(p) {
+  return {
+    id: p.id,
+    veiculo_id: p.veiculo_id,
+    filial_id: p.filial_id,
+    posicao: p.posicao,
+    numero_fogo: p.numero_fogo,
+    vida_recap: p.vida_recap,
+    condicao: p.condicao,
+    tipo_pneu: p.tipo_pneu,
+    sulco_externo: p.sulco_externo,
+    sulco_central: p.sulco_central,
+    sulco_interno: p.sulco_interno,
+    sulco_auxiliar: p.sulco_auxiliar,
+    sulco_mm: p.sulco_mm,
+    inspecao_danos: p.inspecao_danos,
+    data_medicao: p.data_medicao,
+  };
+}
+
+function diagnosticoDaFrota(frota, { tipo, incluirMatriz, agora, escopo, filialId }) {
+  const filiais = filiaisAtivas(frota.filiais, { escopo, filialId });
   if (!filiais.length) {
     return {
       gerado_em: agora.toISOString(),
@@ -472,26 +517,11 @@ export async function consultarDiagnosticoExecutivo(db, {
       filiais: [],
     };
   }
-
-  const ids = filiais.map((f) => Number(f.id));
-  const marcas = ids.map(() => '?').join(',');
-  const veiculos = await db.prepare(`
-    SELECT id, placa, apelido, tipo, layout_pneus, cadastro_completo, dia_medicao, filial_id
-    FROM veiculos
-    WHERE ativo = 1 AND filial_id IN (${marcas})
-  `).all(...ids);
-  const pneus = await db.prepare(`
-    SELECT
-      p.id, p.veiculo_id, p.filial_id, p.posicao, p.numero_fogo, p.vida_recap,
-      p.condicao, p.tipo_pneu,
-      um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
-      um.inspecao_danos, um.data_medicao
-    FROM pneus p
-    JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1
-    ${SQL_LATERAL_ULTIMA_MEDICAO}
-    WHERE p.ativo = 1 AND p.status_pneu = 'montado' AND v.filial_id IN (${marcas})
-  `).all(...ids);
-
+  const ids = new Set(filiais.map((f) => Number(f.id)));
+  const veiculos = (frota.veiculos || []).filter((v) => ids.has(Number(v.filial_id)));
+  const pneus = (frota.pneus || [])
+    .filter((p) => p.status_pneu === 'montado' && Number(p.veiculo_ativo) === 1 && ids.has(Number(p.veiculo_filial_id)))
+    .map(pneuComoDiagnostico);
   return montarDiagnosticoExecutivo({
     filiais,
     veiculos,
@@ -500,4 +530,40 @@ export async function consultarDiagnosticoExecutivo(db, {
     incluirMatriz,
     agora,
   });
+}
+
+export async function consultarDiagnosticoExecutivo(db, {
+  escopo = null,
+  tipo = null,
+  incluirMatriz = false,
+  filialId = null,
+  agora = null,
+} = {}) {
+  const momento = agora instanceof Date ? agora : new Date();
+  const opcoes = { escopo, tipo, incluirMatriz, filialId, agora: momento };
+  if (agora instanceof Date) return construirDiagnostico(db, opcoes);
+
+  const chave = chaveDiagnostico(opcoes);
+  const hit = cacheDiagnostico.get(chave);
+  if (hit && agoraCacheExecutivo() - hit.em < VALIDADE_SNAPSHOT_EXECUTIVO_MS) return hit.valor;
+  const marca = geracaoDiagnostico;
+  return filaUnica(voosDiagnostico, chave, async () => {
+    const valor = await construirDiagnostico(db, opcoes);
+    if (marca === geracaoDiagnostico) {
+      cacheDiagnostico.set(chave, { em: agoraCacheExecutivo(), valor });
+      if (cacheDiagnostico.size > 8) {
+        const antigo = [...cacheDiagnostico.entries()].sort((a, b) => a[1].em - b[1].em)[0];
+        if (antigo) cacheDiagnostico.delete(antigo[0]);
+      }
+    }
+    return valor;
+  });
+}
+
+async function construirDiagnostico(db, opcoes) {
+  const frota = await obterFrotaExecutiva(db, {
+    escopo: opcoes.escopo,
+    filialId: opcoes.filialId,
+  });
+  return diagnosticoDaFrota(frota, opcoes);
 }
