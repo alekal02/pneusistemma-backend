@@ -23,6 +23,57 @@ const router = Router();
 router.use(requireAuth);
 router.use(requireFilial);
 
+router.get('/desenhos', async (req, res, next) => {
+  try {
+    const db = getDb();
+    const filialId = filialScopeId(req);
+    const ids = [...new Set(
+      String(req.query.ids || '')
+        .split(',')
+        .map((valor) => Number(valor))
+        .filter((n) => Number.isInteger(n) && n > 0),
+    )].slice(0, 24);
+    if (!ids.length || !filialId) return res.json({ veiculos: [] });
+    const marcas = ids.map(() => '?').join(',');
+    const cadastro = await filtroCadastroCompleto(db, 'veiculos', 'v.cadastro_completo');
+    const pneus = await db.prepare(`
+      SELECT
+        p.id, p.veiculo_id, p.vida_recap, p.condicao, p.numero_fogo, p.posicao,
+        v.placa, v.apelido, v.tipo, v.layout_pneus, v.km_atual, v.hr_atual,
+        um.sulco_externo, um.sulco_central, um.sulco_interno, um.sulco_auxiliar, um.sulco_mm,
+        um.inspecao_danos, um.data_medicao, um.created_at as medicao_created
+      FROM pneus p
+      JOIN veiculos v ON v.id = p.veiculo_id AND v.ativo = 1 AND v.filial_id = ?
+        AND ${cadastro}
+      ${SQL_LATERAL_ULTIMA_MEDICAO}
+      WHERE p.ativo = 1 AND p.status_pneu = 'montado' AND p.veiculo_id IN (${marcas})
+    `).all(filialId, ...ids);
+    for (const p of pneus) {
+      const aval = avaliarPneuPainel(p, { limites: limitesDoVeiculo(p) });
+      p._menor_sulco = aval.menor_sulco;
+      p._status_sulco = aval.status_sulco;
+    }
+    const map = compactarPneusPorVeiculo(pneus);
+    for (const p of pneus) {
+      const item = (map.get(Number(p.veiculo_id)) || []).find((row) => Number(row.id) === Number(p.id));
+      if (item) item.numero_fogo = p.numero_fogo;
+    }
+    const daFilial = await db.prepare(`
+      SELECT id FROM veiculos
+      WHERE ativo = 1 AND filial_id = ? AND id IN (${marcas})
+    `).all(filialId, ...ids);
+    const permitidos = new Set(daFilial.map((v) => Number(v.id)));
+    res.json({
+      veiculos: ids.filter((id) => permitidos.has(id)).map((id) => ({
+        id,
+        pneus: map.get(id) || [],
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 function statsPorVeiculo(pneus) {
   const acc = new Map();
   for (const p of pneus) {
@@ -94,6 +145,8 @@ router.get('/resumo', async (req, res, next) => {
     const db = getDb();
     const limites = getLimites();
     const filialId = filialScopeId(req);
+    const semPneus = String(req.query.sem_pneus || '') === '1';
+    const somenteIndice = String(req.query.somente_indice || '') === '1';
 
     const [pneus, veiculosRows, filial] = await Promise.all([
       db.prepare(`
@@ -182,8 +235,21 @@ router.get('/resumo', async (req, res, next) => {
     diagnosticosItens.sort((a, b) => (ordemDiag[a.diagnostico] ?? 9) - (ordemDiag[b.diagnostico] ?? 9)
       || (a.menor_sulco ?? 99) - (b.menor_sulco ?? 99));
 
+    if (somenteIndice) {
+      return res.json({
+        indice: pneusFiltrados.map((p) => ({
+          id: p.id,
+          veiculo_id: Number(p.veiculo_id),
+          posicao: p.posicao,
+          numero_fogo: p.numero_fogo,
+          menor_sulco: p._menor_sulco ?? null,
+          status_sulco: p._status_sulco || 'sem_dado',
+        })),
+      });
+    }
+
     const porVeiculo = statsPorVeiculo(pneusFiltrados);
-    const pneusMap = compactarPneusPorVeiculo(pneusFiltrados);
+    const pneusMap = semPneus ? new Map() : compactarPneusPorVeiculo(pneusFiltrados);
     const logsTodos = await logsMedicaoFilial(db, filialId);
     const veiculos = veiculosRows
       .filter((v) => veiculoCombinaTipo(v.tipo, tipoFiltro))
@@ -212,7 +278,7 @@ router.get('/resumo', async (req, res, next) => {
           ultima_medicao: a.ultima_medicao,
           ultima_atualizacao: a.ultima_atualizacao,
           dia_medicao: normalizarDiaMedicao(v.dia_medicao),
-          pneus: cadastroPendente ? [] : (pneusMap.get(Number(v.id)) || []),
+          pneus: cadastroPendente || semPneus ? [] : (pneusMap.get(Number(v.id)) || []),
         };
       });
     const idsFrota = new Set(veiculos.filter((v) => !v.cadastro_pendente).map((v) => Number(v.id)));
@@ -247,6 +313,7 @@ router.get('/resumo', async (req, res, next) => {
       semana,
       veiculos,
       logs_medicao: logsMedicao,
+      pneus_omitidos: semPneus,
     });
   } catch (err) {
     next(err);

@@ -37,6 +37,7 @@ import {
 } from '../csv-utils.js';
 import { registrarMovimentacao, atualizarKmHrVeiculo, travarPneu } from '../services/pneu-movimentacao.js';
 import { calcularCiclos } from '../services/pneu-ciclo.js';
+import { envelopePagina, lerPaginacao } from '../paginacao.js';
 import {
   trocarPorEstoque,
   moverOuTrocarNaFrota,
@@ -546,7 +547,22 @@ router.get('/', async (req, res, next) => {
       params.push(like, like, like, like);
     }
 
-    const rows = await db.prepare(`
+    const mapearPneuLista = (p) => {
+      const temMedicao = p.ult_sulco_ext != null || p.ult_sulco_cent != null
+        || p.ult_sulco_int != null || p.ult_sulco_aux != null || p.ult_medicao;
+      const ultima = temMedicao
+        ? {
+          data_medicao: p.ult_medicao,
+          sulco_externo: p.ult_sulco_ext,
+          sulco_central: p.ult_sulco_cent,
+          sulco_interno: p.ult_sulco_int,
+          sulco_auxiliar: p.ult_sulco_aux,
+          pressao_psi: p.ult_pressao_psi,
+        }
+        : null;
+      return enriquecerPneu(p, ultima);
+    };
+    const sqlLista = `
     SELECT p.*,
       v.placa as veiculo_placa, v.apelido as veiculo_apelido,
       v.tipo as veiculo_tipo, v.layout_pneus,
@@ -569,23 +585,24 @@ router.get('/', async (req, res, next) => {
         ELSE 4
       END,
       p.numero_fogo, p.id DESC
-  `).all(...params);
-
-    res.json(rows.map((p) => {
-      const temMedicao = p.ult_sulco_ext != null || p.ult_sulco_cent != null
-        || p.ult_sulco_int != null || p.ult_sulco_aux != null || p.ult_medicao;
-      const ultima = temMedicao
-        ? {
-          data_medicao: p.ult_medicao,
-          sulco_externo: p.ult_sulco_ext,
-          sulco_central: p.ult_sulco_cent,
-          sulco_interno: p.ult_sulco_int,
-          sulco_auxiliar: p.ult_sulco_aux,
-          pressao_psi: p.ult_pressao_psi,
-        }
-        : null;
-      return enriquecerPneu(p, ultima);
-    }));
+  `;
+    const paginacao = lerPaginacao(req.query, { padrao: 30, maximo: 50 });
+    if (paginacao) {
+      const totalRow = await db.prepare(`
+        SELECT COUNT(*) as c
+        FROM pneus p
+        LEFT JOIN veiculos v ON v.id = p.veiculo_id
+        WHERE ${where}
+      `).get(...params);
+      const rows = await db.prepare(`${sqlLista} LIMIT ? OFFSET ?`).all(
+        ...params,
+        paginacao.limite,
+        paginacao.offset,
+      );
+      return res.json(envelopePagina(rows.map(mapearPneuLista), Number(totalRow?.c || 0), paginacao));
+    }
+    const rows = await db.prepare(sqlLista).all(...params);
+    res.json(rows.map(mapearPneuLista));
   } catch (err) {
     next(err);
   }

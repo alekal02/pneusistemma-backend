@@ -24,6 +24,8 @@ import {
 import { normalizarTipoVeiculo } from '../fix-encoding.js';
 import { normalizarDiaMedicao } from '../dia-medicao.js';
 import { SQL_LATERAL_ULTIMA_MEDICAO } from '../sql-ultima-medicao.js';
+import { envelopePagina, lerPaginacao, veiculoCombinaBusca } from '../paginacao.js';
+import { veiculoCombinaTipo } from '../services/indicadores-frota.js';
 import {
   parseCsv,
   toCsv,
@@ -438,6 +440,39 @@ router.get('/', async (req, res, next) => {
   try {
     const db = getDb();
     const filialId = filialScopeId(req);
+    const paginacao = lerPaginacao(req.query, { padrao: 24, maximo: 50 });
+    let metaPagina = null;
+    if (paginacao) {
+      const leves = await db.prepare(`
+        SELECT id, placa, apelido, tipo, marca, modelo
+        FROM veiculos
+        WHERE ativo = 1 AND filial_id = ?
+        ORDER BY apelido, placa
+      `).all(filialId);
+      const tipos = [...new Set(leves.map((v) => v.tipo).filter(Boolean))];
+      const filtrados = leves.filter((v) => (
+        veiculoCombinaBusca(v, req.query.q)
+        && veiculoCombinaTipo(v.tipo, req.query.tipo)
+      ));
+      const fatia = filtrados.slice(paginacao.offset, paginacao.offset + paginacao.limite);
+      metaPagina = {
+        total: filtrados.length,
+        tipos,
+        ids: fatia.map((v) => Number(v.id)),
+      };
+      if (!metaPagina.ids.length) {
+        return res.json({ ...envelopePagina([], metaPagina.total, paginacao), tipos });
+      }
+    }
+    const filtroIdsPneu = metaPagina
+      ? ` AND p.veiculo_id IN (${metaPagina.ids.map(() => '?').join(',')})`
+      : '';
+    const filtroIdsVeiculo = metaPagina
+      ? ` AND v.id IN (${metaPagina.ids.map(() => '?').join(',')})`
+      : '';
+    const paramsLista = metaPagina
+      ? [...metaPagina.ids, filialId, ...metaPagina.ids]
+      : [filialId];
     const veiculos = await db.prepare(`
     SELECT v.*,
       COALESCE(s.total_pneus, 0) as total_pneus,
@@ -466,14 +501,14 @@ router.get('/', async (req, res, next) => {
         COUNT(*) FILTER (WHERE p.status_pneu = 'montado' AND um.id IS NOT NULL) as pneus_medidos
       FROM pneus p
       ${SQL_LATERAL_ULTIMA_MEDICAO}
-      WHERE p.ativo = 1 AND p.veiculo_id IS NOT NULL
+      WHERE p.ativo = 1 AND p.veiculo_id IS NOT NULL${filtroIdsPneu}
       GROUP BY p.veiculo_id
     ) s ON s.veiculo_id = v.id
-    WHERE v.ativo = 1 AND v.filial_id = ?
+    WHERE v.ativo = 1 AND v.filial_id = ?${filtroIdsVeiculo}
     ORDER BY v.apelido, v.placa
-  `).all(filialId);
+  `).all(...paramsLista);
 
-    const resultado = veiculos.map((v) => {
+    let resultado = veiculos.map((v) => {
       const cadastroPendente = Number(v.cadastro_completo ?? 1) !== 1;
       return {
         ...v,
@@ -489,6 +524,14 @@ router.get('/', async (req, res, next) => {
       };
     });
 
+    if (metaPagina) {
+      const ordem = new Map(metaPagina.ids.map((id, i) => [id, i]));
+      resultado = resultado.sort((a, b) => (ordem.get(Number(a.id)) ?? 0) - (ordem.get(Number(b.id)) ?? 0));
+      return res.json({
+        ...envelopePagina(resultado, metaPagina.total, paginacao),
+        tipos: metaPagina.tipos,
+      });
+    }
     res.json(resultado);
   } catch (err) {
     next(err);
